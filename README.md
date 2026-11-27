@@ -1,4 +1,4 @@
-# Linux for Redmi K Pad
+# Linux for Redmi K Pad (turner)
 
 This repo contains a series of patches for redmi k pad on mainline linux
 
