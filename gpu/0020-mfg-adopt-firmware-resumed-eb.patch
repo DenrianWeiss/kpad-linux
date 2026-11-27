@@ -1,0 +1,46 @@
+Subject: [RFC PATCH] pmdomain: mediatek: retain an already resumed MT6991 GPUEB
+
+The bootloader can leave both MFG0 power acknowledgements asserted and
+the EB running without an active GHPM sequence. Verify idle GHPM, the EB
+resume marker and the live IPI token before taking a GPUFreq client vote.
+Leave the pre-existing EB running when releasing that vote.
+
+--- a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
++++ b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+@@ -275,6 +275,7 @@
+ 	u16 ghpm_en_reg;
+ 	u32 ipi_magic;
+ 	bool shared_ready;
++	bool inherited_eb;
+ 	bool resume_power_held; /* Firmware rejected rollback of a resume vote. */
+ 	unsigned int num_gpu_opps;
+ 	unsigned int num_stack_opps;
+@@ -387,6 +388,18 @@
+ 	 * power-on sequence, as it wouldn't work without powering it off first.
+ 	 */
++	mfg->inherited_eb = false;
+ 	if (mtk_mfg_is_powered_on(mfg)) {
++		if (mfg->eb_gate &&
++		    !readl(mfg->rpc + RPC_GHPM_RO0_CON) &&
++		    readl(mfg->gpr + GPR_LP_STATE) == EB_ON_RESUME &&
++		    readl(mfg->gpr + GPR_IPI_MAGIC)) {
++			/* Firmware owns the running EB across kexec. The GPUFreq
++			 * client still acquires and releases its own GPU power vote.
++			 */
++			mfg->inherited_eb = true;
++			dev_info_once(dev, "adopting firmware-resumed GPUEB\n");
++			return 0;
++		}
+ 		if (mfg->eb_gate)
+ 			goto wait_for_power;
+ 		return 0;
+@@ -447,6 +460,9 @@
+ 	u32 val;
+ 	int ret;
+ 
++	if (mfg->inherited_eb)
++		return 0;
++
+ 	ret = mbox_send_message(mfg->slp_mbox->ch, &msg);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Cannot send sleep command: %pe\n", ERR_PTR(ret));

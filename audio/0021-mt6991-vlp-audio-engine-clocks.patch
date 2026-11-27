@@ -1,0 +1,259 @@
+--- a/drivers/clk/mediatek/clk-mt8196-vlpckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-vlpckgen.c
+@@ -633,6 +633,10 @@
+ };
+ 
+ static const struct mtk_fixed_factor mt6991_vlp_divs[] = {
++	FACTOR(MT6991_CLK_VLP_APLL1_D4, "apll1_d4", "vlp_apll1", 1, 4),
++	FACTOR(MT6991_CLK_VLP_APLL1_D8, "apll1_d8", "vlp_apll1", 1, 8),
++	FACTOR(MT6991_CLK_VLP_APLL2_D4, "apll2_d4", "vlp_apll2", 1, 4),
++	FACTOR(MT6991_CLK_VLP_APLL2_D8, "apll2_d8", "vlp_apll2", 1, 8),
+ 	FACTOR(MT6991_CLK_VLP_CLKSQ, "vlp_clksq", "clk26m", 1, 1),
+ 	FACTOR(MT6991_CLK_VLP_AUD_CLKSQ, "vlp_aud_clksq", "vlp_clksq", 1, 1),
+ };
+@@ -642,7 +646,31 @@
+ 	"clk26m", "vlp_clksq", "mainpll_d7_d4", "mainpll_d4_d4",
+ };
+ 
++static const char * const mt6991_audio_h_parents[] = {
++	"clk26m", "vlp_clksq", "vlp_apll1", "vlp_apll2",
++};
++
++static const char * const mt6991_aud_engen1_parents[] = {
++	"clk26m", "vlp_clksq", "apll1_d8", "apll1_d4",
++};
++
++static const char * const mt6991_aud_engen2_parents[] = {
++	"clk26m", "vlp_clksq", "apll2_d8", "apll2_d4",
++};
++
+ static const struct mtk_mux mt6991_vlp_muxes[] = {
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_VLP_AUDIO_H, "vlp_audio_h",
++		mt6991_audio_h_parents, VLP_CLK_CFG_9, VLP_CLK_CFG_9_SET,
++		VLP_CLK_CFG_9_CLR, 0, 2, 7, VLP_CLK_CFG_UPDATE1,
++		TOP_MUX_AUDIO_H_SHIFT, VLP_OCIC_FENC_STATUS_MON_1, 27),
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_VLP_AUD_ENGEN1, "vlp_aud_engen1",
++		mt6991_aud_engen1_parents, VLP_CLK_CFG_9, VLP_CLK_CFG_9_SET,
++		VLP_CLK_CFG_9_CLR, 8, 2, 15, VLP_CLK_CFG_UPDATE1,
++		TOP_MUX_AUD_ENGEN1_SHIFT, VLP_OCIC_FENC_STATUS_MON_1, 26),
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_VLP_AUD_ENGEN2, "vlp_aud_engen2",
++		mt6991_aud_engen2_parents, VLP_CLK_CFG_9, VLP_CLK_CFG_9_SET,
++		VLP_CLK_CFG_9_CLR, 16, 2, 23, VLP_CLK_CFG_UPDATE1,
++		TOP_MUX_AUD_ENGEN2_SHIFT, VLP_OCIC_FENC_STATUS_MON_1, 25),
+ 	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_VLP_USB_TOP, "vlp_usb", vlp_usb_parents,
+ 		VLP_CLK_CFG_8, VLP_CLK_CFG_8_SET, VLP_CLK_CFG_8_CLR,
+ 		8, 1, 15, VLP_CLK_CFG_UPDATE1, TOP_MUX_USB_TOP_SHIFT,
+@@ -657,11 +685,41 @@
+ 		TOP_MUX_AUD_INTBUS_SHIFT, VLP_OCIC_FENC_STATUS_MON_1, 24),
+ };
+ 
+-static const struct mtk_clk_desc mt6991_vlp_desc = {
+-	.factor_clks = mt6991_vlp_divs,
+-	.num_factor_clks = ARRAY_SIZE(mt6991_vlp_divs),
+-	.mux_clks = mt6991_vlp_muxes,
+-	.num_mux_clks = ARRAY_SIZE(mt6991_vlp_muxes),
++/* MT6991 firmware manages APLL enables. Read the programmed rates. */
++static const struct mtk_pll_data mt6991_vlp_plls[] = {
++	{
++		.id = MT6991_CLK_VLP_APLL1, .name = "vlp_apll1",
++		.pd_reg = VLP_APLL1_CON1, .pd_shift = 24,
++		.pcw_reg = VLP_APLL1_CON2, .pcwbits = 32, .pcwibits = 8,
++		.ops = &mtk_pll_read_only_ops,
++	},
++	{
++		.id = MT6991_CLK_VLP_APLL2, .name = "vlp_apll2",
++		.pd_reg = VLP_APLL2_CON1, .pd_shift = 24,
++		.pcw_reg = VLP_APLL2_CON2, .pcwbits = 32, .pcwibits = 8,
++		.ops = &mtk_pll_read_only_ops,
++	},
++};
++
++struct vlp_clocks {
++	const struct mtk_fixed_factor *divs;
++	unsigned int num_divs;
++	const struct mtk_mux *muxes;
++	unsigned int num_muxes;
++	const struct mtk_pll_data *plls;
++	unsigned int num_plls;
++};
++
++static const struct vlp_clocks mt6991_clocks = {
++	.divs = mt6991_vlp_divs, .num_divs = ARRAY_SIZE(mt6991_vlp_divs),
++	.muxes = mt6991_vlp_muxes, .num_muxes = ARRAY_SIZE(mt6991_vlp_muxes),
++	.plls = mt6991_vlp_plls, .num_plls = ARRAY_SIZE(mt6991_vlp_plls),
++};
++
++static const struct vlp_clocks mt8196_clocks = {
++	.divs = vlp_divs, .num_divs = ARRAY_SIZE(vlp_divs),
++	.muxes = vlp_muxes, .num_muxes = ARRAY_SIZE(vlp_muxes),
++	.plls = vlp_plls, .num_plls = ARRAY_SIZE(vlp_plls),
+ };
+ 
+ /* Firmware uses the full MT6991 VLP clock table. */
+@@ -672,10 +730,23 @@
+ 	if (spec->args_count != 1)
+ 		return ERR_PTR(-EINVAL);
+ 	switch (spec->args[0]) {
++	case 0:
++		return clks->hws[MT6991_CLK_VLP_APLL1];
++	case 1:
++		return clks->hws[MT6991_CLK_VLP_APLL2];
+ 	case 34:
+ 		return clks->hws[MT6991_CLK_VLP_USB_TOP];
+ 	case 35:
+ 		return clks->hws[MT6991_CLK_VLP_USB_XHCI];
++	case 37:
++	case 46:
++		return clks->hws[MT6991_CLK_VLP_AUDIO_H];
++	case 38:
++	case 47:
++		return clks->hws[MT6991_CLK_VLP_AUD_ENGEN1];
++	case 39:
++	case 48:
++		return clks->hws[MT6991_CLK_VLP_AUD_ENGEN2];
+ 	case 40:
+ 		return clks->hws[MT6991_CLK_VLP_AUD_INTBUS];
+ 	case 45:
+@@ -689,64 +760,65 @@
+ 
+ static int clk_mt8196_vlp_probe(struct platform_device *pdev)
+ {
+-	static void __iomem *base;
++	const struct vlp_clocks *clocks = device_get_match_data(&pdev->dev);
++	struct clk_hw *(*get)(struct of_phandle_args *, void *) = of_clk_hw_onecell_get;
+ 	struct clk_hw_onecell_data *clk_data;
+ 	int r;
+ 	struct device_node *node = pdev->dev.of_node;
+ 	struct device *dev = &pdev->dev;
+-	struct regmap *regmap;
++	struct regmap *regmap = NULL;
+ 
+ 	if (of_device_is_compatible(node, "mediatek,mt6991-vlp_cksys"))
+-		return mtk_clk_simple_probe_with_get(pdev, mt6991_fw_vlp_clk);
+-	if (device_get_match_data(dev))
+-		return mtk_clk_simple_probe(pdev);
+-
+-	clk_data = mtk_alloc_clk_data(ARRAY_SIZE(vlp_muxes) +
+-				      ARRAY_SIZE(vlp_plls) +
+-				      ARRAY_SIZE(vlp_divs));
++		get = mt6991_fw_vlp_clk;
++	if (clocks == &mt8196_clocks) {
++		void __iomem *base = devm_platform_ioremap_resource(pdev, 0);
++
++		if (IS_ERR(base))
++			return PTR_ERR(base);
++		regmap = devm_regmap_init_mmio(dev, base, &vlpckgen_regmap_config);
++		if (IS_ERR(regmap))
++			return PTR_ERR(regmap);
++	}
++
++	clk_data = mtk_alloc_clk_data(clocks->num_divs + clocks->num_muxes +
++				      clocks->num_plls);
+ 	if (!clk_data)
+ 		return -ENOMEM;
+ 
+-	base = devm_platform_ioremap_resource(pdev, 0);
+-	if (IS_ERR(base))
+-		return PTR_ERR(base);
+-
+-	regmap = devm_regmap_init_mmio(dev, base, &vlpckgen_regmap_config);
+-	if (IS_ERR(regmap))
+-		return PTR_ERR(regmap);
+-
+-	r = mtk_clk_register_factors(vlp_divs, ARRAY_SIZE(vlp_divs), clk_data);
++	r = mtk_clk_register_factors(clocks->divs, clocks->num_divs, clk_data);
+ 	if (r)
+ 		goto free_clk_data;
+ 
+-	r = mtk_clk_register_muxes(&pdev->dev, vlp_muxes, ARRAY_SIZE(vlp_muxes),
++	r = mtk_clk_register_muxes(&pdev->dev, clocks->muxes, clocks->num_muxes,
+ 				   node, &mt8196_clk_vlp_lock, clk_data);
+ 	if (r)
+ 		goto unregister_factors;
+ 
+-	r = mtk_clk_register_plls(dev, vlp_plls, ARRAY_SIZE(vlp_plls),
++	r = mtk_clk_register_plls(dev, clocks->plls, clocks->num_plls,
+ 				  clk_data);
+ 	if (r)
+ 		goto unregister_muxes;
+ 
+-	r = of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
++	r = of_clk_add_hw_provider(node, get, clk_data);
+ 	if (r)
+ 		goto unregister_plls;
+ 
+ 	platform_set_drvdata(pdev, clk_data);
+ 
+ 	/* Initialize APLL tuner registers */
+-	regmap_write(regmap, VLP_APLL1_TUNER_CON0, VLP_APLL1_TUNER_CON0_VALUE);
+-	regmap_write(regmap, VLP_APLL2_TUNER_CON0, VLP_APLL2_TUNER_CON0_VALUE);
++	if (regmap) {
++		regmap_write(regmap, VLP_APLL1_TUNER_CON0, VLP_APLL1_TUNER_CON0_VALUE);
++		regmap_write(regmap, VLP_APLL2_TUNER_CON0, VLP_APLL2_TUNER_CON0_VALUE);
++	}
+ 
+ 	return r;
+ 
+ unregister_plls:
+-	mtk_clk_unregister_plls(vlp_plls, ARRAY_SIZE(vlp_plls), clk_data);
++	mtk_clk_unregister_plls(clocks->plls, clocks->num_plls, clk_data);
+ unregister_muxes:
+-	mtk_clk_unregister_muxes(vlp_muxes, ARRAY_SIZE(vlp_muxes), clk_data);
++	mtk_clk_unregister_muxes(clocks->muxes, clocks->num_muxes, clk_data);
+ unregister_factors:
+-	mtk_clk_unregister_factors(vlp_divs, ARRAY_SIZE(vlp_divs), clk_data);
++	mtk_clk_unregister_factors(clocks->divs, clocks->num_divs, clk_data);
+ free_clk_data:
+ 	mtk_free_clk_data(clk_data);
+ 
+@@ -755,25 +827,21 @@
+ 
+ static void clk_mt8196_vlp_remove(struct platform_device *pdev)
+ {
++	const struct vlp_clocks *clocks = device_get_match_data(&pdev->dev);
+ 	struct clk_hw_onecell_data *clk_data = platform_get_drvdata(pdev);
+ 	struct device_node *node = pdev->dev.of_node;
+ 
+-	if (device_get_match_data(&pdev->dev)) {
+-		mtk_clk_simple_remove(pdev);
+-		return;
+-	}
+-
+ 	of_clk_del_provider(node);
+-	mtk_clk_unregister_plls(vlp_plls, ARRAY_SIZE(vlp_plls), clk_data);
+-	mtk_clk_unregister_muxes(vlp_muxes, ARRAY_SIZE(vlp_muxes), clk_data);
+-	mtk_clk_unregister_factors(vlp_divs, ARRAY_SIZE(vlp_divs), clk_data);
++	mtk_clk_unregister_plls(clocks->plls, clocks->num_plls, clk_data);
++	mtk_clk_unregister_muxes(clocks->muxes, clocks->num_muxes, clk_data);
++	mtk_clk_unregister_factors(clocks->divs, clocks->num_divs, clk_data);
+ 	mtk_free_clk_data(clk_data);
+ }
+ 
+ static const struct of_device_id of_match_clk_mt8196_vlp_ck[] = {
+-	{ .compatible = "mediatek,mt6991-vlp_cksys", .data = &mt6991_vlp_desc },
+-	{ .compatible = "mediatek,mt6991-vlpckgen", .data = &mt6991_vlp_desc },
+-	{ .compatible = "mediatek,mt8196-vlpckgen" },
++	{ .compatible = "mediatek,mt6991-vlp_cksys", .data = &mt6991_clocks },
++	{ .compatible = "mediatek,mt6991-vlpckgen", .data = &mt6991_clocks },
++	{ .compatible = "mediatek,mt8196-vlpckgen", .data = &mt8196_clocks },
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, of_match_clk_mt8196_vlp_ck);
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -58,6 +58,15 @@
+ #define MT6991_CLK_VLP_CLKSQ                  2
+ #define MT6991_CLK_VLP_AUD_INTBUS             3
+ #define MT6991_CLK_VLP_AUD_CLKSQ              4
++#define MT6991_CLK_VLP_APLL1                  5
++#define MT6991_CLK_VLP_APLL2                  6
++#define MT6991_CLK_VLP_APLL1_D4               7
++#define MT6991_CLK_VLP_APLL1_D8               8
++#define MT6991_CLK_VLP_APLL2_D4               9
++#define MT6991_CLK_VLP_APLL2_D8               10
++#define MT6991_CLK_VLP_AUDIO_H                11
++#define MT6991_CLK_VLP_AUD_ENGEN1             12
++#define MT6991_CLK_VLP_AUD_ENGEN2             13
+ 
+ #define MT6991_CLK_PERI_UART0_BCLK         0
+ #define MT6991_CLK_PERI_SPI6_BCLK          1

@@ -1,0 +1,188 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] pmdomain: mediatek: implement MT6991 GPUFreq bring-up
+
+MT6991 acknowledges the GPR token and initialises GPUFreq memory before
+issuing power-control commands. Honour the firmware power-control flag
+and gate the embedded controller clock only after its power-off ack.
+
+--- a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
++++ b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+@@ -23,6 +23,11 @@
+ #include <linux/pm_opp.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/units.h>
++#include <linux/sizes.h>
++
++#define MT6991_EB_GATE_SET	0x04
++#define MT6991_EB_GATE_CLR	0x08
++#define MT6991_EB_GATE		BIT(23)
+ 
+ #define GPR_LP_STATE		0x0028
+ #define   EB_ON_SUSPEND		0x0
+@@ -262,14 +267,16 @@
+ 	struct clk_hw clk_stack_hw;
+ 	struct regulator_bulk_data *gpu_regs;
+ 	void __iomem *rpc;
++	void __iomem *eb_gate;
+ 	void __iomem *gpr;
+ 	void __iomem *shared_mem;
+ 	phys_addr_t shared_mem_phys;
+-	unsigned int shared_mem_size;
++	resource_size_t shared_mem_size;
+ 	u16 ghpm_en_reg;
+ 	u32 ipi_magic;
+-	unsigned short num_gpu_opps;
+-	unsigned short num_stack_opps;
++	bool shared_ready;
++	unsigned int num_gpu_opps;
++	unsigned int num_stack_opps;
+ 	struct dev_pm_opp_data *gpu_opps;
+ 	struct dev_pm_opp_data *stack_opps;
+ 	struct mtk_mfg_mbox *gf_mbox;
+@@ -346,6 +353,9 @@
+ 	u32 val;
+ 	int ret;
+ 
++	if (mfg->eb_gate)
++		writel(MT6991_EB_GATE, mfg->eb_gate + MT6991_EB_GATE_CLR);
++
+ 	/*
+ 	 * If MFG is already on from e.g. the bootloader, skip doing the
+ 	 * power-on sequence, as it wouldn't work without powering it off first.
+@@ -416,6 +426,9 @@
+ 		dev_err(dev, "Timed out waiting for EB to power off, val=0x%08X\n", val);
+ 		return ret;
+ 	}
++
++	if (mfg->eb_gate)
++		writel(MT6991_EB_GATE, mfg->eb_gate + MT6991_EB_GATE_SET);
+ 
+ 	return 0;
+ }
+@@ -465,7 +478,7 @@
+ 	struct mtk_mfg_ipi_msg msg = {};
+ 	int ret;
+ 
+-	dev_dbg(dev, "clearing GPUEB shared memory, 0x%X bytes\n", mfg->shared_mem_size);
++	dev_dbg(dev, "clearing GPUEB shared memory, %pa bytes\n", &mfg->shared_mem_size);
+ 	memset_io(mfg->shared_mem, 0, mfg->shared_mem_size);
+ 
+ 	msg.cmd = CMD_INIT_SHARED_MEM;
+@@ -481,12 +494,16 @@
+ 		return -EIO;
+ 	}
+ 
++	mfg->shared_ready = true;
+ 	return 0;
+ }
+ 
+ static int mtk_mfg_power_control(struct mtk_mfg *mfg, bool enabled)
+ {
+ 	struct mtk_mfg_ipi_msg msg = {};
++
++	if (mfg->eb_gate && !readl(mfg->shared_mem + GF_REG_PWR_CTL))
++		return 0;
+ 
+ 	msg.cmd = CMD_POWER_CONTROL;
+ 	msg.u.power_state = enabled ? 1 : 0;
+@@ -594,16 +611,19 @@
+ 	"sram",
+ };
+ 
+-static int mtk_mfg_mt8196_init(struct mtk_mfg *mfg)
++static int mtk_mfg_select_ghpm_reg(struct mtk_mfg *mfg)
+ {
+ 	void __iomem *e2_base;
++	int ret;
+ 
+ 	e2_base = devm_platform_ioremap_resource_byname(mfg->pdev, "hw-revision");
+ 	if (IS_ERR(e2_base))
+ 		return dev_err_probe(&mfg->pdev->dev, PTR_ERR(e2_base),
+ 				     "Couldn't get hw-revision register\n");
+ 
+-	clk_prepare_enable(mfg->clk_eb);
++	ret = clk_prepare_enable(mfg->clk_eb);
++	if (ret)
++		return ret;
+ 
+ 	if (readl(e2_base) == MFG_MT8196_E2_ID)
+ 		mfg->ghpm_en_reg = RPC_DUMMY_REG_2;
+@@ -614,6 +634,27 @@
+ 
+ 	return 0;
+ }
++
++static int mtk_mfg_mt6991_init(struct mtk_mfg *mfg)
++{
++	/* Firmware keeps its log buffer immediately after the GPUFreq window. */
++	if (mfg->shared_mem_size != SZ_16K)
++		return dev_err_probe(&mfg->pdev->dev, -EINVAL,
++				     "Expected a 16 KiB GPUFreq region\n");
++
++	mfg->eb_gate = devm_platform_ioremap_resource_byname(mfg->pdev, "eb-gate");
++	if (IS_ERR(mfg->eb_gate))
++		return PTR_ERR(mfg->eb_gate);
++
++	return mtk_mfg_select_ghpm_reg(mfg);
++}
++
++static const struct mtk_mfg_variant mtk_mfg_mt6991_variant = {
++	.clk_names = mtk_mfg_mt8196_clk_names,
++	.num_clks = ARRAY_SIZE(mtk_mfg_mt8196_clk_names),
++	/* GPUFreq firmware controls the GPU and stack supplies. */
++	.init = mtk_mfg_mt6991_init,
++};
+ 
+ static const struct mtk_mfg_variant mtk_mfg_mt8196_variant = {
+ 	.clk_names = mtk_mfg_mt8196_clk_names,
+@@ -621,7 +662,7 @@
+ 	.regulator_names = mtk_mfg_mt8196_regulators,
+ 	.num_regulators = ARRAY_SIZE(mtk_mfg_mt8196_regulators),
+ 	.turbo_below = 7,
+-	.init = mtk_mfg_mt8196_init,
++	.init = mtk_mfg_select_ghpm_reg,
+ };
+ 
+ static void mtk_mfg_mbox_rx_callback(struct mbox_client *cl, void *mssg)
+@@ -720,6 +761,16 @@
+ 		goto err_disable_clks;
+ 
+ 	mfg->ipi_magic = readl(mfg->gpr + GPR_IPI_MAGIC);
++	if (mfg->eb_gate && !mfg->shared_ready) {
++		if (!mfg->ipi_magic) {
++			ret = -EPROTO;
++			goto err_eb_off;
++		}
++		writel(mfg->ipi_magic, mfg->gpr + GPR_IPI_MAGIC);
++		ret = mtk_mfg_init_shared_mem(mfg);
++		if (ret)
++			goto err_eb_off;
++	}
+ 
+ 	ret = mtk_mfg_power_control(mfg, true);
+ 	if (ret)
+@@ -1004,10 +1055,12 @@
+ 		goto err_free_mbox;
+ 	}
+ 
+-	ret = mtk_mfg_init_shared_mem(mfg);
+-	if (ret) {
+-		dev_err_probe(dev, ret, "Couldn't initialize EB shared memory\n");
+-		goto err_power_off;
++	if (!mfg->shared_ready) {
++		ret = mtk_mfg_init_shared_mem(mfg);
++		if (ret) {
++			dev_err_probe(dev, ret, "Couldn't initialize EB shared memory\n");
++			goto err_power_off;
++		}
+ 	}
+ 
+ 	ret = mtk_mfg_read_opp_tables(mfg);
+@@ -1046,6 +1099,7 @@
+ }
+ 
+ static const struct of_device_id mtk_mfg_of_match[] = {
++	{ .compatible = "mediatek,mt6991-gpufreq", .data = &mtk_mfg_mt6991_variant },
+ 	{ .compatible = "mediatek,mt8196-gpufreq", .data = &mtk_mfg_mt8196_variant },
+ 	{}
+ };

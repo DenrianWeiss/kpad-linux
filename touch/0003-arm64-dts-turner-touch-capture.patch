@@ -1,0 +1,53 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] arm64: dts: mediatek: build the Turner touch variant from a native DT overlay
+
+---
+diff --git a/arch/arm64/boot/dts/mediatek/Makefile b/arch/arm64/boot/dts/mediatek/Makefile
+--- a/arch/arm64/boot/dts/mediatek/Makefile
++++ b/arch/arm64/boot/dts/mediatek/Makefile
+@@ -7,6 +7,9 @@
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6797-evb.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6797-x20-dev.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6991-xiaomi-turner.dtb
++DTC_FLAGS_mt6991-turner-nt36536e := -@
++mt6991-xiaomi-turner-touch-dtbs := mt6991-xiaomi-turner.dtb mt6991-turner-nt36536e.dtbo
++dtb-$(CONFIG_ARCH_MEDIATEK) += mt6991-xiaomi-turner-touch.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt7622-rfb1.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt7622-bananapi-bpi-r64.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt7981b-cudy-wr3000-v1.dtb
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991-turner-nt36536e.dtso b/arch/arm64/boot/dts/mediatek/mt6991-turner-nt36536e.dtso
+new file mode 100644
+--- /dev/null
++++ b/arch/arm64/boot/dts/mediatek/mt6991-turner-nt36536e.dtso
+@@ -0,0 +1,31 @@
++// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
++/dts-v1/;
++/plugin/;
++#include <dt-bindings/interrupt-controller/irq.h>
++#include "mt8196-pinfunc.h"
++
++&pio {
++	touch_irq_pins: touch-irq-pins {
++		pins {
++			pinmux = <PINMUX_GPIO7__FUNC_GPIO7>;
++			input-enable;
++			bias-disable;
++		};
++	};
++};
++
++&spi6 {
++	#address-cells = <1>;
++	#size-cells = <0>;
++	touchscreen@0 {
++		compatible = "novatek,nt36536e";
++		reg = <0>;
++		interrupt-parent = <&pio>;
++		interrupts = <7 IRQ_TYPE_EDGE_FALLING>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&touch_irq_pins>;
++		spi-max-frequency = <19200000>;
++		spi-cs-setup-delay-ns = <300>;
++		spi-cs-hold-delay-ns = <300>;
++	};
++};

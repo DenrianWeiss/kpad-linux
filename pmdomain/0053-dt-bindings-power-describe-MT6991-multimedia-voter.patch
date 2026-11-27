@@ -1,0 +1,133 @@
+From 34e4ce2d88cafbbb5be06bd1725c0bf431720b94 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 06:02:47 +0800
+Subject: [PATCH] dt-bindings: power: describe the MT6991 multimedia hardware
+ voter
+
+---
+ .../bindings/mfd/mediatek,mt6991-hwv.yaml     | 39 +++++++++++++------
+ .../power/mediatek,power-controller.yaml      | 20 ++++++++++
+ .../dt-bindings/power/mediatek,mt6991-power.h |  3 ++
+ 3 files changed, 51 insertions(+), 11 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/mfd/mediatek,mt6991-hwv.yaml b/Documentation/devicetree/bindings/mfd/mediatek,mt6991-hwv.yaml
+index 7d1cc3c..4c051b1 100644
+--- a/Documentation/devicetree/bindings/mfd/mediatek,mt6991-hwv.yaml
++++ b/Documentation/devicetree/bindings/mfd/mediatek,mt6991-hwv.yaml
+@@ -16,7 +16,9 @@ properties:
+   compatible:
+     minItems: 2
+     items:
+-      - const: mediatek,mt6991-hwv
++      - enum:
++          - mediatek,mt6991-hwv
++          - mediatek,mt6991-mm-hwv
+       - const: syscon
+       - const: simple-mfd
+ 
+@@ -25,20 +27,35 @@ properties:
+ 
+   power-controller:
+     $ref: /schemas/power/mediatek,power-controller.yaml#
+-    properties:
+-      compatible:
+-        const: mediatek,mt6991-hwv-scp-power-controller
+ 
+ required:
+   - compatible
+   - reg
+ 
+-if:
+-  required:
+-    - power-controller
+-then:
+-  properties:
+-    compatible:
+-      minItems: 3
++allOf:
++  - if:
++      required:
++        - power-controller
++    then:
++      properties:
++        compatible:
++          minItems: 3
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6991-mm-hwv
++    then:
++      properties:
++        power-controller:
++          properties:
++            compatible:
++              const: mediatek,mt6991-hwv-hfrp-power-controller
++    else:
++      properties:
++        power-controller:
++          properties:
++            compatible:
++              const: mediatek,mt6991-hwv-scp-power-controller
+ 
+ additionalProperties: false
+diff --git a/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml b/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
+index 275ca8e..9b49acb 100644
+--- a/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
++++ b/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
+@@ -27,6 +27,7 @@ properties:
+       - mediatek,mt6795-power-controller
+       - mediatek,mt6858-power-controller
+       - mediatek,mt6893-power-controller
++      - mediatek,mt6991-hwv-hfrp-power-controller
+       - mediatek,mt6991-hwv-scp-power-controller
+       - mediatek,mt6991-power-controller
+       - mediatek,mt8167-power-controller
+@@ -52,6 +53,12 @@ properties:
+   '#size-cells':
+     const: 0
+ 
++  power-domains:
++    maxItems: 1
++
++  power-domains-child-ids:
++    maxItems: 1
++
+   access-controllers:
+     description:
+       A number of phandles to external blocks to set and clear the required
+@@ -160,6 +167,19 @@ required:
+   - compatible
+ 
+ allOf:
++  - if:
++      properties:
++        compatible:
++          const: mediatek,mt6991-hwv-hfrp-power-controller
++    then:
++      required:
++        - power-domains
++        - power-domains-child-ids
++    else:
++      properties:
++        power-domains: false
++        power-domains-child-ids: false
++
+   - if:
+       properties:
+         compatible:
+diff --git a/include/dt-bindings/power/mediatek,mt6991-power.h b/include/dt-bindings/power/mediatek,mt6991-power.h
+index f41d445..fedbe5a 100644
+--- a/include/dt-bindings/power/mediatek,mt6991-power.h
++++ b/include/dt-bindings/power/mediatek,mt6991-power.h
+@@ -12,4 +12,7 @@
+ #define MT6991_POWER_DOMAIN_MM_PROC_DORMANT	0
+ #define MT6991_POWER_DOMAIN_SSR			1
+ 
++/* Multimedia hardware voter */
++#define MT6991_POWER_DOMAIN_DSI_PHY0		0
++
+ #endif
+-- 
+2.50.1 (Apple Git-155)
+

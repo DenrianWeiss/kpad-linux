@@ -1,0 +1,84 @@
+Subject: [RFC PATCH] wifi: mt76: submit MT6653 NVRAM UNI frames to the WM queue
+
+Enable the 48-byte running-firmware descriptor for NVRAM writes after
+the PCI ready handshake. These writes do not request a response.
+
+diff --git a/drivers/net/wireless/mediatek/mt76/mt6653_rom.c b/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
+index 6de8b4a..4800b4a 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
+@@ -80,6 +80,20 @@ static bool mt6653_fwdl_has_room(struct mt76_dev *dev, struct mt76_queue *q)
+ 	return READ_ONCE(q->queued) + 2 < q->ndesc;
+ }
+ 
++static u8 mt6653_cmd_seq(struct mt76_dev *dev)
++{
++	u8 seq = ++dev->mcu.msg_seq;
++
++	return seq ? seq : ++dev->mcu.msg_seq;
++}
++
++static void mt6653_cmd_txd(__le32 *txd, unsigned int len)
++{
++	txd[0] = cpu_to_le32(FIELD_PREP(MT_TXD0_PKT_FMT, MT_TX_TYPE_CMD) |
++			     FIELD_PREP(MT_TXD0_TX_BYTES, len));
++	txd[1] = cpu_to_le32(FIELD_PREP(MT_TXD1_HDR_FORMAT, MT_HDR_FORMAT_CMD));
++}
++
+ /* The probe path supplies the WM and FWDL queues before entering ROM mode. */
+ static int mt6653_rom_send(struct mt76_dev *dev, struct sk_buff *skb,
+ 			   int cmd, int *seq)
+@@ -106,21 +120,29 @@ static int mt6653_rom_send(struct mt76_dev *dev, struct sk_buff *skb,
+ 		   cmd == MCU_CMD(FW_START_REQ) ||
+ 		   cmd == MCU_CMD(PATCH_START_REQ) ||
+ 		   cmd == MCU_CMD(PATCH_FINISH_REQ)) {
+-		u8 id = ++dev->mcu.msg_seq;
++		u8 id = mt6653_cmd_seq(dev);
+ 
+-		if (!id)
+-			id = ++dev->mcu.msg_seq;
+ 		if (seq)
+ 			*seq = id;
+ 		txd = skb_push(skb, sizeof(*txd));
+ 		memset(txd, 0, sizeof(*txd));
+-		txd->txd[0] = cpu_to_le32(FIELD_PREP(MT_TXD0_PKT_FMT, MT_TX_TYPE_CMD) |
+-					  FIELD_PREP(MT_TXD0_TX_BYTES, skb->len));
+-		txd->txd[1] = cpu_to_le32(FIELD_PREP(MT_TXD1_HDR_FORMAT, MT_HDR_FORMAT_CMD));
++		mt6653_cmd_txd(txd->txd, skb->len);
+ 		txd->len = cpu_to_le16(skb->len - sizeof(txd->txd));
+ 		txd->cid = FIELD_GET(__MCU_CMD_FIELD_ID, cmd);
+ 		txd->pkt_type = MCU_PKT_ID;
+ 		txd->seq = id;
++	} else if (cmd == MCU_UNI_CMD(NVRAM) && !seq &&
++		   test_bit(MT76_STATE_MCU_RUNNING, &dev->phy.state)) {
++		struct mt76_connac2_mcu_uni_txd *uni;
++
++		uni = skb_push(skb, sizeof(*uni));
++		memset(uni, 0, sizeof(*uni));
++		mt6653_cmd_txd(uni->txd, skb->len);
++		uni->len = cpu_to_le16(skb->len - sizeof(uni->txd));
++		uni->cid = cpu_to_le16(MCU_UNI_CMD_NVRAM);
++		uni->pkt_type = MCU_PKT_ID;
++		uni->seq = mt6653_cmd_seq(dev);
++		uni->option = MCU_CMD_UNI | MCU_CMD_SET;
+ 	} else {
+ 		dev_kfree_skb(skb);
+ 		return -EOPNOTSUPP;
+@@ -212,6 +234,7 @@ int mt6653_pci_boot_ram(struct mt76_dev *dev)
+ 		return -ENODEV;
+ 	pdev = to_pci_dev(dev->dev);
+ 
++	clear_bit(MT76_STATE_MCU_RUNNING, &dev->phy.state);
+ 	ret = mt6653_rom_boot_ram(dev);
+ 	if (ret)
+ 		return ret;
+@@ -225,6 +248,9 @@ int mt6653_pci_boot_ram(struct mt76_dev *dev)
+ 		return pcibios_err_to_errno(err);
+ 	if (status == ~0U)
+ 		return -ENODEV;
++	if (!ret)
++		set_bit(MT76_STATE_MCU_RUNNING, &dev->phy.state);
++
+ 	return ret;
+ }
+ EXPORT_SYMBOL_GPL(mt6653_pci_boot_ram);

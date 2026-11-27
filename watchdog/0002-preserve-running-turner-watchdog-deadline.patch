@@ -1,0 +1,24 @@
+Subject: [PATCH] watchdog: preserve the running MT6991 handoff deadline
+
+--- a/drivers/watchdog/mtk_wdt.c
++++ b/drivers/watchdog/mtk_wdt.c
+@@ -297,7 +297,9 @@
+ 
+ 	if (readl(wdt_base + WDT_MODE) & WDT_MODE_EN) {
+ 		set_bit(WDOG_HW_RUNNING, &wdt_dev->status);
+-		mtk_wdt_set_timeout(wdt_dev, wdt_dev->timeout);
++		/* Preserve the remaining firmware deadline across the MT6991 handoff. */
++		if (!mtk_wdt->keep_running)
++			mtk_wdt_set_timeout(wdt_dev, wdt_dev->timeout);
+ 	}
+ }
+ 
+@@ -485,7 +487,7 @@
+ 	struct mtk_wdt_dev *mtk_wdt = dev_get_drvdata(dev);
+ 
+ 	if (mtk_wdt->keep_running)
+-		return mtk_wdt_ping(&mtk_wdt->wdt_dev);
++		return 0;
+ 	if (watchdog_active(&mtk_wdt->wdt_dev))
+ 		mtk_wdt_stop(&mtk_wdt->wdt_dev);
+ 

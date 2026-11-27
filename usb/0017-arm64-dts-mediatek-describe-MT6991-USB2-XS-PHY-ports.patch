@@ -1,0 +1,54 @@
+From 44843a144c779e4f61997d532b6c2cc4c83a7e37 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:16:19 +0800
+Subject: [PATCH] arm64: dts: mediatek: describe MT6991 USB2 XS-PHY ports
+
+Both ports use the 26 MHz reference clock. Leave their providers disabled until the board has the repeater and controller power sequencing.
+---
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi | 30 ++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index d7eee11..0d48106 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -130,6 +130,36 @@ soc {
+ 		#size-cells = <2>;
+ 		ranges;
+ 
++		xs-phy@16730000 {
++			compatible = "mediatek,mt6991-xsphy", "mediatek,xsphy";
++			#address-cells = <2>;
++			#size-cells = <2>;
++			ranges = <0 0 0 0x16730000 0 0x400>;
++			status = "disabled";
++
++			u2port0: usb-phy@0 {
++				reg = <0 0 0 0x400>;
++				clocks = <&clk26m>;
++				clock-names = "ref";
++				#phy-cells = <1>;
++			};
++		};
++
++		xs-phy@16740000 {
++			compatible = "mediatek,mt6991-xsphy", "mediatek,xsphy";
++			#address-cells = <2>;
++			#size-cells = <2>;
++			ranges = <0 0 0 0x16740000 0 0x400>;
++			status = "disabled";
++
++			u2port1: usb-phy@0 {
++				reg = <0 0 0 0x400>;
++				clocks = <&clk26m>;
++				clock-names = "ref";
++				#phy-cells = <1>;
++			};
++		};
++
+ 		topckgen: clock-controller@10000000 {
+ 			compatible = "mediatek,mt6991-topckgen", "syscon";
+ 			reg = <0 0x10000000 0 0x800>;
+-- 
+2.50.1 (Apple Git-155)
+

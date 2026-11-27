@@ -1,0 +1,163 @@
+--- a/sound/soc/mediatek/Kconfig
++++ b/sound/soc/mediatek/Kconfig
+@@ -393,4 +393,10 @@
+ 	  Select Y if you have such device.
+ 	  If unsure select "N".
+ 
++config SND_SOC_MT6991_TURNER
++	tristate "Xiaomi Turner speakers"
++	depends on ARCH_MEDIATEK && OF
++	help
++	  Connect the MT6991 audio front end to the two Turner speaker codecs.
++
+ endmenu
+--- a/sound/soc/mediatek/Makefile
++++ b/sound/soc/mediatek/Makefile
+@@ -12,3 +12,4 @@
+ obj-$(CONFIG_SND_SOC_MT8365) += mt8365/
+ obj-$(CONFIG_SND_SOC_MT8189) += mt8189/
+ obj-$(CONFIG_SND_SOC_MT8196) += mt8196/
++obj-$(CONFIG_SND_SOC_MT6991_TURNER) += mt6991/
+--- /dev/null
++++ b/sound/soc/mediatek/mt6991/turner.c
+@@ -0,0 +1,135 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Xiaomi Turner speaker playback machine driver. */
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <sound/pcm_params.h>
++#include <sound/soc.h>
++
++struct turner_audio {
++	struct snd_soc_card card;
++	struct snd_soc_dai_link links[2];
++	struct snd_soc_dai_link_component cpus[2];
++	struct snd_soc_dai_link_component platform;
++	struct snd_soc_codec_conf amps[2];
++};
++
++static int turner_be_fixup(struct snd_soc_pcm_runtime *rtd,
++			   struct snd_pcm_hw_params *params)
++{
++	snd_mask_none(hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT));
++	params_set_format(params, SNDRV_PCM_FORMAT_S32_LE);
++	return 0;
++}
++
++static int turner_hw_params(struct snd_pcm_substream *substream,
++			    struct snd_pcm_hw_params *params)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++
++	return snd_soc_dai_set_sysclk(snd_soc_rtd_to_cpu(rtd, 0), 0,
++				      params_rate(params) * 128, SND_SOC_CLOCK_OUT);
++}
++
++static const struct snd_soc_ops turner_i2s_ops = {
++	.hw_params = turner_hw_params,
++};
++
++static void turner_put_afe(void *node)
++{
++	of_node_put(node);
++}
++
++static void turner_put_codecs(void *link)
++{
++	snd_soc_of_put_dai_link_codecs(link);
++}
++
++static int turner_audio_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct snd_soc_dai_link *fe, *be;
++	struct device_node *speakers;
++	struct turner_audio *audio;
++	int i, ret;
++
++	audio = devm_kzalloc(dev, sizeof(*audio), GFP_KERNEL);
++	if (!audio)
++		return -ENOMEM;
++
++	audio->platform.of_node = of_parse_phandle(dev->of_node, "mediatek,platform", 0);
++	if (!audio->platform.of_node)
++		return dev_err_probe(dev, -EINVAL, "missing AFE phandle\n");
++	ret = devm_add_action_or_reset(dev, turner_put_afe, audio->platform.of_node);
++	if (ret)
++		return ret;
++
++	fe = &audio->links[0];
++	be = &audio->links[1];
++	fe->name = "Playback_1";
++	fe->stream_name = "Speaker Playback";
++	fe->dynamic = 1;
++	fe->codecs = &snd_soc_dummy_dlc;
++	fe->num_codecs = 1;
++	audio->cpus[0].dai_name = "DL0";
++
++	be->name = "I2SOUT4";
++	be->no_pcm = 1;
++	be->dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBC_CFC;
++	be->ops = &turner_i2s_ops;
++	be->be_hw_params_fixup = turner_be_fixup;
++	audio->cpus[1].dai_name = "I2SOUT4";
++
++	for (i = 0; i < ARRAY_SIZE(audio->links); i++) {
++		audio->cpus[i].of_node = audio->platform.of_node;
++		audio->links[i].cpus = &audio->cpus[i];
++		audio->links[i].num_cpus = 1;
++		audio->links[i].platforms = &audio->platform;
++		audio->links[i].num_platforms = 1;
++		audio->links[i].playback_only = 1;
++	}
++
++	speakers = of_get_child_by_name(dev->of_node, "mediatek,speaker-codec");
++	if (!speakers)
++		return dev_err_probe(dev, -EINVAL, "missing speaker codec list\n");
++	ret = snd_soc_of_get_dai_link_codecs(dev, speakers, be);
++	of_node_put(speakers);
++	if (ret)
++		return dev_err_probe(dev, ret, "getting speaker DAIs\n");
++	ret = devm_add_action_or_reset(dev, turner_put_codecs, be);
++	if (ret)
++		return ret;
++	if (be->num_codecs != ARRAY_SIZE(audio->amps))
++		return dev_err_probe(dev, -EINVAL, "expected two speaker codecs\n");
++
++	for (i = 0; i < be->num_codecs; i++) {
++		audio->amps[i].dlc.of_node = be->codecs[i].of_node;
++		audio->amps[i].name_prefix = i ? "Amp2" : "Amp1";
++	}
++	audio->card.dev = dev;
++	audio->card.owner = THIS_MODULE;
++	audio->card.name = "Turner Speakers";
++	audio->card.dai_link = audio->links;
++	audio->card.num_links = ARRAY_SIZE(audio->links);
++	audio->card.codec_conf = audio->amps;
++	audio->card.num_configs = ARRAY_SIZE(audio->amps);
++	return devm_snd_soc_register_card(dev, &audio->card);
++}
++
++static const struct of_device_id turner_audio_match[] = {
++	{ .compatible = "xiaomi,turner-sound" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, turner_audio_match);
++
++static struct platform_driver turner_audio_driver = {
++	.probe = turner_audio_probe,
++	.driver = {
++		.name = "turner-sound",
++		.of_match_table = turner_audio_match,
++	},
++};
++module_platform_driver(turner_audio_driver);
++
++MODULE_DESCRIPTION("Xiaomi Turner speaker sound card");
++MODULE_LICENSE("GPL");
+--- /dev/null
++++ b/sound/soc/mediatek/mt6991/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0-only
++obj-$(CONFIG_SND_SOC_MT6991_TURNER) += turner.o

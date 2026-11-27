@@ -1,0 +1,506 @@
+--- a/include/linux/soc/mediatek/mt6991-adsp-ipi.h
++++ b/include/linux/soc/mediatek/mt6991-adsp-ipi.h
+@@ -16,4 +16,7 @@
+ struct mbox_chan;
+ int mt6991_adsp_require_stall(struct mbox_chan *chan, unsigned int id);
+ 
++int mt6991_adsp_clear_pair(struct mbox_chan *a, struct mbox_chan *b);
++int mt6991_adsp_set_running(struct mbox_chan *chan, unsigned int id, bool run);
++
+ #endif
+--- a/drivers/mailbox/mt6991-adsp-mailbox.c
++++ b/drivers/mailbox/mt6991-adsp-mailbox.c
+@@ -14,8 +14,13 @@
+ #define MT6991_ADSP_SPM_WAKEUPSRC(core) (0x5c + 4 * (core))
+ #define MT6991_ADSP_WAKEUP_SPM BIT(0)
+ #define MT6991_SIP_ADSP_CONTROL 0xc200052b
++#define MT6991_ADSP_SYS_CLEAR 3
++#define MT6991_ADSP_CORE_START 4
++#define MT6991_ADSP_CORE_STOP 5
++#define MT6991_ADSP_RELOAD 7
+ #define MT6991_ADSP_SET_CLOCK_MUX 11
+ #define MT6991_ADSP_MAGIC 0xad5bad5b
++#define MT6991_ADSP_DBG_PEND_CNT 0x15c
+ #define MT6991_ADSP_CORE_CONTROL 0x108
+ 
+ struct mt6991_rx {
+@@ -32,6 +37,8 @@
+ 	struct clk *pll;
+ 	struct clk *clk26m;
+ 	bool runtime_clock;
++	bool needs_reload;
++	void __iomem *pending;
+ 	struct mbox_chan chan[2];
+ 	struct mt6991_rx rx[2];
+ };
+@@ -193,6 +200,85 @@
+ }
+ EXPORT_SYMBOL_GPL(mt6991_adsp_require_stall);
+ 
++static int mt6991_adsp_fw_control(struct device *dev, unsigned int op, u32 arg)
++{
++	struct arm_smccc_res res;
++
++	arm_smccc_smc(MT6991_SIP_ADSP_CONTROL, op, arg, 0, 0, 0, 0, 0, &res);
++	if (!res.a0)
++		return 0;
++	dev_err(dev, "ADSP firmware operation %u returned %ld\n", op, (long)res.a0);
++	return -EIO;
++}
++
++int mt6991_adsp_clear_pair(struct mbox_chan *a, struct mbox_chan *b)
++{
++	struct mt6991_adsp_mailbox *mb;
++	struct device *dev;
++	int ret;
++
++	if (!a || !b || a->mbox != b->mbox)
++		return -EINVAL;
++	ret = mt6991_adsp_require_stall(a, 0);
++	if (!ret)
++		ret = mt6991_adsp_require_stall(b, 1);
++	if (ret)
++		return ret;
++	dev = a->mbox->dev;
++	mb = dev_get_drvdata(dev);
++	if (mb->needs_reload && readl(mb->pending))
++		return -EAGAIN;
++	ret = mt6991_adsp_fw_control(dev, MT6991_ADSP_SYS_CLEAR, MT6991_ADSP_MAGIC);
++	if (ret)
++		return ret;
++	if (!mb->needs_reload) {
++		mb->needs_reload = true;
++		return 0;
++	}
++
++	/* The stock recovery sequence switches low then high before replacing
++	 * both firmware images from LK's retained allocation.
++	 */
++	ret = mt6991_adsp_local_mux(dev, false);
++	if (ret)
++		return ret;
++	ret = clk_set_parent(mb->clk, mb->clk26m);
++	if (!ret)
++		ret = clk_set_parent(mb->clk, mb->pll);
++	if (ret) {
++		if (!clk_set_parent(mb->clk, mb->pll))
++			mt6991_adsp_local_mux(dev, true);
++		return ret;
++	}
++	ret = mt6991_adsp_local_mux(dev, true);
++	if (ret)
++		return ret;
++	return mt6991_adsp_fw_control(dev, MT6991_ADSP_RELOAD, MT6991_ADSP_MAGIC);
++}
++EXPORT_SYMBOL_GPL(mt6991_adsp_clear_pair);
++
++int mt6991_adsp_set_running(struct mbox_chan *chan, unsigned int id, bool run)
++{
++	int ret = mt6991_adsp_require_stall(chan, id);
++
++	if (ret && ret != -EBUSY)
++		return ret;
++	if (run && ret)
++		return ret;
++	if (!run && !ret)
++		return 0;
++	ret = mt6991_adsp_fw_control(chan->mbox->dev, run ? MT6991_ADSP_CORE_START : MT6991_ADSP_CORE_STOP, id);
++	if (ret)
++		return ret;
++	ret = mt6991_adsp_require_stall(chan, id);
++	if (!run)
++		return ret;
++	if (ret == -EBUSY)
++		return 0;
++	return ret ?: -EIO;
++}
++EXPORT_SYMBOL_GPL(mt6991_adsp_set_running);
++
+ static struct mbox_chan *mt6991_adsp_xlate(struct mbox_controller *controller,
+ 					  const struct of_phandle_args *spec)
+ {
+@@ -215,12 +301,13 @@
+ 		return -ENOMEM;
+ 
+ 	cfg_res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "cfg");
+-	if (!cfg_res || resource_size(cfg_res) < MT6991_ADSP_CORE_CONTROL + sizeof(u32))
++	if (!cfg_res || resource_size(cfg_res) < MT6991_ADSP_DBG_PEND_CNT + sizeof(u32))
+ 		return dev_err_probe(dev, -EINVAL, "invalid ADSP config window\n");
+ 	cfg = devm_ioremap_resource(dev, cfg_res);
+ 	if (IS_ERR(cfg))
+ 		return PTR_ERR(cfg);
+ 
++	mb->pending = cfg + MT6991_ADSP_DBG_PEND_CNT;
+ 	mb->core_control = cfg + MT6991_ADSP_CORE_CONTROL;
+ 	mb->clk = devm_clk_get(dev, "clk_top_adsp_sel");
+ 	if (IS_ERR(mb->clk))
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -1,8 +1,10 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* MT6991 ADSP core firmware notifications */
++#include <linux/completion.h>
+ #include <linux/io.h>
+ #include <linux/mailbox_client.h>
+ #include <linux/of_address.h>
++#include <linux/of_platform.h>
+ #include <linux/overflow.h>
+ #include <linux/sizes.h>
+ #include <linux/module.h>
+@@ -20,6 +22,13 @@
+ 	u32 id;
+ 	atomic_t ready_count;
+ 	struct mutex records_lock;
++	struct completion ready;
++	struct device *peer;
++	struct mutex boot_lock;
++	unsigned long started;
++	bool pair_powered;
++	bool pair_ready;
++	bool restart_after_sleep;
+ };
+ 
+ static void mt6991_adsp_receive(struct mbox_client *client, void *data)
+@@ -28,8 +37,10 @@
+ 	const struct mt6991_adsp_ipi *msg = data;
+ 
+ 	if (msg->id == MT6991_ADSP_IPI_READY && msg->len >= sizeof(u32) &&
+-	    get_unaligned_le32(msg->payload) == core->id)
++	    get_unaligned_le32(msg->payload) == core->id) {
+ 		atomic_inc(&core->ready_count);
++		complete(&core->ready);
++	}
+ }
+ 
+ static ssize_t ready_count_show(struct device *dev, struct device_attribute *attr, char *buf)
+@@ -144,13 +155,198 @@
+ }
+ static DEVICE_ATTR_WO(prepare_boot_records);
+ 
++struct adsp_range {
++	u64 start;
++	u64 end;
++};
++
++static int mt6991_adsp_range(struct device_node *node, const char *name,
++			     struct adsp_range *range)
++{
++	u64 cells[2];
++
++	if (of_property_count_u64_elems(node, name) != 2 ||
++	    of_property_read_u64_array(node, name, cells, 2) ||
++	    !cells[0] || !cells[1] || check_add_overflow(cells[0], cells[1], &range->end))
++		return -ENODATA;
++	range->start = cells[0];
++	return 0;
++}
++
++static bool mt6991_adsp_mblock(struct device_node *node, const char *suffix)
++{
++	const char *name = kbasename(of_node_full_name(node));
++	size_t prefix = str_has_prefix(name, "mblock-");
++	size_t digits, len;
++
++	if (!prefix)
++		return false;
++	name += prefix;
++	digits = strspn(name, "0123456789");
++	if (!digits)
++		return false;
++	name += digits;
++	len = strlen(suffix);
++	return !strncmp(name, suffix, len) && (!name[len] || name[len] == '@');
++}
++
++/* LK chooses the physical locations on each boot. */
++static int mt6991_adsp_check_handoff(struct device *a, struct device *b)
++{
++	struct device_node *reserved __free(device_node) = of_find_node_by_path("/reserved-memory");
++	struct adsp_range image, pool, wa, wb, shared;
++	struct of_phandle_args spec;
++	bool have_image = false, have_pool = false;
++	int ret;
++
++	if (!reserved || mt6991_adsp_range(a->of_node, "system", &wa) ||
++	    mt6991_adsp_range(b->of_node, "system", &wb))
++		return -ENODATA;
++	ret = of_parse_phandle_with_args(a->of_node, "mboxes", "#mbox-cells", 1, &spec);
++	if (ret)
++		return ret;
++	ret = mt6991_adsp_range(spec.np, "shared_memory", &shared);
++	of_node_put(spec.np);
++	if (ret)
++		return ret;
++	for_each_available_child_of_node_scoped(reserved, node) {
++		bool is_image = mt6991_adsp_mblock(node, "-adsp_image_reserved");
++
++		if (!is_image && !mt6991_adsp_mblock(node, "-adsp_shared_reserved") &&
++		    !of_device_is_compatible(node, "mediatek,reserve-memory-adsp_share"))
++			continue;
++		if (!of_property_present(node, "no-map") || of_property_present(node, "reusable") ||
++		    (is_image ? have_image : have_pool) ||
++		    mt6991_adsp_range(node, "reg", is_image ? &image : &pool))
++			return -ENODATA;
++		if (is_image)
++			have_image = true;
++		else
++			have_pool = true;
++	}
++	if (!have_image || !have_pool || wa.start < image.start || wa.end > wb.start ||
++	    wb.end > image.end || pool.start != shared.start || pool.end != shared.end ||
++	    (pool.start < image.end && image.start < pool.end))
++		return -ENODATA;
++	return 0;
++}
++
++/* boot_lock serializes transitions; keep both RX channels until both cores stop. */
++static int mt6991_adsp_stop_pair(struct device *dev)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	struct mt6991_adsp_core *cores[] = { a, dev_get_drvdata(a->peer) };
++	int i, ret;
++
++	a->pair_ready = false;
++	for (i = 1; i >= 0; i--) {
++		if (!(a->started & BIT(i)))
++			continue;
++		ret = mt6991_adsp_set_running(cores[i]->rx, i, false);
++		if (ret)
++			return ret;
++		a->started &= ~BIT(i);
++	}
++	if (a->pair_powered) {
++		pm_runtime_put_sync(a->peer);
++		pm_runtime_put_sync(dev);
++		a->pair_powered = false;
++	}
++	return 0;
++}
++
++static int mt6991_adsp_start_pair(struct device *dev)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	struct mt6991_adsp_core *cores[] = { a, dev_get_drvdata(a->peer) };
++	int ret, i;
++
++	if (a->pair_ready)
++		return 0;
++	if (a->pair_powered)
++		return -EBUSY;
++	ret = mt6991_adsp_check_handoff(dev, a->peer);
++	if (ret)
++		return ret;
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return ret;
++	ret = pm_runtime_resume_and_get(a->peer);
++	if (ret < 0) {
++		pm_runtime_put_sync(dev);
++		return ret;
++	}
++	a->pair_powered = true;
++	ret = mt6991_adsp_clear_pair(cores[0]->rx, cores[1]->rx);
++	if (ret)
++		goto stop;
++	for (i = 0; i < ARRAY_SIZE(cores); i++) {
++		reinit_completion(&cores[i]->ready);
++		a->started |= BIT(i);
++		ret = mt6991_adsp_set_running(cores[i]->rx, i, true);
++		if (ret)
++			goto stop;
++		if (!wait_for_completion_timeout(&cores[i]->ready, 2 * HZ)) {
++			dev_err(dev, "DSP core %d timed out waiting for READY\n", i);
++			ret = -ETIMEDOUT;
++			goto stop;
++		}
++	}
++	a->pair_ready = true;
++	return 0;
++stop:
++	if (mt6991_adsp_stop_pair(dev))
++		dev_err(dev, "unable to stop DSP pair; retaining power for retry\n");
++	return ret;
++}
++
++static ssize_t firmware_state_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
++
++	guard(mutex)(&core->boot_lock);
++	return sysfs_emit(buf, "%s\n", core->pair_ready ? "running" :
++			  core->pair_powered ? "stop-failed" : "stopped");
++}
++
++static ssize_t firmware_state_store(struct device *dev, struct device_attribute *attr,
++				    const char *buf, size_t count)
++{
++	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
++	int ret;
++
++	guard(mutex)(&core->boot_lock);
++	if (sysfs_streq(buf, "start"))
++		ret = mt6991_adsp_start_pair(dev);
++	else if (sysfs_streq(buf, "stop"))
++		ret = mt6991_adsp_stop_pair(dev);
++	else
++		return -EINVAL;
++	return ret < 0 ? ret : count;
++}
++static DEVICE_ATTR_RW(firmware_state);
++
++static umode_t mt6991_pair_visible(struct kobject *kobj, struct attribute *attr, int index)
++{
++	struct mt6991_adsp_core *core = dev_get_drvdata(kobj_to_dev(kobj));
++
++	if (attr == &dev_attr_firmware_state.attr && !core->peer)
++		return 0;
++	return attr->mode;
++}
++
+ static struct attribute *mt6991_adsp_attrs[] = {
++	&dev_attr_firmware_state.attr,
+ 	&dev_attr_boot_records_match.attr,
+ 	&dev_attr_prepare_boot_records.attr,
+ 	&dev_attr_ready_count.attr,
+ 	NULL,
+ };
+-ATTRIBUTE_GROUPS(mt6991_adsp);
++static const struct attribute_group mt6991_adsp_group = {
++	.attrs = mt6991_adsp_attrs,
++	.is_visible = mt6991_pair_visible,
++};
++__ATTRIBUTE_GROUPS(mt6991_adsp);
+ 
+ static int mt6991_adsp_resume(struct device *dev)
+ {
+@@ -174,12 +370,41 @@
+ 	return 0;
+ }
+ 
++static struct platform_driver mt6991_adsp_core_driver;
++
++static int mt6991_adsp_link_peer(struct device *dev, struct mt6991_adsp_core *core)
++{
++	struct device_node *peer __free(device_node) =
++		of_find_compatible_node(NULL, NULL, "mediatek,mt6991-adsp_core_1");
++	struct platform_device *pdev;
++	int ret = -EPROBE_DEFER;
++
++	if (!peer || !of_device_is_available(peer))
++		return 0;
++	pdev = of_find_device_by_node(peer);
++	if (!pdev)
++		return ret;
++	device_lock(&pdev->dev);
++	if (pdev->dev.driver == &mt6991_adsp_core_driver.driver && device_is_bound(&pdev->dev)) {
++		if (device_link_add(dev, &pdev->dev, DL_FLAG_AUTOREMOVE_CONSUMER)) {
++			core->peer = &pdev->dev;
++			ret = 0;
++		} else {
++			ret = -EINVAL;
++		}
++	}
++	device_unlock(&pdev->dev);
++	put_device(&pdev->dev);
++	return ret;
++}
++
+ static int mt6991_adsp_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct mt6991_adsp_core *core;
+ 	struct resource *res;
+ 	void __iomem *l2;
++	int ret;
+ 
+ 	core = devm_kzalloc(dev, sizeof(*core), GFP_KERNEL);
+ 	if (!core)
+@@ -196,22 +421,66 @@
+ 	core->client.dev = dev;
+ 	core->client.rx_callback = mt6991_adsp_receive;
+ 	mutex_init(&core->records_lock);
++	mutex_init(&core->boot_lock);
++	init_completion(&core->ready);
++	if (!core->id) {
++		ret = mt6991_adsp_link_peer(dev, core);
++		if (ret)
++			return dev_err_probe(dev, ret, "linking second DSP core\n");
++	}
+ 	platform_set_drvdata(pdev, core);
+ 	pm_runtime_enable(dev);
+ 	return 0;
+ }
+ 
++static void mt6991_adsp_shutdown(struct platform_device *pdev)
++{
++	struct mt6991_adsp_core *core = platform_get_drvdata(pdev);
++
++	guard(mutex)(&core->boot_lock);
++	if (core->pair_powered && mt6991_adsp_stop_pair(&pdev->dev))
++		dev_err(&pdev->dev, "firmware stop failed at shutdown\n");
++}
++
+ static void mt6991_adsp_remove(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 
++	mt6991_adsp_shutdown(pdev);
+ 	pm_runtime_disable(dev);
+ 	if (!pm_runtime_status_suspended(dev))
+ 		mt6991_adsp_suspend(dev);
+ 	pm_runtime_set_suspended(dev);
+ }
+ 
++static int mt6991_adsp_system_suspend(struct device *dev)
++{
++	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
++	int ret;
++
++	guard(mutex)(&core->boot_lock);
++	if (!core->pair_powered)
++		return 0;
++	if (!core->pair_ready)
++		return -EBUSY;
++	ret = mt6991_adsp_stop_pair(dev);
++	core->restart_after_sleep = !ret;
++	return ret;
++}
++
++static int mt6991_adsp_system_resume(struct device *dev)
++{
++	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
++
++	guard(mutex)(&core->boot_lock);
++	if (!core->restart_after_sleep)
++		return 0;
++	core->restart_after_sleep = false;
++	return mt6991_adsp_start_pair(dev);
++}
++
+ static const struct dev_pm_ops mt6991_adsp_pm = {
++	SYSTEM_SLEEP_PM_OPS(mt6991_adsp_system_suspend, mt6991_adsp_system_resume)
+ 	RUNTIME_PM_OPS(mt6991_adsp_suspend, mt6991_adsp_resume, NULL)
+ };
+ 
+@@ -225,6 +494,7 @@
+ static struct platform_driver mt6991_adsp_core_driver = {
+ 	.probe = mt6991_adsp_probe,
+ 	.remove = mt6991_adsp_remove,
++	.shutdown = mt6991_adsp_shutdown,
+ 	.driver = {
+ 		.name = "mt6991-adsp-core",
+ 		.of_match_table = mt6991_adsp_core_match,
+--- a/Documentation/ABI/testing/sysfs-platform-mt6991-adsp
++++ b/Documentation/ABI/testing/sysfs-platform-mt6991-adsp
+@@ -13,1 +13,11 @@
+ 		normal on Turner and is not a DSP boot failure indication.
++
++What:		/sys/bus/platform/devices/.../firmware_state
++Date:		November 2026
++Description:
++		On core A, start boots the preloaded Turner firmware after checking
++		both image windows and the reserved shared pool. It waits for A
++		then B to acknowledge READY. Stop halts B then A and releases
++		the power references. Read values are stopped, running or
++		stop-failed. After stop-failed, retry stop. Boot and stop operate
++		on the DSP pair and do not enable speaker playback.

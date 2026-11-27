@@ -1,0 +1,222 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -24,6 +24,7 @@
+ 	atomic_t ready_count;
+ 	struct mutex records_lock;
+ 	struct completion ready;
++	struct completion logger_request;
+ 	struct completion timestamp_reply;
+ 	u64 timestamp;
+ 	bool timestamp_failed;
+@@ -40,6 +41,10 @@
+ 	struct mt6991_adsp_core *core = container_of(client, struct mt6991_adsp_core, client);
+ 	const struct mt6991_adsp_ipi *msg = data;
+ 
++	if (msg->id == 4 && msg->len == sizeof(u32) &&
++	    get_unaligned_le32(msg->payload) == core->id)
++		complete(&core->logger_request);
++
+ 	if (msg->id == MT6991_ADSP_IPI_TEST && msg->len == sizeof(u64)) {
+ 		WRITE_ONCE(core->timestamp, get_unaligned_le64(msg->payload));
+ 		complete(&core->timestamp_reply);
+@@ -65,17 +70,23 @@
+ 	u32 size;
+ };
+ 
+-static int mt6991_adsp_records(struct device_node *sys, struct mt6991_adsp_record *pool,
+-			       struct mt6991_adsp_record *c2c)
+-{
+-	static const char * const properties[] = {
+-		"adsp-rsv-logger-a", "adsp-rsv-dbg-dump-a", "adsp-rsv-ipidma-a",
+-		"adsp-rsv-core-dump-a", "adsp-rsv-logger-b", "adsp-rsv-dbg-dump-b",
+-		"adsp-rsv-ipidma-b", "adsp-rsv-core-dump-b", "adsp-rsv-c2c",
+-		"adsp-rsv-pcie", "adsp-rsv-l2sram", "adsp-rsv-xhci", "adsp-rsv-audio",
+-	};
+-	u64 range[2], offset = 0, last;
+-	u32 l2, cores, size;
++static const char * const adsp_block_names[] = {
++	"adsp-rsv-logger-a", "adsp-rsv-dbg-dump-a", "adsp-rsv-ipidma-a",
++	"adsp-rsv-core-dump-a", "adsp-rsv-logger-b", "adsp-rsv-dbg-dump-b",
++	"adsp-rsv-ipidma-b", "adsp-rsv-core-dump-b", "adsp-rsv-c2c",
++	"adsp-rsv-pcie", "adsp-rsv-l2sram", "adsp-rsv-xhci", "adsp-rsv-audio",
++};
++
++struct mt6991_adsp_block {
++	u64 address;
++	u32 size;
++};
++
++static int mt6991_adsp_layout(struct device_node *sys, u64 *range,
++			      struct mt6991_adsp_block *blocks)
++{
++	u64 offset = 0, last;
++	u32 l2, cores;
+ 	int i;
+ 
+ 	if (of_property_read_u32(sys, "system-l2sram", &l2) || l2 != 1 ||
+@@ -88,24 +99,36 @@
+ 	    check_add_overflow(range[0], range[1] - 1, &last) ||
+ 	    upper_32_bits(range[0]) != upper_32_bits(last))
+ 		return -ERANGE;
+-
+-	pool->address = lower_32_bits(range[0]);
+-	pool->size = range[1];
+-	for (i = 0; i < ARRAY_SIZE(properties); i++) {
+-		size = 0;
+-		if (of_property_present(sys, properties[i]) &&
+-		    of_property_read_u32(sys, properties[i], &size))
++	for (i = 0; i < ARRAY_SIZE(adsp_block_names); i++) {
++		const char *name = adsp_block_names[i];
++		u32 size = 0;
++
++		if (of_property_present(sys, name) &&
++		    (of_property_count_u32_elems(sys, name) != 1 ||
++		     of_property_read_u32(sys, name, &size)))
+ 			return -EINVAL;
+-		if (i == 8) {
+-			if (!size)
+-				return -ENODATA;
+-			c2c->address = lower_32_bits(range[0] + offset);
+-			c2c->size = size;
+-		}
++		blocks[i].address = size ? range[0] + offset : 0;
++		blocks[i].size = size;
+ 		offset += ALIGN((u64)size, SZ_4K);
+ 		if (offset > range[1])
+ 			return -ERANGE;
+ 	}
++	return blocks[8].size ? 0 : -ENODATA;
++}
++
++static int mt6991_adsp_records(struct device_node *sys, struct mt6991_adsp_record *pool,
++			       struct mt6991_adsp_record *c2c)
++{
++	struct mt6991_adsp_block blocks[ARRAY_SIZE(adsp_block_names)];
++	u64 range[2];
++	int ret = mt6991_adsp_layout(sys, range, blocks);
++
++	if (ret)
++		return ret;
++	pool->address = lower_32_bits(range[0]);
++	pool->size = range[1];
++	c2c->address = lower_32_bits(blocks[8].address);
++	c2c->size = blocks[8].size;
+ 	return 0;
+ }
+ 
+@@ -240,6 +263,73 @@
+ 	return 0;
+ }
+ 
++/* The logger firmware consumes four little-endian address/length pairs. */
++static int mt6991_adsp_prepare_loggers(struct device *dev, struct mt6991_adsp_tx *msgs)
++{
++	static const u8 ids[][4] = { { 0, 3, 1, 10 }, { 4, 7, 5, 10 } };
++	struct mt6991_adsp_block blocks[ARRAY_SIZE(adsp_block_names)];
++	struct device_node *sys __free(device_node) = of_parse_phandle(dev->of_node, "mboxes", 0);
++	u64 range[2];
++	int ret, i, j;
++
++	if (!sys)
++		return -ENODEV;
++	/* Use this transfer sequence only on the stock Turner mailbox layout. */
++	if (of_property_match_string(sys, "reg-names", "infracfg_rsv") >= 0 ||
++	    of_property_match_string(sys, "reg-names", "ipic_chn") >= 0)
++		return -EOPNOTSUPP;
++	ret = mt6991_adsp_layout(sys, range, blocks);
++	if (ret)
++		return ret;
++	if (!IS_ALIGNED(range[0], SZ_4K))
++		return -EINVAL;
++	for (i = 0; i < ARRAY_SIZE(ids); i++) {
++		const struct mt6991_adsp_block *log = &blocks[ids[i][0]];
++		void __iomem *mem;
++
++		if (log->size < SZ_64K)
++			return -EINVAL;
++		msgs[i].id = 4;
++		msgs[i].len = 64;
++		for (j = 0; j < ARRAY_SIZE(ids[i]); j++) {
++			const struct mt6991_adsp_block *block = &blocks[ids[i][j]];
++
++			put_unaligned_le64(block->address, msgs[i].payload + 16 * j);
++			put_unaligned_le64(block->size, msgs[i].payload + 16 * j + 8);
++		}
++		/* Both cores are stalled; initialize only their dedicated log rings. */
++		mem = ioremap_wc(log->address, log->size);
++		if (!mem)
++			return -ENOMEM;
++		memset_io(mem, 0, log->size);
++		writel(0x504c5402, mem);
++		writel(0x18, mem + 4);
++		writel(0x80, mem + 12);
++		writel(0x180, mem + 16);
++		writel(log->size - 0x180, mem + 20);
++		wmb();
++		iounmap(mem);
++	}
++	return 0;
++}
++
++static int mt6991_adsp_logger_reply(struct device *dev, struct mt6991_adsp_tx *msg)
++{
++	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
++	struct mbox_client client = { .dev = dev, .tx_block = true, .tx_tout = 200 };
++	struct mbox_chan *tx;
++	int ret;
++
++	if (!wait_for_completion_timeout(&core->logger_request, msecs_to_jiffies(500)))
++		return -ETIMEDOUT;
++	tx = mbox_request_channel(&client, 0);
++	if (IS_ERR(tx))
++		return PTR_ERR(tx);
++	ret = mbox_send_message(tx, msg);
++	mbox_free_channel(tx);
++	return ret < 0 ? ret : 0;
++}
++
+ /* boot_lock serializes transitions; keep both RX channels until both cores stop. */
+ static int mt6991_adsp_stop_pair(struct device *dev)
+ {
+@@ -268,6 +358,7 @@
+ {
+ 	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
+ 	struct mt6991_adsp_core *cores[] = { a, dev_get_drvdata(a->peer) };
++	struct mt6991_adsp_tx logger[2] = {};
+ 	int ret, i;
+ 
+ 	if (a->pair_ready)
+@@ -289,7 +380,11 @@
+ 	ret = mt6991_adsp_clear_pair(cores[0]->rx, cores[1]->rx);
+ 	if (ret)
+ 		goto stop;
++	ret = mt6991_adsp_prepare_loggers(dev, logger);
++	if (ret)
++		goto stop;
+ 	for (i = 0; i < ARRAY_SIZE(cores); i++) {
++		reinit_completion(&cores[i]->logger_request);
+ 		cores[i]->timestamp_failed = false;
+ 		reinit_completion(&cores[i]->ready);
+ 		a->started |= BIT(i);
+@@ -299,6 +394,13 @@
+ 		if (!wait_for_completion_timeout(&cores[i]->ready, 2 * HZ)) {
+ 			dev_err(dev, "DSP core %d timed out waiting for READY\n", i);
+ 			ret = -ETIMEDOUT;
++			goto stop;
++		}
++	}
++	for (i = 0; i < ARRAY_SIZE(cores); i++) {
++		ret = mt6991_adsp_logger_reply(cores[i]->client.dev, &logger[i]);
++		if (ret) {
++			dev_err(dev, "core %d logger handshake failed: %d\n", i, ret);
+ 			goto stop;
+ 		}
+ 	}
+@@ -501,6 +603,7 @@
+ 	mutex_init(&core->boot_lock);
+ 	init_completion(&core->ready);
+ 	init_completion(&core->timestamp_reply);
++	init_completion(&core->logger_request);
+ 	if (!core->id) {
+ 		ret = mt6991_adsp_link_peer(dev, core);
+ 		if (ret)

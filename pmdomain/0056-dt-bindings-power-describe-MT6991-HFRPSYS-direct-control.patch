@@ -1,0 +1,62 @@
+From 435da7ae8941c2bc9a3326d2c1ffde735c687ef7 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 06:05:40 +0800
+Subject: [PATCH] dt-bindings: power: describe MT6991 HFRPSYS direct power
+ control
+
+---
+ .../devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml      | 1 +
+ .../devicetree/bindings/power/mediatek,power-controller.yaml | 5 ++++-
+ include/dt-bindings/power/mediatek,mt6991-power.h            | 3 +++
+ 3 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml b/Documentation/devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml
+index c6bb23e..79a550f 100644
+--- a/Documentation/devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml
++++ b/Documentation/devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml
+@@ -21,6 +21,7 @@ properties:
+       - enum:
+           - mediatek,mt6795-scpsys
+           - mediatek,mt6893-scpsys
++          - mediatek,mt6991-hfrpsys
+           - mediatek,mt6991-scpsys
+           - mediatek,mt8167-scpsys
+           - mediatek,mt8173-scpsys
+diff --git a/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml b/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
+index 9b49acb..9583153 100644
+--- a/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
++++ b/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
+@@ -27,6 +27,7 @@ properties:
+       - mediatek,mt6795-power-controller
+       - mediatek,mt6858-power-controller
+       - mediatek,mt6893-power-controller
++      - mediatek,mt6991-hfrp-power-controller
+       - mediatek,mt6991-hwv-hfrp-power-controller
+       - mediatek,mt6991-hwv-scp-power-controller
+       - mediatek,mt6991-power-controller
+@@ -170,7 +171,9 @@ allOf:
+   - if:
+       properties:
+         compatible:
+-          const: mediatek,mt6991-hwv-hfrp-power-controller
++          enum:
++            - mediatek,mt6991-hfrp-power-controller
++            - mediatek,mt6991-hwv-hfrp-power-controller
+     then:
+       required:
+         - power-domains
+diff --git a/include/dt-bindings/power/mediatek,mt6991-power.h b/include/dt-bindings/power/mediatek,mt6991-power.h
+index fedbe5a..afa3b2b 100644
+--- a/include/dt-bindings/power/mediatek,mt6991-power.h
++++ b/include/dt-bindings/power/mediatek,mt6991-power.h
+@@ -15,4 +15,7 @@
+ /* Multimedia hardware voter */
+ #define MT6991_POWER_DOMAIN_DSI_PHY0		0
+ 
++/* Multimedia direct control */
++#define MT6991_POWER_DOMAIN_DSI_PHY1		0
++
+ #endif
+-- 
+2.50.1 (Apple Git-155)
+

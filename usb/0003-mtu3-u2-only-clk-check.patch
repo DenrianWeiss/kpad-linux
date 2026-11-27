@@ -1,0 +1,22 @@
+Subject: [RFC PATCH] usb: mtu3: require the 480M PLL only on USB3 capable ports
+
+The MT6991 USB1 controller reports itself as a U2-only IP (0x1006). Its
+IPPC never raises SSUSB_SYSPLL_STABLE because the 480M PLL only feeds the
+USB3 MAC, so ssusb_check_clocks() fails and the controller never probes.
+Require the PLL bit only when the U3 MAC reset status is also requested.
+
+--- a/drivers/usb/mtu3/mtu3_plat.c
++++ b/drivers/usb/mtu3/mtu3_plat.c
+@@ -26,8 +26,10 @@
+ 	u32 value, check_val;
+ 	int ret;
+ 
+-	check_val = ex_clks | SSUSB_SYS125_RST_B_STS | SSUSB_SYSPLL_STABLE |
+-			SSUSB_REF_RST_B_STS;
++	check_val = ex_clks | SSUSB_SYS125_RST_B_STS | SSUSB_REF_RST_B_STS;
++	/* The 480M PLL only feeds USB3 capable controllers. */
++	if (ex_clks & SSUSB_U3_MAC_RST_B_STS)
++		check_val |= SSUSB_SYSPLL_STABLE;
+ 
+ 	ret = readl_poll_timeout(ibase + U3D_SSUSB_IP_PW_STS1, value,
+ 			(check_val == (value & check_val)), 100, 20000);

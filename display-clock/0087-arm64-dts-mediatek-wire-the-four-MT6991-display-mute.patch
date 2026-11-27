@@ -1,0 +1,70 @@
+From ae0f94ab668e27bf72d967b8a1126431fbc1b429 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 09:41:09 +0800
+Subject: [PATCH 87/87] arm64: dts: mediatek: wire the four MT6991 display
+ mutex banks
+
+---
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi | 39 ++++++++++++++++++++++++
+ 1 file changed, 39 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index b97e1def..0f83b194 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -534,6 +534,29 @@ power-domain@0 {
+ 			};
+ 		};
+ 
++		mmsys0: syscon@32000000 {
++			compatible = "mediatek,mt6991-mmsys0", "syscon";
++			reg = <0 0x32000000 0 0x1000>;
++			mediatek,hardware-voter = <&mm_hwv>;
++			#clock-cells = <1>;
++			status = "disabled";
++		};
++
++		mutex: mutex@32020000 {
++			compatible = "mediatek,mt6991-disp-mutex";
++			reg = <0 0x32020000 0 0x1000>,
++			      <0 0x32420000 0 0x1000>,
++			      <0 0x32820000 0 0x1000>,
++			      <0 0x32c20000 0 0x1000>;
++			interrupts = <GIC_SPI 451 IRQ_TYPE_LEVEL_HIGH>;
++			power-domains = <&mm_hwv_pd MT6991_POWER_DOMAIN_DIS1_DORMANT>;
++			clocks = <&mmsys0 MT6991_CLK_MM0_MUTEX>,
++				 <&mmsys1 MT6991_CLK_MM1_MUTEX>,
++				 <&ovlsys0 MT6991_CLK_OVL0_MUTEX>,
++				 <&ovlsys1 MT6991_CLK_OVL1_MUTEX>;
++			status = "disabled";
++		};
++
+ 		mmsys1: syscon@32400000 {
+ 			compatible = "mediatek,mt6991-mmsys1", "syscon";
+ 			reg = <0 0x32400000 0 0x1000>;
+@@ -541,6 +564,22 @@ mmsys1: syscon@32400000 {
+ 			#clock-cells = <1>;
+ 			status = "disabled";
+ 		};
++
++		ovlsys0: syscon@32800000 {
++			compatible = "mediatek,mt6991-ovlsys0", "syscon";
++			reg = <0 0x32800000 0 0x1000>;
++			mediatek,hardware-voter = <&mm_hwv>;
++			#clock-cells = <1>;
++			status = "disabled";
++		};
++
++		ovlsys1: syscon@32c00000 {
++			compatible = "mediatek,mt6991-ovlsys1", "syscon";
++			reg = <0 0x32c00000 0 0x1000>;
++			mediatek,hardware-voter = <&mm_hwv>;
++			#clock-cells = <1>;
++			status = "disabled";
++		};
+ 	};
+ 
+ 	timer {
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,76 @@
+--- a/sound/soc/codecs/tfa986x.c
++++ b/sound/soc/codecs/tfa986x.c
+@@ -10,6 +10,7 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/regmap.h>
+ #include <linux/reset.h>
++#include <sound/soc.h>
+ 
+ #define TFA986X_REVISION	0x03
+ #define TFA986X_VERSION		0x06
+@@ -274,9 +275,56 @@
+ 		return ret;
+ 	*revision = ((version & 0xf000) | ((version >> 2) & 0x0300) |
+ 		     (product & 0xff)) + 0x0a00;
++	return 0;
++}
++
++static int tfa986x_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
++{
++	if ((fmt & SND_SOC_DAIFMT_FORMAT_MASK) != SND_SOC_DAIFMT_I2S ||
++	    (fmt & SND_SOC_DAIFMT_INV_MASK) != SND_SOC_DAIFMT_NB_NF ||
++	    (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) != SND_SOC_DAIFMT_CBC_CFC)
++		return -EINVAL;
+ 	return 0;
+ }
++
++static int tfa986x_prepare(struct snd_pcm_substream *s, struct snd_soc_dai *dai)
++{
++	/* Playback needs the calibrated protection path before enabling the output. */
++	return -EOPNOTSUPP;
++}
++
++static const struct snd_soc_dai_ops tfa986x_dai_ops = {
++	.set_fmt = tfa986x_set_fmt,
++	.prepare = tfa986x_prepare,
++};
++
++static struct snd_soc_dai_driver tfa986x_dai = {
++	.name = "tfa986x-aif",
++	.playback = {
++		.stream_name = "Playback",
++		.channels_min = 2,
++		.channels_max = 2,
++		.rates = SNDRV_PCM_RATE_48000,
++		.formats = SNDRV_PCM_FMTBIT_S32_LE,
++	},
++	.ops = &tfa986x_dai_ops,
++};
+ 
++static const struct snd_soc_dapm_widget tfa986x_widgets[] = {
++	SND_SOC_DAPM_OUTPUT("OUT"),
++};
++
++static const struct snd_soc_dapm_route tfa986x_routes[] = {
++	{ "OUT", NULL, "Playback" },
++};
++
++static const struct snd_soc_component_driver tfa986x_component = {
++	.dapm_widgets = tfa986x_widgets,
++	.num_dapm_widgets = ARRAY_SIZE(tfa986x_widgets),
++	.dapm_routes = tfa986x_routes,
++	.num_dapm_routes = ARRAY_SIZE(tfa986x_routes),
++};
++
+ static int tfa986x_probe(struct i2c_client *client)
+ {
+ 	struct device *dev = &client->dev;
+@@ -323,7 +371,7 @@
+ 	dev_info(dev, "TFA986x silicon revision %#06x, stereo fields %u/%u/%u\n", revision,
+ 		 tfa->stereo.device.count, tfa->stereo.enter.count,
+ 		 tfa->stereo.leave.count);
+-	return 0;
++	return devm_snd_soc_register_component(dev, &tfa986x_component, &tfa986x_dai, 1);
+ }
+ 
+ static const struct dev_pm_ops tfa986x_pm_ops = {

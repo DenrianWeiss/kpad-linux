@@ -1,0 +1,319 @@
+Subject: [PATCH] drm: mediatek: turner: latch the fetch address on every flip
+
+The panel kept showing the first frame because the OEM writes the 34-bit
+fetch address as a low word plus four high bits on every flip, and the
+high write is what latches the new address. Also record the OEM DSI
+output-buffer thresholds, the relay tick, and the scanout test pattern.
+
+---
+--- a/drivers/gpu/drm/mediatek/turner/command-host.c
++++ b/drivers/gpu/drm/mediatek/turner/command-host.c
+@@ -28,6 +28,15 @@ static const u16 timing_regs[] = {
+ 
+ #include "kms.h"
+ static bool kms_stop;
++static bool oem_dsi_buffer = true;
++module_param(oem_dsi_buffer, bool, 0644);
++MODULE_PARM_DESC(oem_dsi_buffer, "Program the OEM DSI output-buffer thresholds");
++static bool stock_shape;
++module_param(stock_shape, bool, 0644);
++MODULE_PARM_DESC(stock_shape, "Use the OEM 952-pixel relay width around the 940-pixel fetch");
++static bool oem_relay_1tnp = true;
++module_param(oem_relay_1tnp, bool, 0644);
++MODULE_PARM_DESC(oem_relay_1tnp, "Program the OEM two-pixel relay tick");
+ struct turner_host {
+ 	struct turner_kms *kms;
+ 	bool fetch_unsettled;
+@@ -379,6 +388,7 @@ static void sample_video(struct turner_host *ctx, const struct drm_display_mode
+ 	unsigned int reported = 0, drained = 0, complete = 0;
+ 	unsigned int underruns[2] = {}, last_underrun[2] = {};
+ 	ktime_t deadline = 0;
++	s64 last_status = 0;
+ 	s64 first_us[2] = {}, last_us[2] = {};
+ 	u32 status;
+ 
+@@ -423,6 +433,15 @@ static void sample_video(struct turner_host *ctx, const struct drm_display_mode
+ 		mt6991_dsi_enable_video_fifo(base);
+ 		dev_notice(ctx->host.dev, "DSI%u fifo before=%#x enabled=%#x transfers=%u\n",
+ 			   i, fifo[i][0], readl(base + 0x300), readl(base + 0x310));
++		if (oem_dsi_buffer) {
++			u32 old[3] = { readl(base + 0x300), readl(base + 0x314),
++				       readl(base + 0x33c) };
++
++			mt6991_dsi_video_buffer(base);
++			dev_notice(ctx->host.dev, "DSI%u buffer %#x/%#x/%#x -> %#x/%#x/%#x\n",
++				   i, old[0], old[1], old[2], readl(base + 0x300),
++				   readl(base + 0x314), readl(base + 0x33c));
++		}
+ 		writel(0, base);
+ 		writel((mode[i] & ~3) | 1, base + 0x34);
+ 		writel(clock[i] | BIT(0), base + 0x1d0);
+@@ -472,12 +491,42 @@ static void sample_video(struct turner_host *ctx, const struct drm_display_mode
+ 			k->retiring = -1;
+ 			if (k->pending >= 0) {
+ 				const dma_addr_t *next = k->slot[k->pending].addr;
++
++				/* The OEM writes the 34-bit address as low word plus the
++				 * four high bits on every frame; the high write makes the
++				 * new fetch address take effect.
++				 */
+ 				writel(lower_32_bits(next[0]), path->block[FETCH_L].base+0xf40);
+-				writel(lower_32_bits(next[1]+TURNER_RIGHT_X*sizeof(u32)), path->block[FETCH_R].base+0xf40);
++				writel(GENMASK(3, 0) & upper_32_bits(next[0]),
++				       path->block[FETCH_L].base+0xf4c);
++				writel(lower_32_bits(next[1]+TURNER_RIGHT_X*sizeof(u32)),
++				       path->block[FETCH_R].base+0xf40);
++				writel(GENMASK(3, 0) & upper_32_bits(next[1]),
++				       path->block[FETCH_R].base+0xf4c);
+ 				k->retiring = k->front;
+ 				k->front = k->pending;
+ 				k->pending = -1;
+ 			}
++			/* The probe pattern does not depend on compositor commits. */
++			if (READ_ONCE(pattern) && k->pattern_shown != READ_ONCE(pattern) &&
++			    k->pending < 0 && k->retiring < 0) {
++				int back = 1 - k->front;
++
++				u32 *fill = k->slot[back].cpu;
++
++				turner_pattern(fill, READ_ONCE(pattern));
++				dma_sync_sgtable_for_device(k->right, &k->slot[back].table,
++							    DMA_TO_DEVICE);
++				dev_notice(ctx->host.dev,
++					   "pattern kind=%d slot=%d iova=%#llx mem=%#x/%#x fb=%#x/%#x\n",
++					   READ_ONCE(pattern), back,
++					   (unsigned long long)k->slot[back].addr[0],
++					   fill[0], fill[1504 * 470 + 470],
++					   readl(path->block[FETCH_L].base + 0xf40),
++					   readl(path->block[FETCH_R].base + 0xf40));
++				k->pending = back;
++				k->pattern_shown = READ_ONCE(pattern);
++			}
+ 			mutex_unlock(&k->flip_lock);
+ 			wake_up_all(&k->flip_wait);
+ 			drm_crtc_handle_vblank(&k->crtc);
+@@ -499,6 +548,17 @@ static void sample_video(struct turner_host *ctx, const struct drm_display_mode
+ 			dev_notice(ctx->host.dev, "paired scan frames=%u/%u backlight enabled=%u\n",
+ 				   frame[0], frame[1], panel->enabled);
+ 		}
++		if (ktime_to_ms(ktime_get()) - last_status >= 2000) {
++			struct turner_kms *k = ctx->kms;
++
++			last_status = ktime_to_ms(ktime_get());
++			dev_notice(ctx->host.dev,
++				   "scan status frames=%u/%u seq=%u pending=%d retiring=%d fb=%#x/%#x dsi=%#x/%#x\n",
++				   frame[0], frame[1], READ_ONCE(k->sequence), k->pending,
++				   k->retiring, readl(path->block[FETCH_L].base + 0xf40),
++				   readl(path->block[FETCH_R].base + 0xf40),
++				   readl(ports[0]->regs + 0xc), readl(ports[1]->regs + 0xc));
++		}
+ 		usleep_range(250, 450);
+ 		if (READ_ONCE(kms_stop))
+ 			schedule_work(&ctx->kms->shutdown);
+new file mode 100644
+--- a/drivers/gpu/drm/mediatek/turner/fetch.h
++++ b/drivers/gpu/drm/mediatek/turner/fetch.h
+@@ -35,7 +35,7 @@ static void turner_program_fetch(struct scan_path *path, const dma_addr_t addr[2
+ 		scan_write(fetch, 0x100, BIT(0), BIT(0));
+ 		scan_write(fetch, 0x40, BIT(0), BIT(0));
+ 		scan_write(fetch, 0x20, BIT(0), BIT(0));
+-		scan_write(blend, 0x48, U32_MAX, shape);
++		scan_write(blend, 0x48, U32_MAX, (3008 << 16) | TURNER_BLEND_WIDTH);
+ 		scan_write(blend, 0x50, U32_MAX, 2);
+ 		/* XR24 carries no alpha; select the constant alpha on the blender. */
+ 		scan_write(blend, 0x208, BIT(24), BIT(24));
+--- a/drivers/gpu/drm/mediatek/turner/kms.h
++++ b/drivers/gpu/drm/mediatek/turner/kms.h
+@@ -29,7 +29,7 @@ struct turner_kms {
+ 	struct device *right;
+ 	struct mutex flip_lock;
+ 	wait_queue_head_t flip_wait;
+-	int front, pending, retiring;
++	int front, pending, retiring, pattern_shown;
+ 	bool running, finished;
+ 	struct work_struct shutdown;
+ 	unsigned int hz;
+@@ -38,6 +38,60 @@ struct turner_kms {
+ 
+ #define TURNER_PITCH (1880U * 4)
+ #define TURNER_BYTES (TURNER_PITCH * 3008U)
++
++static int pattern;
++module_param(pattern, int, 0644);
++MODULE_PARM_DESC(pattern, "Fill the scanout slot with a generated test pattern");
++
++/* Generated content for the display probe: 1 is a flat field, 2 adds fine
++ * vertical bars and a diagonal so any horizontal slip is visible.
++ */
++static void turner_pattern(u32 *pixels, int kind)
++{
++	unsigned int x, y;
++
++	/* Banded field: each band is 188 scan lines, so any line range that is
++	 * not refreshed shows up as a wrong band or stale content.
++	 */
++	if (kind >= 3) {
++		static const u32 palette[] = {
++			0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffff00,
++			0xff00ffff, 0xffff00ff, 0xffffffff, 0xff101010,
++		};
++		unsigned int shift = kind == 4 ? 4 : 0;
++
++		for (y = 0; y < 3008; y++) {
++			u32 *row = pixels + y * 470;
++			u32 band = palette[((y / 188) + shift) % 8];
++
++			for (x = 0; x < 1880; x++)
++				row[x] = (y < 8 || y >= 3000 || x < 8 || x >= 1872) ?
++					 0xffffffff : band;
++		}
++		return;
++	}
++
++	for (y = 0; y < 3008; y++) {
++		u32 *row = pixels + y * 470;
++
++		for (x = 0; x < 1880; x++) {
++			u32 value = 0xff808080;
++
++			if (kind > 1) {
++				if (y >= 8 && y < 120)
++					value = (x / 8) & 1 ? 0xffffffff : 0xff000000;
++				else if (y >= 120 && y < 200)
++					value = (x / 32) % 3 == 0 ? 0xffff0000 :
++						(x / 32) % 3 == 1 ? 0xff00ff00 : 0xff0000ff;
++				else if (x / 4 == y / 4)
++					value = 0xffffffff;
++				else if (x < 4 || x >= 1876 || y < 4 || y >= 3004)
++					value = 0xffff00ff;
++			}
++			row[x] = value;
++		}
++	}
++}
+ static inline struct turner_kms *to_kms(struct drm_device *drm)
+ {
+ 	return container_of(drm, struct turner_kms, drm);
+@@ -79,7 +133,15 @@ static void turner_plane_update(struct drm_plane *plane, struct drm_atomic_commi
+ 	}
+ 	back = 1 - kms->front;
+ 	slot = &kms->slot[back];
+-	if (!drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE)) {
++	if (READ_ONCE(pattern)) {
++		turner_pattern(slot->cpu, READ_ONCE(pattern));
++		wmb();
++		if (kms->running)
++			kms->pending = back;
++		else
++			kms->front = back;
++		WRITE_ONCE(kms->sequence, kms->sequence + 1);
++	} else if (!drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE)) {
+ 		dma_sync_sgtable_for_cpu(kms->right, &slot->table, DMA_TO_DEVICE);
+ 		for (y = 0; y < 3008; y++)
+ 			iosys_map_memcpy_from(slot->cpu + y * TURNER_PITCH, &shadow->data[0],
+--- a/drivers/gpu/drm/mediatek/turner/mt6991-dsi-size.h
++++ b/drivers/gpu/drm/mediatek/turner/mt6991-dsi-size.h
+@@ -106,4 +106,23 @@ static inline void mt6991_dsi_enable_video_fifo(void __iomem *regs)
+ 	writel(DIV_ROUND_UP(bytes * height, 16), regs + 0x310);
+ 	writel(readl(regs + 0x300) | BIT(0), regs + 0x300);
+ }
++
++/* Output-buffer thresholds the OEM decoder path runs with at this link rate:
++ * two pixels per relay tick, RGB888 buffer words and a 208 MHz display clock.
++ * Both links use the same table in the active configuration.
++ */
++static inline void mt6991_dsi_video_buffer(void __iomem *regs)
++{
++	static const u32 threshold[][2] = {
++		{ 0x314, 0x5f9 }, { 0x318, 0x201 }, { 0x324, 0x294 }, { 0x328, 0x282 },
++		{ 0x32c, 0x1dc }, { 0x330, 0x1ca }, { 0x334, 0x0dc }, { 0x338, 0x0c9 },
++		{ 0x33c, 0x0b2 },
++	};
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(threshold); i++)
++		writel(threshold[i][1], regs + threshold[i][0]);
++	/* Buffer enable, OEM framing bit and line-counter pre-urgent. */
++	writel(BIT(20) | BIT(2) | BIT(0), regs + 0x300);
++}
+ #endif
+--- a/drivers/gpu/drm/mediatek/turner/scan-path.h
++++ b/drivers/gpu/drm/mediatek/turner/scan-path.h
+@@ -6,6 +6,10 @@
+ #define TURNER_HALF_WIDTH 940U
+ #define TURNER_FETCH_WIDTH TURNER_HALF_WIDTH
+ #define TURNER_RIGHT_X TURNER_HALF_WIDTH
++/* The OEM relay and outproc run 952 pixels wide while the fetch and the DSC
++ * input stay at 940. */
++#define TURNER_PANEL_HALF 952U
++#define TURNER_BLEND_WIDTH (stock_shape ? TURNER_PANEL_HALF : TURNER_FETCH_WIDTH)
+ 
+ enum block_id { FETCH_L, FETCH_R, DSC_L, DSC_R, BLEND_L, BLEND_R, OUT_L, OUT_R, MUT_DIS0, MUT_DIS1, MUT_OVL0, MUT_OVL1, BLOCKS };
+ struct scan_block {
+@@ -28,8 +32,6 @@ static const struct { u8 bank; u16 reg; u32 val; } route[] = {
+ 	/* Feed OUTPROC0 from BLENDER1's local background, with all layers disabled. */
+ 	{ OVL0, 0xe04, BIT(0) }, { OVL0, 0xf10, BIT(0) },
+ 	{ OVL1, 0xe04, BIT(0) }, { OVL1, 0xf10, BIT(0) },
+-	{ OVL0, 0x29c, (3008 << 16) | TURNER_FETCH_WIDTH },
+-	{ OVL1, 0x29c, (3008 << 16) | TURNER_FETCH_WIDTH },
+ 	/* DLI0 / DLI8 -> PQ bypass 6 / 7 -> panel crossbar 1 / 2 -> DLO1 / 2. */
+ 	{ DISP0, 0xdd0, BIT(2) }, { DISP0, 0xe54, BIT(1) }, { DISP0, 0xd84, BIT(1) },
+ 	{ DISP0, 0xdf0, BIT(3) }, { DISP0, 0xe58, BIT(2) }, { DISP0, 0xd88, BIT(2) },
+@@ -134,7 +136,7 @@ static int start_scan_path(struct scan_path *p, struct device *dev)
+ 		"/soc/disp-ovl0-outproc0@32970000", "/soc/disp-ovl1-outproc0@32d70000",
+ 	};
+ 
+-	const u32 shape = (3008 << 16) | TURNER_FETCH_WIDTH;
++	const u32 blend_shape = (3008 << 16) | TURNER_BLEND_WIDTH;
+ 	u32 pps[20] = {};
+ 	int i, j, ret;
+ 
+@@ -182,6 +184,32 @@ static int start_scan_path(struct scan_path *p, struct device *dev)
+ 		if (ret)
+ 			return ret;
+ 	}
++	/* The OEM relay moves two pixels per tick on MT6991 (field value 1) and
++	 * the DSI output buffer fill rate is derived from the same setting.
++	 */
++	if (oem_relay_1tnp) {
++		static const struct { u8 bank; u16 first; u8 count; } relay[] = {
++			{ DISP0, 0x200, 16 }, { DISP0, 0x264, 9 }, { DISP1, 0x200, 13 },
++		};
++		unsigned int g, n;
++
++		for (g = 0; g < ARRAY_SIZE(relay); g++) {
++			u32 first = 0, last = 0;
++
++			for (n = 0; n < relay[g].count; n++) {
++				u32 old, new;
++
++				regmap_read(p->map[relay[g].bank], relay[g].first + n * 4, &old);
++				new = (old & ~GENMASK(31, 30)) | (1U << 30);
++				if (!n)
++					first = old;
++				last = old;
++				regmap_write(p->map[relay[g].bank], relay[g].first + n * 4, new);
++			}
++			dev_notice(dev, "relay bank=%u first=%#x count=%u old=%#x..%#x\n",
++				   relay[g].bank, relay[g].first, relay[g].count, first, last);
++		}
++	}
+ 	turner_dsc_pack_pps(&turner_dsc, pps);
+ 	for (i = 0; i < 2; i++) {
+ 		struct scan_block *d = &p->block[DSC_L+i];
+@@ -200,13 +228,13 @@ static int start_scan_path(struct scan_path *p, struct device *dev)
+ 		struct scan_block *blend = &p->block[BLEND_L+i], *out = &p->block[OUT_L+i];
+ 
+ 		scan_write(blend, 0x28, BIT(2), BIT(2));
+-		scan_write(blend, 0x30, U32_MAX, shape);
++		scan_write(blend, 0x30, U32_MAX, blend_shape);
+ 		scan_write(blend, 0x104, U32_MAX, 0xff000000);
+ 		scan_write(blend, 0x10, BIT(0)|BIT(4)|BIT(5), BIT(4));
+ 		scan_write(blend, 0x40, BIT(0), 0);
+ 		scan_write(blend, 0x20, 0x31, 1);
+ 		scan_write(out, 0x28, BIT(2), BIT(2));
+-		scan_write(out, 0x30, U32_MAX, shape);
++		scan_write(out, 0x30, U32_MAX, blend_shape);
+ 		scan_write(out, 0x20, 0x21, 1);
+ 	}
+ 	for (i = MUT_DIS0; i < BLOCKS; i++) {

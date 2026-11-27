@@ -1,0 +1,70 @@
+From a9c943ac7c154c15e35c8f236c56678b875e7bf2 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 06:11:10 +0800
+Subject: [PATCH] dt-bindings: arm: mediatek: describe MT6991 MMSYS1 clock
+ voter
+
+---
+ .../bindings/arm/mediatek/mediatek,mmsys.yaml   | 17 +++++++++++++++++
+ .../dt-bindings/clock/mediatek,mt6991-clock.h   |  5 +++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml b/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
+index 3f4262e..b86b213 100644
+--- a/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
++++ b/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
+@@ -27,6 +27,7 @@ properties:
+               - mediatek,mt6779-mmsys
+               - mediatek,mt6795-mmsys
+               - mediatek,mt6797-mmsys
++              - mediatek,mt6991-mmsys1
+               - mediatek,mt8167-mmsys
+               - mediatek,mt8173-mmsys
+               - mediatek,mt8183-mmsys
+@@ -76,6 +77,10 @@ properties:
+       for details.
+     $ref: /schemas/types.yaml#/definitions/phandle-array
+ 
++  mediatek,hardware-voter:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: Multimedia hardware voter used by the clock gates.
++
+   mediatek,gce-client-reg:
+     description:
+       The register of client driver can be configured by gce with 4 arguments
+@@ -126,6 +131,18 @@ required:
+   - reg
+   - "#clock-cells"
+ 
++if:
++  properties:
++    compatible:
++      contains:
++        const: mediatek,mt6991-mmsys1
++then:
++  required:
++    - mediatek,hardware-voter
++else:
++  properties:
++    mediatek,hardware-voter: false
++
+ additionalProperties: false
+ 
+ examples:
+diff --git a/include/dt-bindings/clock/mediatek,mt6991-clock.h b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+index 1909ff9..6f4c6d2 100644
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -43,4 +43,9 @@
+ 
+ #define MT6991_CLK_PERI_AP_DMA_X32W_BCLK   2
+ 
++#define MT6991_CLK_MM1_DSI0_ENGINE         0
++#define MT6991_CLK_MM1_DSI1_ENGINE         1
++#define MT6991_CLK_MM1_DSI0_DIGITAL        2
++#define MT6991_CLK_MM1_DSI1_DIGITAL        3
++
+ #endif
+-- 
+2.50.1 (Apple Git-155)
+

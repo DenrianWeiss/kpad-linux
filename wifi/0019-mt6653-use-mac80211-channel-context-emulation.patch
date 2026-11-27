@@ -1,0 +1,12 @@
+Subject: [PATCH] wifi: mt76: mt6653: use mac80211 channel context emulation
+
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_pci.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_pci.c
+@@ -62,4 +62,7 @@
+ 	.stop = mt6653_stop,
+ 	.config = mt6653_config,
++	.add_chanctx = ieee80211_emulate_add_chanctx,
++	.change_chanctx = ieee80211_emulate_change_chanctx,
++	.remove_chanctx = ieee80211_emulate_remove_chanctx,
+ 	.add_interface = mt6653_add_interface,
+ 	.remove_interface = mt6653_remove_interface,

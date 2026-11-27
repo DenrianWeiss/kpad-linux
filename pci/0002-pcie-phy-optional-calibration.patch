@@ -1,0 +1,69 @@
+Subject: [RFC PATCH] phy: mediatek: make the MT6991 PCIe PHY calibration optional
+
+The calibration cell is provided by the vendor "mediatek,devinfo" nvmem node that mainline does not implement, so devm_nvmem_cell_get() kept returning -EPROBE_DEFER and PCIe0 could never enumerate the MT6653 Wi-Fi endpoint. Keep the default lane settings when the cell is unavailable, and fall back to fetching the ref/mcu clocks by index because the vendor tree has no clock-names.
+
+--- a/drivers/phy/mediatek/phy-mt6991-pcie.c
++++ b/drivers/phy/mediatek/phy-mt6991-pcie.c
+@@ -177,6 +177,7 @@
+ 	u32 lanes;
+ 	int ret;
+ 
++	dev_info(dev, "probe start\n");
+ 	if (device_property_read_u32(dev, "num-lanes", &lanes) || lanes != 1)
+ 		return dev_err_probe(dev, -EINVAL, "expected a single PCIe lane\n");
+ 	p = devm_kzalloc(dev, sizeof(*p), GFP_KERNEL);
+@@ -191,8 +192,19 @@
+ 	p->clocks[0].id = "ref";
+ 	p->clocks[1].id = "mcu";
+ 	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(p->clocks), p->clocks);
+-	if (ret)
+-		return dev_err_probe(dev, ret, "cannot get PHY clocks\n");
++	if (ret) {
++		dev_info(dev, "no named PHY clocks (%d), retrying by index\n", ret);
++		{
++			struct clk_bulk_data *all;
++			int n = devm_clk_bulk_get_all(dev, &all);
++
++			if (n < 2)
++				return dev_err_probe(dev, n < 0 ? n : -ENODEV,
++						     "cannot get PHY clocks\n");
++			p->clocks[0] = all[0];
++			p->clocks[1] = all[1];
++		}
++	}
+ 	p->short_reach = device_property_read_bool(dev, "mediatek,short-reach");
+ 	if (device_property_present(dev, "nvmem-cells")) {
+ 		struct nvmem_cell *cell;
+@@ -200,19 +212,26 @@
+ 		u8 *buf;
+ 
+ 		cell = devm_nvmem_cell_get(dev, "calibration");
+-		if (IS_ERR(cell))
+-			return dev_err_probe(dev, PTR_ERR(cell), "cannot get calibration\n");
++		if (IS_ERR(cell)) {
++			dev_warn(dev, "no calibration cell (%ld), using defaults\n",
++				 PTR_ERR(cell));
++			goto trims_done;
++		}
+ 		buf = nvmem_cell_read(cell, &len);
+-		if (IS_ERR(buf))
+-			return PTR_ERR(buf);
++		if (IS_ERR(buf)) {
++			dev_warn(dev, "calibration read failed (%ld), using defaults\n",
++				 PTR_ERR(buf));
++			goto trims_done;
++		}
+ 		if (len == sizeof(p->trim)) {
+ 			p->trim[0] = get_unaligned_le32(buf);
+ 			p->trim[1] = get_unaligned_le32(buf + 4);
+ 		}
+ 		kfree(buf);
+ 		if (len != sizeof(p->trim))
+-			return dev_err_probe(dev, -EINVAL, "invalid calibration length\n");
+-	}
++			dev_warn(dev, "invalid calibration length, using defaults\n");
++	}
++trims_done:
+ 	ret = devm_pm_runtime_enable(dev);
+ 	if (ret)
+ 		return ret;

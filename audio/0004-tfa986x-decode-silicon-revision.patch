@@ -1,0 +1,69 @@
+--- a/sound/soc/codecs/tfa986x.c
++++ b/sound/soc/codecs/tfa986x.c
+@@ -12,6 +12,7 @@
+ #include <linux/reset.h>
+ 
+ #define TFA986X_REVISION	0x03
++#define TFA986X_VERSION		0x06
+ 
+ #define TFA986X_CONTAINER "tfa98xx.cnt"
+ 
+@@ -226,12 +227,32 @@
+ 	}
+ }
+ 
++/* For the 0x9866 product ID the silicon revision is encoded in register 6. */
++static int tfa986x_read_revision(struct tfa986x *tfa, u16 *revision)
++{
++	unsigned int product, version;
++	int ret;
++
++	ret = regmap_read(tfa->regmap, TFA986X_REVISION, &product);
++	if (ret)
++		return ret;
++	if (product != 0x9866)
++		return -ENODEV;
++
++	ret = regmap_read(tfa->regmap, TFA986X_VERSION, &version);
++	if (ret)
++		return ret;
++	*revision = ((version & 0xf000) | ((version >> 2) & 0x0300) |
++		     (product & 0xff)) + 0x0a00;
++	return 0;
++}
++
+ static int tfa986x_probe(struct i2c_client *client)
+ {
+ 	struct device *dev = &client->dev;
+ 	struct tfa986x *tfa;
+ 	const struct firmware *fw;
+-	unsigned int revision;
++	u16 revision;
+ 	int ret, suspend_ret;
+ 
+ 	tfa = devm_kzalloc(dev, sizeof(*tfa), GFP_KERNEL);
+@@ -254,14 +275,12 @@
+ 	ret = pm_runtime_resume_and_get(dev);
+ 	if (ret < 0)
+ 		return ret;
+-	ret = regmap_read(tfa->regmap, TFA986X_REVISION, &revision);
++	ret = tfa986x_read_revision(tfa, &revision);
+ 	suspend_ret = pm_runtime_put_sync_suspend(dev);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "reading amplifier revision\n");
+ 	if (suspend_ret < 0)
+ 		return dev_err_probe(dev, suspend_ret, "suspending amplifier\n");
+-	if (revision != 0x9866)
+-		return dev_err_probe(dev, -ENODEV, "unknown revision %#x\n", revision);
+ 
+ 	ret = request_firmware(&fw, TFA986X_CONTAINER, dev);
+ 	if (ret)
+@@ -271,7 +290,7 @@
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "reading stereo register settings\n");
+ 
+-	dev_info(dev, "revision %#04x, stereo fields %u/%u/%u\n", revision,
++	dev_info(dev, "TFA986x silicon revision %#06x, stereo fields %u/%u/%u\n", revision,
+ 		 tfa->stereo.device.count, tfa->stereo.enter.count,
+ 		 tfa->stereo.leave.count);
+ 	return 0;

@@ -1,0 +1,96 @@
+Subject: [PATCH] drm: mediatek: turner: retire scan buffers after both frame completions
+
+--- a/drivers/gpu/drm/mediatek/turner/command-host.c
++++ b/drivers/gpu/drm/mediatek/turner/command-host.c
+@@ -376,7 +376,8 @@
+ 	struct drm_panel *panel = mipi_dsi_get_drvdata(ctx->panel);
+ 	bool enable_attempted = false;
+ 	u32 fifo[2][3], reset_select[2], reserved[2];
+-	unsigned int reported = 0, drained = 0;
++	unsigned int reported = 0, drained = 0, complete = 0;
++	unsigned int underruns[2] = {}, last_underrun[2] = {};
+ 	ktime_t deadline = 0;
+ 	s64 first_us[2] = {}, last_us[2] = {};
+ 	u32 status;
+@@ -447,37 +448,45 @@
+ 			moving[i] += pos != prev[i];
+ 			prev[i] = pos;
+ 			status = readl(base + 0xc);
++			if (status & (BIT(4) | BIT(12)))
++				writel(status & ~(BIT(4) | BIT(12)), base + 0xc);
++			if (status & BIT(12)) {
++				underruns[i]++;
++				last_underrun[i] = frame[i];
++			}
+ 			if (status & BIT(4)) {
+-				writel(status & ~BIT(4), base + 0xc);
++				complete |= BIT(i);
+ 				frame[i]++;
+ 				if (deadline)
+ 					drained |= BIT(i);
+-				if (!i) {
+-					struct turner_kms *k = ctx->kms;
+-					mutex_lock(&k->flip_lock);
+-					k->retiring = -1;
+-					if (k->pending >= 0) {
+-						const dma_addr_t *next = k->slot[k->pending].addr;
+-						writel(lower_32_bits(next[0]), path->block[FETCH_L].base+0xf40);
+-						writel(lower_32_bits(next[1]+3760), path->block[FETCH_R].base+0xf40);
+-						k->retiring = k->front;
+-						k->front = k->pending;
+-						k->pending = -1;
+-					}
+-					mutex_unlock(&k->flip_lock);
+-					wake_up_all(&k->flip_wait);
+-					drm_crtc_handle_vblank(&k->crtc);
+-					if (reported != READ_ONCE(ctx->kms->sequence) && frame[i] % (reported < 4 ? 8 : 256) == 0) {
+-						reported = READ_ONCE(ctx->kms->sequence);
+-						dev_notice(ctx->host.dev, "KMS frame %u rate=%d pixels=%06x/%06x\n",
+-							   reported, drm_mode_vrefresh(profile),
+-							   (readl(path->block[FETCH_L].base+0x24c)>>4)&0xffffff,
+-							   (readl(path->block[FETCH_R].base+0x24c)>>4)&0xffffff);
+-					}
+-				}
++
+ 				last_us[i] = ktime_to_us(ktime_get());
+ 				if (frame[i] == 1)
+ 					first_us[i] = last_us[i];
++			}
++		}
++		if (complete == 3) {
++			struct turner_kms *k = ctx->kms;
++			complete = 0;
++			mutex_lock(&k->flip_lock);
++			k->retiring = -1;
++			if (k->pending >= 0) {
++				const dma_addr_t *next = k->slot[k->pending].addr;
++				writel(lower_32_bits(next[0]), path->block[FETCH_L].base+0xf40);
++				writel(lower_32_bits(next[1]+3760), path->block[FETCH_R].base+0xf40);
++				k->retiring = k->front;
++				k->front = k->pending;
++				k->pending = -1;
++			}
++			mutex_unlock(&k->flip_lock);
++			wake_up_all(&k->flip_wait);
++			drm_crtc_handle_vblank(&k->crtc);
++			if (reported != READ_ONCE(ctx->kms->sequence) && frame[0] % (reported < 4 ? 8 : 256) == 0) {
++				reported = READ_ONCE(ctx->kms->sequence);
++				dev_notice(ctx->host.dev, "KMS frame %u rate=%d pixels=%06x/%06x\n",
++					   reported, drm_mode_vrefresh(profile),
++					   (readl(path->block[FETCH_L].base+0x24c)>>4)&0xffffff,
++					   (readl(path->block[FETCH_R].base+0x24c)>>4)&0xffffff);
+ 			}
+ 		}
+ 		if (!enable_attempted && frame[0] >= 2 && frame[1] >= 2 &&
+@@ -512,9 +521,9 @@
+ 
+ 		dev_notice(ctx->host.dev, "video result port=%u frames=%u irq=%#x vstate=%#x lines=%#x\n",
+ 			   i, frame[i], readl(base + 0xc), readl(base + 0x278), readl(base + 0x280));
+-		dev_notice(ctx->host.dev, "scan rate=%d port=%u frames=%u elapsed_us=%lld dsc_irq=%#x underrun=%u max_y=%u\n",
++		dev_notice(ctx->host.dev, "scan rate=%d port=%u frames=%u elapsed_us=%lld dsc_irq=%#x underruns=%u last_underrun_frame=%u max_y=%u\n",
+ 			   drm_mode_vrefresh(profile), i, frame[i], last_us[i] - first_us[i],
+-			   readl(path->block[DSC_L+i].base + 8), !!(readl(base + 0xc) & BIT(12)), max_y[i]);
++			   readl(path->block[DSC_L+i].base + 8), underruns[i], last_underrun[i], max_y[i]);
+ 		writel(mode[i], base + 0x34);
+ 	}
+ 	for (i = 0; i < ARRAY_SIZE(ports); i++)

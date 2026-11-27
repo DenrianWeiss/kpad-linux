@@ -1,0 +1,85 @@
+Subject: [RFC PATCH] wifi: mt76: give MT6653 the mandatory mac80211 callbacks
+
+ieee80211_alloc_hw() refuses to allocate a hardware description while tx,
+start, stop, config, add_interface, remove_interface, configure_filter or
+wake_tx_queue are missing, so mt76_alloc_device() returned NULL and the
+PCI probe never reached the ROM boot. Provide no-op callbacks that drop
+frames until the data path exists.
+
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_pci.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_pci.c
+@@ -7,6 +7,65 @@
+ #include "mt76.h"
+ #include "dma.h"
+ #include "mt6653.h"
++
++/* mac80211 refuses to allocate a hardware description unless the mandatory
++ * callbacks exist, so keep a minimal set of no-ops until the data path lands.
++ * Nothing is transmitted yet: frames are dropped as soon as they are handed
++ * to the driver.
++ */
++static void
++mt6653_tx(struct ieee80211_hw *hw, struct ieee80211_tx_control *control,
++	  struct sk_buff *skb)
++{
++	ieee80211_free_txskb(hw, skb);
++}
++
++static int mt6653_start(struct ieee80211_hw *hw)
++{
++	return 0;
++}
++
++static void mt6653_stop(struct ieee80211_hw *hw, bool suspend)
++{
++}
++
++static int mt6653_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
++{
++	return 0;
++}
++
++static int mt6653_add_interface(struct ieee80211_hw *hw,
++				struct ieee80211_vif *vif)
++{
++	return 0;
++}
++
++static void mt6653_remove_interface(struct ieee80211_hw *hw,
++				    struct ieee80211_vif *vif)
++{
++}
++
++static void
++mt6653_configure_filter(struct ieee80211_hw *hw, unsigned int changed_flags,
++			unsigned int *total_flags, u64 multicast)
++{
++}
++
++static void mt6653_wake_tx_queue(struct ieee80211_hw *hw,
++				 struct ieee80211_txq *txq)
++{
++}
++
++static const struct ieee80211_ops mt6653_ops = {
++	.tx = mt6653_tx,
++	.start = mt6653_start,
++	.stop = mt6653_stop,
++	.config = mt6653_config,
++	.add_interface = mt6653_add_interface,
++	.remove_interface = mt6653_remove_interface,
++	.configure_filter = mt6653_configure_filter,
++	.wake_tx_queue = mt6653_wake_tx_queue,
++};
+ 
+ static const struct pci_device_id mt6653_pci_device_table[] = {
+ 	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, MT6653_PCI_DEVICE_ID) },
+@@ -24,8 +83,6 @@
+ static int mt6653_pci_probe(struct pci_dev *pdev,
+ 			    const struct pci_device_id *id)
+ {
+-	/* Empty ops until the mac80211 registration milestone. */
+-	static struct ieee80211_ops mt6653_ops;
+ 	static const struct mt76_driver_ops drv_ops;
+ 	struct mt6653_dev *dev;
+ 	struct mt76_dev *mdev;

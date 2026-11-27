@@ -1,0 +1,72 @@
+From da1e9e3cef225b695a8208cb9d9b90de0a68d044 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 09:36:21 +0800
+Subject: [PATCH 83/84] pmdomain: mediatek: support the MT6991 display core and
+ DIS1 voters
+
+---
+ drivers/pmdomain/mediatek/mt6991-pm-domains.h | 22 +++++++++++++++++++
+ drivers/pmdomain/mediatek/mtk-pm-domains.c    | 13 +++++++++--
+ 2 files changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/pmdomain/mediatek/mt6991-pm-domains.h b/drivers/pmdomain/mediatek/mt6991-pm-domains.h
+index bb894816..96bd9b20 100644
+--- a/drivers/pmdomain/mediatek/mt6991-pm-domains.h
++++ b/drivers/pmdomain/mediatek/mt6991-pm-domains.h
+@@ -114,6 +114,28 @@ static const struct scpsys_hwv_domain_data mt6991_mm_voters[] = {
+ 		.setclr_bit = 7,
+ 		.sleepable = true,
+ 	},
++	[MT6991_POWER_DOMAIN_DISP_VCORE] = {
++		.name = "disp-vcore",
++		.set = 0x218,
++		.clr = 0x21c,
++		.done = 0x141c,
++		.en = 0x1410,
++		.set_sta = 0x146c,
++		.clr_sta = 0x1470,
++		.setclr_bit = 24,
++		.sleepable = true,
++	},
++	[MT6991_POWER_DOMAIN_DIS1_DORMANT] = {
++		.name = "dis1-dormant",
++		.set = 0x218,
++		.clr = 0x21c,
++		.done = 0x141c,
++		.en = 0x1410,
++		.set_sta = 0x146c,
++		.clr_sta = 0x1470,
++		.setclr_bit = 26,
++		.sleepable = true,
++	},
+ };
+ 
+ static const struct scpsys_soc_data mt6991_mm_hwv_data = {
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.c b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+index 828bc049..7cccb4dc 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.c
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+@@ -1520,9 +1520,18 @@ static int scpsys_probe(struct platform_device *pdev)
+ 
+ 	/* Keep the parent on while initializing domains and installing their links. */
+ 	if (external_parent) {
+-		if (of_count_phandle_with_args(np, "power-domains", "#power-domain-cells") != 1 ||
+-		    of_property_count_u32_elems(np, "power-domains-child-ids") != 1)
++		int count = of_count_phandle_with_args(np, "power-domains", "#power-domain-cells");
++
++		if (count <= 0 || of_property_count_u32_elems(np, "power-domains-child-ids") != count)
+ 			return -EINVAL;
++		/* Single-domain platform devices are attached before probe. */
++		if (count > 1) {
++			struct dev_pm_domain_list *parents;
++
++			ret = devm_pm_domain_attach_list(dev, NULL, &parents);
++			if (ret < 0)
++				return dev_err_probe(dev, ret, "failed to attach parent domains\n");
++		}
+ 		ret = devm_pm_runtime_enable(dev);
+ 		if (ret)
+ 			return ret;
+-- 
+2.50.1 (Apple Git-155)
+

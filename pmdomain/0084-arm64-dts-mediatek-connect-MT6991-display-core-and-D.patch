@@ -1,0 +1,48 @@
+From b6c0a649821464cf9d5df2db10843dc19f8b371b Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 09:36:21 +0800
+Subject: [PATCH 84/84] arm64: dts: mediatek: connect MT6991 display core and
+ DIS1 domains
+
+---
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index 8eae2a2e..b97e1def 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -489,14 +489,28 @@ mm_hwv_pd: power-controller {
+ 				#address-cells = <1>;
+ 				#size-cells = <0>;
+ 				#power-domain-cells = <1>;
+-				power-domains = <&spm_hwv MT6991_POWER_DOMAIN_MM_PROC_DORMANT>;
+-				power-domains-child-ids = <MT6991_POWER_DOMAIN_DSI_PHY0>;
++				power-domains = <&spm_hwv MT6991_POWER_DOMAIN_MM_PROC_DORMANT>,
++						<&spm_hwv MT6991_POWER_DOMAIN_MM_PROC_DORMANT>;
++				power-domains-child-ids = <MT6991_POWER_DOMAIN_DSI_PHY0>,
++							 <MT6991_POWER_DOMAIN_DISP_VCORE>;
+ 				status = "disabled";
+ 
+ 				power-domain@0 {
+ 					reg = <MT6991_POWER_DOMAIN_DSI_PHY0>;
+ 					#power-domain-cells = <0>;
+ 				};
++
++				power-domain@1 {
++					reg = <MT6991_POWER_DOMAIN_DISP_VCORE>;
++					#address-cells = <1>;
++					#size-cells = <0>;
++					#power-domain-cells = <1>;
++
++					power-domain@2 {
++						reg = <MT6991_POWER_DOMAIN_DIS1_DORMANT>;
++						#power-domain-cells = <0>;
++					};
++				};
+ 			};
+ 		};
+ 
+-- 
+2.50.1 (Apple Git-155)
+

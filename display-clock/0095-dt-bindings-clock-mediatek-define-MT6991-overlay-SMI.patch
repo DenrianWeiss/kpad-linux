@@ -1,0 +1,35 @@
+From 2b7706980f835a5848050ecb86bd5f0df9d527e9 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 10:17:56 +0800
+Subject: [PATCH 95/96] dt-bindings: clock: mediatek: define MT6991 overlay SMI
+ clocks
+
+Expose the SMI bus gate in each overlay clock controller so the display local arbiters can request their APB clock.
+
+Signed-off-by: Turner Linux Port <turner@localhost>
+---
+ include/dt-bindings/clock/mediatek,mt6991-clock.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/include/dt-bindings/clock/mediatek,mt6991-clock.h b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+index 27437fa90..2ff235138 100644
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -76,6 +76,7 @@
+ #define MT6991_CLK_OVL0_EXDMA7             8
+ #define MT6991_CLK_OVL0_EXDMA8             9
+ #define MT6991_CLK_OVL0_EXDMA9             10
++#define MT6991_CLK_OVL0_SMI                11
+ #define MT6991_CLK_OVL1_MUTEX              0
+ #define MT6991_CLK_OVL1_EXDMA0             1
+ #define MT6991_CLK_OVL1_EXDMA1             2
+@@ -87,5 +88,6 @@
+ #define MT6991_CLK_OVL1_EXDMA7             8
+ #define MT6991_CLK_OVL1_EXDMA8             9
+ #define MT6991_CLK_OVL1_EXDMA9             10
++#define MT6991_CLK_OVL1_SMI                11
+ 
+ #endif
+-- 
+2.50.1 (Apple Git-155)
+

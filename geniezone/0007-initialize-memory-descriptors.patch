@@ -1,0 +1,27 @@
+Subject: [PATCH] virt: geniezone: initialize the memory range descriptors
+
+The initial request declares a slot without constituents. Initialize its
+count and all reserved fields before handing the descriptor to firmware.
+
+--- a/drivers/virt/geniezone/gzvm_vm.c
++++ b/drivers/virt/geniezone/gzvm_vm.c
+@@ -69,7 +69,7 @@
+ 	u32 buf_size = PAGE_SIZE * 2;
+ 	u64 gfn;
+ 
+-	region = alloc_pages_exact(buf_size, GFP_KERNEL);
++	region = alloc_pages_exact(buf_size, GFP_KERNEL | __GFP_ZERO);
+ 	if (!region)
+ 		return -ENOMEM;
+ 
+--- a/arch/arm64/geniezone/vm.c
++++ b/arch/arm64/geniezone/vm.c
+@@ -364,7 +364,7 @@
+ 	u32 buf_size;
+ 
+ 	buf_size = PAGE_SIZE * 2;
+-	region = alloc_pages_exact(buf_size, GFP_KERNEL);
++	region = alloc_pages_exact(buf_size, GFP_KERNEL | __GFP_ZERO);
+ 	if (!region)
+ 		return -ENOMEM;
+ 

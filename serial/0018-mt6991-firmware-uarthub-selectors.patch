@@ -1,0 +1,49 @@
+--- a/drivers/clk/mediatek/clk-mt8196-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+@@ -990,6 +990,13 @@
+ };
+ 
+ static const struct mtk_mux mt6991_muxes[] = {
++	MUX_CLR_SET_UPD(MT6991_CLK_TOP_ADSP_UARTHUB_B, "adsp_uarthub_b",
++		adsp_uarthub_b_parents, CLK_CFG_13, CLK_CFG_13_SET, CLK_CFG_13_CLR,
++		24, 2, CLK_CFG_UPDATE1, TOP_MUX_ADSP_UARTHUB_B_SHIFT),
++	MUX_GATE_HWV_FENC_CLR_SET_UPD(MT6991_CLK_TOP_UARTHUB_BCLK, "uarthub_b",
++		uarthub_b_parents, CLK_CFG_16, CLK_CFG_16_SET, CLK_CFG_16_CLR,
++		HWV_CG_7_DONE, HWV_CG_7_SET, HWV_CG_7_CLR, 24, 2, 31,
++		CLK_CFG_UPDATE2, TOP_MUX_UARTHUB_BCLK_SHIFT, CLK_FENC_STATUS_MON_2, 28),
+ 	MUX_CLR_SET_UPD(MT6991_CLK_TOP_MFG_EB, "mfg_eb", mfg_eb_parents,
+ 			CLK_CFG_6, CLK_CFG_6_SET, CLK_CFG_6_CLR, 16, 2,
+ 			CLK_CFG_UPDATE, TOP_MUX_MFG_EB_SHIFT),
+@@ -1104,6 +1111,21 @@
+ 	case 39:
+ 	case 174:
+ 		return clks->hws[MT6991_CLK_TOP_I2C_WEST];
++	case 46:
++		return clks->hws[MT6991_CLK_TOP_ADSP_UARTHUB_B];
++	case 56:
++		return clks->hws[MT6991_CLK_TOP_UARTHUB_BCLK];
++	case 120:
++		return clks->hws[MT6991_CLK_TOP_UNIVPLL_D6_D4];
++	case 140: {
++		struct clk_hw *mux = clks->hws[MT6991_CLK_TOP_UART];
++		struct clk_hw *parent;
++
++		if (IS_ERR_OR_NULL(mux))
++			return ERR_PTR(-EPROBE_DEFER);
++		parent = clk_hw_get_parent_by_index(mux, 0);
++		return parent ? parent : ERR_PTR(-EPROBE_DEFER);
++	}
+ 	case 51:
+ 	case 182:
+ 		return clks->hws[MT6991_CLK_TOP_TL];
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -46,6 +46,8 @@
+ #define MT6991_CLK_TOP_I2C_WEST              35
+ #define MT6991_CLK_TOP_I2C_EAST              36
+ #define MT6991_CLK_TOP_MFG_EB                37
++#define MT6991_CLK_TOP_ADSP_UARTHUB_B        38
++#define MT6991_CLK_TOP_UARTHUB_BCLK          39
+ 
+ #define MT6991_CLK_VLP_USB_TOP                0
+ #define MT6991_CLK_VLP_USB_XHCI               1

@@ -1,0 +1,37 @@
+From ab4a5301b3ce52376dfba3870a6b03b5dd09c612 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:29:47 +0800
+Subject: [PATCH 21/22] clk: mediatek: add the MT6991 peripheral I2C mux and
+ parents
+
+---
+ drivers/clk/mediatek/clk-mt8196-topckgen.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-topckgen.c b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+index 3e9a198..088d86a 100644
+--- a/drivers/clk/mediatek/clk-mt8196-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+@@ -958,6 +958,8 @@ static const struct mtk_composite top_aud_divs[] = {
+ };
+ 
+ static const struct mtk_fixed_factor mt6991_divs[] = {
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D4_D8, "mainpll_d4_d8", "mainpll", 1, 32),
++	FACTOR(MT6991_CLK_TOP_UNIVPLL_D5_D2, "univpll_d5_d2", "univpll", 1, 10),
+ 	FACTOR(MT6991_CLK_TOP_MAINPLL_D4_D4, "mainpll_d4_d4", "mainpll", 1, 16),
+ 	FACTOR(MT6991_CLK_TOP_MAINPLL_D6_D2, "mainpll_d6_d2", "mainpll", 1, 12),
+ 	FACTOR(MT6991_CLK_TOP_UNIVPLL_D4_D4, "univpll_d4_d4", "univpll", 1, 16),
+@@ -969,6 +971,10 @@ static const struct mtk_fixed_factor mt6991_divs[] = {
+ };
+ 
+ static const struct mtk_mux mt6991_muxes[] = {
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_I2C_P, "i2c_p", i2c_parents,
++		CLK_CFG_11, CLK_CFG_11_SET, CLK_CFG_11_CLR,
++		0, 3, 7, CLK_CFG_UPDATE1, TOP_MUX_I2C_PERI_SHIFT,
++		CLK_FENC_STATUS_MON_1, 19),
+ 	MUX_GATE_HWV_FENC_CLR_SET_UPD(MT6991_CLK_TOP_UART, "uart", uart_parents,
+ 		CLK_CFG_6, CLK_CFG_6_SET, CLK_CFG_6_CLR,
+ 		HWV_CG_3_DONE, HWV_CG_3_SET, HWV_CG_3_CLR,
+-- 
+2.50.1 (Apple Git-155)
+

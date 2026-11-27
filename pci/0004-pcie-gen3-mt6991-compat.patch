@@ -1,0 +1,56 @@
+Subject: [RFC PATCH] PCI: mediatek-gen3: bring up the vendor MT6991 PCIe0 host
+
+The vendor device tree names the host "mediatek,mt6991-pcie" and numbers the
+PEXTP clocks with vendor IDs, so the shared Gen3 driver neither matches the
+node nor resolves its clock list. Accept the MT6991 compatible with the
+mt8196 description and fall back to the clocks that actually resolve when
+the bulk lookup fails.
+
+--- a/drivers/pci/controller/pcie-mediatek-gen3.c
++++ b/drivers/pci/controller/pcie-mediatek-gen3.c
+@@ -960,8 +960,35 @@
+ 		return dev_err_probe(dev, PTR_ERR(pcie->phy), "failed to get PHY\n");
+ 
+ 	pcie->num_clks = devm_clk_bulk_get_all(dev, &pcie->clks);
+-	if (pcie->num_clks < 0)
+-		return dev_err_probe(dev, pcie->num_clks, "failed to get clocks\n");
++	if (pcie->num_clks < 0) {
++		/*
++		 * The vendor device tree numbers the PEXTP clocks with the
++		 * vendor IDs, so the bulk lookup aborts on the first ID the
++		 * mainline provider does not expose. Keep the ones that do
++		 * resolve and let link training report what is missing.
++		 */
++		struct clk_bulk_data *clks;
++		int i, n = 0;
++
++		clks = devm_kcalloc(dev, 8, sizeof(*clks), GFP_KERNEL);
++		if (!clks)
++			return -ENOMEM;
++		for (i = 0; i < 8; i++) {
++			struct clk *c = of_clk_get(dev->of_node, i);
++
++			if (IS_ERR(c)) {
++				if (PTR_ERR(c) == -EPROBE_DEFER)
++					return -EPROBE_DEFER;
++				continue;
++			}
++			clks[n++].clk = c;
++		}
++		pcie->clks = clks;
++		pcie->num_clks = n;
++		dev_warn(dev, "using %d resolvable clocks\n", n);
++		if (!n)
++			return dev_err_probe(dev, -ENODEV, "failed to get clocks\n");
++	}
+ 
+ 	ret = of_property_read_u32(dev->of_node, "num-lanes", &num_lanes);
+ 	if (ret == 0) {
+@@ -1433,6 +1460,7 @@
+ static const struct of_device_id mtk_pcie_of_match[] = {
+ 	{ .compatible = "airoha,en7581-pcie", .data = &mtk_pcie_soc_en7581 },
+ 	{ .compatible = "mediatek,mt8192-pcie", .data = &mtk_pcie_soc_mt8192 },
++	{ .compatible = "mediatek,mt6991-pcie", .data = &mtk_pcie_soc_mt8196 },
+ 	{ .compatible = "mediatek,mt8196-pcie", .data = &mtk_pcie_soc_mt8196 },
+ 	{},
+ };

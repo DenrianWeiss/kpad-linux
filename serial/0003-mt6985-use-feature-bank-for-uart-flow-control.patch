@@ -1,0 +1,102 @@
+--- a/drivers/tty/serial/8250/8250_mtk.c
++++ b/drivers/tty/serial/8250/8250_mtk.c
+@@ -57,6 +57,11 @@
+ #define MTK_UART_TX_TRIGGER	1
+ #define MTK_UART_RX_TRIGGER	MTK_UART_RX_SIZE
+ 
++#define MTK_UART_FEATURE_SEL    0x27
++#define MTK_UART_HUB_XON2       0x29
++#define MTK_UART_HUB_XOFF2      0x2b
++#define MTK_UART_HUB_INB_WORD   0x30
++
+ #define MTK_UART_XON1		40	/* I/O: Xon character 1 */
+ #define MTK_UART_XOFF1		42	/* I/O: Xoff character 1 */
+ 
+@@ -246,26 +251,27 @@
+ static void mtk8250_set_flow_ctrl(struct uart_8250_port *up, int mode)
+ {
+ 	struct uart_port *port = &up->port;
+-	int lcr = serial_in(up, UART_LCR);
+-	u8 escape = of_device_is_compatible(port->dev->of_node, "mediatek,mt6985-uart") ?
+-		    0xdb : MTK_UART_ESCAPE_CHAR;
++	bool hub = of_device_is_compatible(port->dev->of_node, "mediatek,mt6985-uart");
++	int bank = hub ? MTK_UART_FEATURE_SEL : UART_LCR;
++	int enter = hub ? 1 : UART_LCR_CONF_MODE_B;
++	int leave = hub ? 0 : serial_in(up, UART_LCR);
++	u8 escape = hub ? 0xdb : MTK_UART_ESCAPE_CHAR;
+ 
+ 	/* Port locked to synchronize UART_IER access against the console. */
+ 	lockdep_assert_held_once(&port->lock);
+ 
+-	serial_out(up, UART_LCR, UART_LCR_CONF_MODE_B);
++	serial_out(up, bank, enter);
+ 	serial_out(up, MTK_UART_EFR, UART_EFR_ECB);
+-	serial_out(up, UART_LCR, lcr);
+-	lcr = serial_in(up, UART_LCR);
++	serial_out(up, bank, leave);
+ 
+ 	switch (mode) {
+ 	case MTK_UART_FC_NONE:
+ 		serial_out(up, MTK_UART_ESCAPE_DAT, escape);
+ 		serial_out(up, MTK_UART_ESCAPE_EN, 0x00);
+-		serial_out(up, UART_LCR, UART_LCR_CONF_MODE_B);
++		serial_out(up, bank, enter);
+ 		serial_out(up, MTK_UART_EFR, serial_in(up, MTK_UART_EFR) &
+ 			(~(MTK_UART_EFR_HW_FC | MTK_UART_EFR_SW_FC_MASK)));
+-		serial_out(up, UART_LCR, lcr);
++		serial_out(up, bank, leave);
+ 		mtk8250_disable_intrs(up, MTK_UART_IER_XOFFI |
+ 			MTK_UART_IER_RTSI | MTK_UART_IER_CTSI);
+ 		break;
+@@ -274,14 +280,14 @@
+ 		serial_out(up, MTK_UART_ESCAPE_DAT, escape);
+ 		serial_out(up, MTK_UART_ESCAPE_EN, 0x00);
+ 		serial_out(up, UART_MCR, UART_MCR_RTS);
+-		serial_out(up, UART_LCR, UART_LCR_CONF_MODE_B);
++		serial_out(up, bank, enter);
+ 
+ 		/*enable hw flow control*/
+ 		serial_out(up, MTK_UART_EFR, MTK_UART_EFR_HW_FC |
+ 			(serial_in(up, MTK_UART_EFR) &
+ 			(~(MTK_UART_EFR_HW_FC | MTK_UART_EFR_SW_FC_MASK))));
+ 
+-		serial_out(up, UART_LCR, lcr);
++		serial_out(up, bank, leave);
+ 		mtk8250_disable_intrs(up, MTK_UART_IER_XOFFI);
+ 		mtk8250_enable_intrs(up, MTK_UART_IER_CTSI | MTK_UART_IER_RTSI);
+ 		break;
+@@ -289,7 +295,7 @@
+ 	case MTK_UART_FC_SW:	/*MTK software flow control */
+ 		serial_out(up, MTK_UART_ESCAPE_DAT, escape);
+ 		serial_out(up, MTK_UART_ESCAPE_EN, 0x01);
+-		serial_out(up, UART_LCR, UART_LCR_CONF_MODE_B);
++		serial_out(up, bank, enter);
+ 
+ 		/*enable sw flow control */
+ 		serial_out(up, MTK_UART_EFR, MTK_UART_EFR_XON1_XOFF1 |
+@@ -298,9 +304,15 @@
+ 
+ 		serial_out(up, MTK_UART_XON1, START_CHAR(port->state->port.tty));
+ 		serial_out(up, MTK_UART_XOFF1, STOP_CHAR(port->state->port.tty));
+-		serial_out(up, UART_LCR, lcr);
++		if (hub) {
++			serial_out(up, MTK_UART_HUB_XON2, START_CHAR(port->state->port.tty));
++			serial_out(up, MTK_UART_HUB_XOFF2, STOP_CHAR(port->state->port.tty));
++			serial_out(up, MTK_UART_HUB_INB_WORD, STOP_CHAR(port->state->port.tty));
++		}
++		serial_out(up, bank, leave);
+ 		mtk8250_disable_intrs(up, MTK_UART_IER_CTSI|MTK_UART_IER_RTSI);
+-		mtk8250_enable_intrs(up, MTK_UART_IER_XOFFI);
++		if (!hub)
++			mtk8250_enable_intrs(up, MTK_UART_IER_XOFFI);
+ 		break;
+ 	default:
+ 		break;
+@@ -523,7 +535,6 @@
+ /* MT6985-compatible ports expose separate divisor registers in feature mode. */
+ #define MTK_UART_DIVISOR_LOW    0x24
+ #define MTK_UART_DIVISOR_HIGH   0x25
+-#define MTK_UART_FEATURE_SEL    0x27
+ 
+ static u32 mtk8250_hub_dl_read(struct uart_8250_port *up)
+ {

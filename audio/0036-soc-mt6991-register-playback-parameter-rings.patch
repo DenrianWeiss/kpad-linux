@@ -1,0 +1,146 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -36,6 +36,8 @@
+ 	bool restart_after_sleep;
+ 	bool restore_playback;
+ 	void __iomem *playback_buffers;
++	void __iomem *ipi_pool;
++	int ipi_pool_result;
+ 	int playback_error;
+ 	struct completion pcm_reply;
+ 	u16 pending_command;
+@@ -47,7 +49,7 @@
+ {
+ 	return command && msg->id == 9 && msg->len == 16 &&
+ 		get_unaligned_le16(msg->payload) == 0x8888 &&
+-		msg->payload[2] == 32 && msg->payload[3] == 0x21 &&
++		msg->payload[2] == (command == 0xadd1 ? 38 : 32) && msg->payload[3] == 0x21 &&
+ 		msg->payload[4] == 0 && msg->payload[5] == 2 &&
+ 		get_unaligned_le16(msg->payload + 6) == command;
+ }
+@@ -365,6 +367,10 @@
+ 			return ret;
+ 		a->started &= ~BIT(i);
+ 	}
++	if (a->ipi_pool) {
++		iounmap(a->ipi_pool);
++		a->ipi_pool = NULL;
++	}
+ 	if (a->playback_buffers) {
+ 		iounmap(a->playback_buffers);
+ 		a->playback_buffers = NULL;
+@@ -555,6 +561,96 @@
+ 	return ret;
+ }
+ 
++/* Firmware ABI: the scene table occupies the first 0x8480 bytes of block 2. */
++static int mt6991_adsp_register_ipi_pool(struct device *dev)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	struct device_node *sys __free(device_node) = of_parse_phandle(dev->of_node, "mboxes", 0);
++	struct mt6991_adsp_block blocks[ARRAY_SIZE(adsp_block_names)];
++	const struct mt6991_adsp_block *pool = &blocks[2];
++	struct mbox_client client = { .dev = dev, .tx_block = true, .tx_tout = 200 };
++	struct mt6991_adsp_tx msg = { .id = ADSP_AUDIO_IPI, .len = 32 };
++	unsigned int scene_offset = 0x300 * ADSP_AUDIO_PLAYBACK;
++	unsigned int data_offset = ALIGN(0x8484, 128);
++	struct mbox_chan *tx;
++	void __iomem *mem;
++	u64 range[2];
++	int ret;
++
++	if (!a->pair_ready)
++		return -EHOSTDOWN;
++	if (!sys)
++		return -ENODEV;
++	if (a->ipi_pool)
++		return a->ipi_pool_result;
++	ret = mt6991_adsp_layout(sys, range, blocks);
++	if (ret)
++		return ret;
++	if (!pool->address || !IS_ALIGNED(pool->address, SZ_4K) ||
++	    pool->size != SZ_1M)
++		return -ERANGE;
++	tx = mbox_request_channel(&client, 0);
++	if (IS_ERR(tx))
++		return PTR_ERR(tx);
++	mem = ioremap_wc(pool->address, pool->size);
++	if (!mem) {
++		mbox_free_channel(tx);
++		return -ENOMEM;
++	}
++	a->ipi_pool = mem;
++	memset_io(mem, 0, pool->size);
++	writeq(pool->address, mem);
++	writeq((unsigned long)mem, mem + 8);
++	writel(pool->size, mem + 0x10);
++	writel(0x8480, mem + 0x8480);
++	writel(data_offset, mem + 0x8484);
++	/* The sole registered scene takes the first two free extents. */
++	writel(data_offset, mem + scene_offset + 0x80);
++	writel(SZ_32K, mem + scene_offset + 0x84);
++	writel(data_offset + SZ_32K, mem + scene_offset + 0x200);
++	writel(SZ_64K, mem + scene_offset + 0x204);
++	wmb();
++
++	put_unaligned_le16(0x8888, msg.payload);
++	msg.payload[2] = 38;
++	msg.payload[3] = 0x21;
++	msg.payload[4] = 1;
++	msg.payload[5] = 3;
++	put_unaligned_le16(0xadd0, msg.payload + 6);
++	put_unaligned_le32(16, msg.payload + 8);
++	put_unaligned_le64(pool->address, msg.payload + 16);
++	put_unaligned_le64(pool->size, msg.payload + 24);
++	ret = mbox_send_message(tx, &msg);
++	if (ret >= 0) {
++		msg.len = 16;
++		msg.payload[4] = 0;
++		msg.payload[5] = 1;
++		put_unaligned_le16(0xadd1, msg.payload + 6);
++		put_unaligned_le32(ADSP_AUDIO_PLAYBACK, msg.payload + 8);
++		reinit_completion(&a->pcm_reply);
++		WRITE_ONCE(a->pending_command, 0xadd1);
++		ret = mbox_send_message(tx, &msg);
++		if (ret >= 0)
++			ret = wait_for_completion_timeout(&a->pcm_reply, msecs_to_jiffies(500)) ?
++				0 : -ETIMEDOUT;
++		WRITE_ONCE(a->pending_command, 0);
++	}
++	mbox_free_channel(tx);
++	/* A timed-out command can still arrive. Only stop_pair releases the pool. */
++	a->ipi_pool_result = ret;
++	return ret;
++}
++
++static int mt6991_adsp_open_playback_task(struct device *dev)
++{
++	int ret;
++
++	ret = mt6991_adsp_register_ipi_pool(dev);
++	if (ret)
++		return ret;
++	return mt6991_adsp_pcm_command(dev, 1);
++}
++
+ int mt6991_adsp_pcm_open(struct device *dev)
+ {
+ 	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
+@@ -575,7 +671,7 @@
+ 		return ret;
+ 	ret = mt6991_adsp_playback_mailboxes(dev);
+ 	if (!ret)
+-		ret = mt6991_adsp_pcm_command(dev, 1);
++		ret = mt6991_adsp_open_playback_task(dev);
+ 	if (ret) {
+ 		if (mt6991_adsp_stop_pair(dev))
+ 			dev_err(dev, "failed to halt DSP after playback open error\n");
+@@ -993,7 +1089,7 @@
+ 	if (!ret && core->restore_playback) {
+ 		ret = mt6991_adsp_playback_mailboxes(dev);
+ 		if (!ret && core->pcm_open)
+-			ret = mt6991_adsp_pcm_command(dev, 1);
++			ret = mt6991_adsp_open_playback_task(dev);
+ 		if (ret && mt6991_adsp_stop_pair(dev))
+ 			dev_err(dev, "failed to stop DSP after playback restore error\n");
+ 	}

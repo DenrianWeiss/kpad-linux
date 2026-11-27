@@ -1,0 +1,78 @@
+From c27024b60aa857848ad8ca5afa8cebbfdbf03118 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 07:34:49 +0800
+Subject: [PATCH 80/80] arm64: dts: mediatek: describe the Turner charge pump
+ I2C bus
+
+---
+ .../dts/mediatek/mt6991-xiaomi-turner.dts     | 14 +++++++++++++
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi      | 21 +++++++++++++++++++
+ 2 files changed, 35 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+index f2802fb..1f138ce 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
++++ b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+@@ -59,6 +59,12 @@ &pciephy0 {
+ 	mediatek,short-reach;
+ };
+ 
++&i2c5 {
++	clock-frequency = <400000>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c5_pins>;
++};
++
+ &i2c3 {
+ 	clock-frequency = <700000>;
+ 	pinctrl-names = "default";
+@@ -74,6 +80,14 @@ pins {
+ 		};
+ 	};
+ 
++	i2c5_pins: i2c5-pins {
++		pins {
++			pinmux = <PINMUX_GPIO176__FUNC_SCL5>,
++				 <PINMUX_GPIO177__FUNC_SDA5>;
++			bias-pull-up = <MTK_PULL_SET_RSEL_111>;
++		};
++	};
++
+ 	conn_sleep_pins: connectivity-sleep-pins {
+ 		pins {
+ 			pinmux = <PINMUX_GPIO239__FUNC_GPIO239>,
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index f246e63..1c04445 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -141,6 +141,27 @@ soc {
+ 		#size-cells = <2>;
+ 		ranges;
+ 
++		i2c5: i2c@120a0000 {
++			compatible = "mediatek,mt6991-i2c", "mediatek,mt8188-i2c";
++			reg = <0 0x120a0000 0 0x20000>,
++			      <0 0x16400000 0 0x10000>;
++			interrupts = <GIC_SPI 341 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&impe CLK_IMPE_I2C5>,
++				 <&pericfg MT6991_CLK_PERI_AP_DMA_X32W_BCLK>;
++			clock-names = "main", "dma";
++			clock-div = <1>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++			status = "disabled";
++		};
++
++		impe: clock-controller@120c0000 {
++			compatible = "mediatek,mt6991-imp-iic-wrap-e",
++				     "mediatek,mt8196-imp-iic-wrap-e", "syscon";
++			reg = <0 0x120c0000 0 0x1000>;
++			#clock-cells = <1>;
++		};
++
+ 		i2c3: i2c@13150000 {
+ 			compatible = "mediatek,mt6991-i2c", "mediatek,mt8188-i2c";
+ 			reg = <0 0x13150000 0 0x20000>,
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,30 @@
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -54,6 +54,7 @@
+ #define MT6991_CLK_PERI_SPI6_BCLK          1
+ 
+ #define MT6991_CLK_PERI_AP_DMA_X32W_BCLK   2
++#define MT6991_CLK_PERI_UART3_BCLK         3
+ 
+ #define MT6991_CLK_MM1_DSI0_ENGINE         0
+ #define MT6991_CLK_MM1_DSI1_ENGINE         1
+--- a/drivers/clk/mediatek/clk-mt8196-peri_ao.c
++++ b/drivers/clk/mediatek/clk-mt8196-peri_ao.c
+@@ -121,6 +121,7 @@
+ static const struct mtk_gate mt6991_peri_clks[] = {
+ 	GATE_PERI_AO1(MT6991_CLK_PERI_AP_DMA_X32W_BCLK, "peri_ao_ap_dma_x32w_bclk",
+ 		      "p_axi", 26),
++	GATE_PERI_AO0(MT6991_CLK_PERI_UART3_BCLK, "peri_ao_uart3_bclk", "uart", 3),
+ 	GATE_PERI_AO0(MT6991_CLK_PERI_UART0_BCLK, "peri_ao_uart0_bclk", "uart", 0),
+ 	GATE_HWV_PERI_AO1(MT6991_CLK_PERI_SPI6_BCLK, "peri_ao_spi6_bclk", "spi6_b", 7),
+ };
+@@ -145,6 +146,9 @@
+ 	case 0:
+ 	case 1:
+ 		return clks->hws[MT6991_CLK_PERI_UART0_BCLK];
++	case 6:
++	case 7:
++		return clks->hws[MT6991_CLK_PERI_UART3_BCLK];
+ 	case 36:
+ 	case 37:
+ 		return clks->hws[MT6991_CLK_PERI_SPI6_BCLK];

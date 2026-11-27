@@ -1,0 +1,183 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -34,6 +34,9 @@
+ 	bool pair_powered;
+ 	bool pair_ready;
+ 	bool restart_after_sleep;
++	bool restore_playback;
++	void __iomem *playback_buffers;
++	int playback_error;
+ };
+ 
+ static void mt6991_adsp_receive(struct mbox_client *client, void *data)
+@@ -346,6 +349,11 @@
+ 			return ret;
+ 		a->started &= ~BIT(i);
+ 	}
++	if (a->playback_buffers) {
++		iounmap(a->playback_buffers);
++		a->playback_buffers = NULL;
++		a->playback_error = 0;
++	}
+ 	if (a->pair_powered) {
+ 		pm_runtime_put_sync(a->peer);
+ 		pm_runtime_put_sync(dev);
+@@ -411,6 +419,100 @@
+ 		dev_err(dev, "unable to stop DSP pair; retaining power for retry\n");
+ 	return ret;
+ }
++
++#define ADSP_AUDIO_IPI		9
++#define ADSP_AUDIO_CONTROLLER	40
++#define ADSP_AUDIO_PLAYBACK	32
++#define ADSP_MSG_BUFFER_SIZE	SZ_1K
++
++/* Stock kernel -> DSP message, bypassing audio-layer ACK during task init. */
++static int mt6991_adsp_audio_send(struct mbox_chan *tx, u8 scene, u16 command,
++				  const __le64 *desc, u32 bytes)
++{
++	struct mt6991_adsp_tx msg = { .id = ADSP_AUDIO_IPI, .len = 16 + bytes };
++
++	if (bytes > sizeof(msg.payload) - 16)
++		return -EINVAL;
++	put_unaligned_le16(0x8888, msg.payload);
++	msg.payload[2] = scene;
++	msg.payload[3] = 0x21;
++	msg.payload[4] = !!bytes;
++	put_unaligned_le16(command, msg.payload + 6);
++	put_unaligned_le32(bytes, msg.payload + 8);
++	if (bytes)
++		memcpy(msg.payload + 16, desc, bytes);
++	return mbox_send_message(tx, &msg);
++}
++
++/* The first two 1 KiB slots of the board's audio pool belong to scene 32. */
++static int mt6991_adsp_playback_mailboxes(struct device *dev)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	struct mt6991_adsp_block blocks[ARRAY_SIZE(adsp_block_names)];
++	const struct mt6991_adsp_block *audio = &blocks[12];
++	struct device_node *sys __free(device_node) = of_parse_phandle(dev->of_node, "mboxes", 0);
++	struct mbox_client client = { .dev = dev, .tx_block = true, .tx_tout = 200 };
++	struct mbox_chan *tx;
++	__le64 desc[4];
++	u64 range[2];
++	int ret, i;
++
++	if (!a->pair_ready)
++		return -EHOSTDOWN;
++	if (a->playback_buffers)
++		return a->playback_error;
++	if (!sys)
++		return -ENODEV;
++	ret = mt6991_adsp_layout(sys, range, blocks);
++	if (ret)
++		return ret;
++	if (!IS_ALIGNED(audio->address, SZ_4K) || audio->size < SZ_4K)
++		return -ERANGE;
++	tx = mbox_request_channel(&client, 0);
++	if (IS_ERR(tx))
++		return PTR_ERR(tx);
++	a->playback_buffers = ioremap_wc(audio->address, SZ_4K);
++	if (!a->playback_buffers) {
++		mbox_free_channel(tx);
++		return -ENOMEM;
++	}
++	memset_io(a->playback_buffers, 0, 2 * ADSP_MSG_BUFFER_SIZE);
++	wmb();
++	desc[0] = cpu_to_le64(audio->address);
++	desc[1] = cpu_to_le64(audio->size);
++	ret = mt6991_adsp_audio_send(tx, ADSP_AUDIO_CONTROLLER, 8, desc, 16);
++	if (ret >= 0)
++		ret = mt6991_adsp_audio_send(tx, ADSP_AUDIO_PLAYBACK, 0x19, NULL, 0);
++	for (i = 0; ret >= 0 && i < 2; i++) {
++		unsigned int offset = i * ADSP_MSG_BUFFER_SIZE;
++		unsigned long host = (unsigned long)(a->playback_buffers + offset);
++
++		/* audio_dsp_dram: DMA address, host alias, size, host pointer. */
++		desc[0] = cpu_to_le64(audio->address + offset);
++		desc[1] = cpu_to_le64(host);
++		desc[2] = cpu_to_le64(ADSP_MSG_BUFFER_SIZE);
++		desc[3] = cpu_to_le64(host);
++		ret = mt6991_adsp_audio_send(tx, ADSP_AUDIO_PLAYBACK, 5 + i, desc, sizeof(desc));
++	}
++	mbox_free_channel(tx);
++	/* A timeout can follow delivery; keep both buffers until both DSPs stop. */
++	a->playback_error = ret < 0 ? ret : 0;
++	return a->playback_error;
++}
++
++static ssize_t playback_mailboxes_store(struct device *dev, struct device_attribute *attr,
++					const char *buf, size_t count)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	int ret;
++
++	if (!sysfs_streq(buf, "init"))
++		return -EINVAL;
++	guard(mutex)(&a->boot_lock);
++	ret = mt6991_adsp_playback_mailboxes(dev);
++	return ret ? ret : count;
++}
++static DEVICE_ATTR_WO(playback_mailboxes);
+ 
+ static ssize_t firmware_state_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+@@ -608,12 +710,14 @@
+ 		if (attr == &logger_attrs[i].attr.attr)
+ 			return 0;
+ 	if (!core->peer && (attr == &dev_attr_firmware_state.attr ||
+-			    attr == &dev_attr_firmware_timestamps.attr))
++			    attr == &dev_attr_firmware_timestamps.attr ||
++			    attr == &dev_attr_playback_mailboxes.attr))
+ 		return 0;
+ 	return attr->mode;
+ }
+ 
+ static struct attribute *mt6991_adsp_attrs[] = {
++	&dev_attr_playback_mailboxes.attr,
+ 	&logger_attrs[0].attr.attr,
+ 	&logger_attrs[1].attr.attr,
+ 	&logger_attrs[2].attr.attr,
+@@ -749,6 +853,7 @@
+ 		return 0;
+ 	if (!core->pair_ready)
+ 		return -EBUSY;
++	core->restore_playback = core->playback_buffers && !core->playback_error;
+ 	ret = mt6991_adsp_stop_pair(dev);
+ 	core->restart_after_sleep = !ret;
+ 	return ret;
+@@ -757,12 +862,20 @@
+ static int mt6991_adsp_system_resume(struct device *dev)
+ {
+ 	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
++	int ret;
+ 
+ 	guard(mutex)(&core->boot_lock);
+ 	if (!core->restart_after_sleep)
+ 		return 0;
+ 	core->restart_after_sleep = false;
+-	return mt6991_adsp_start_pair(dev);
++	ret = mt6991_adsp_start_pair(dev);
++	if (!ret && core->restore_playback) {
++		ret = mt6991_adsp_playback_mailboxes(dev);
++		if (ret && mt6991_adsp_stop_pair(dev))
++			dev_err(dev, "failed to stop DSP after playback restore error\n");
++	}
++	core->restore_playback = false;
++	return ret;
+ }
+ 
+ static const struct dev_pm_ops mt6991_adsp_pm = {
+--- a/Documentation/ABI/testing/sysfs-platform-mt6991-adsp
++++ b/Documentation/ABI/testing/sysfs-platform-mt6991-adsp
+@@ -50,1 +50,9 @@
+ 		to the start of the circular log data. Reading leaves both indices alone.
++
++What:		/sys/bus/platform/devices/.../playback_mailboxes
++Date:		November 2026
++Description:
++		On running core A write init to send the shared pool bounds and
++		playback task message buffer descriptors. Repeated writes return
++		the original delivery result until the DSP pair stops. This
++		operation initializes messaging only; codec output remains gated.

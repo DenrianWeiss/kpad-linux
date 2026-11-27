@@ -1,0 +1,136 @@
+Subject: [PATCH] clk: mediatek: add MT6991 dual-pipe display relay gates
+
+--- a/drivers/clk/mediatek/clk-mt8196-ovl0.c
++++ b/drivers/clk/mediatek/clk-mt8196-ovl0.c
+@@ -149,6 +149,7 @@
+ 	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA8, "ovl_exdma8", "disp", 12),
+ 	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA9, "ovl_exdma9", "disp", 13),
+ 	GATE_HWV_OVL1(MT6991_CLK_OVL0_SMI, "ovl_smi", "disp", 30),
++	GATE_HWV_OVL1(MT6991_CLK_OVL0_DLO5, "ovl0_dlo_async5", "disp", 20),
+ };
+ 
+ static const struct mtk_clk_desc mt6991_ovl0_desc = {
+--- a/drivers/clk/mediatek/clk-mt8196-ovl1.c
++++ b/drivers/clk/mediatek/clk-mt8196-ovl1.c
+@@ -149,6 +149,7 @@
+ 	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA8, "ovl1_ovl_exdma8", "disp", 12),
+ 	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA9, "ovl1_ovl_exdma9", "disp", 13),
+ 	GATE_HWV_OVL11(MT6991_CLK_OVL1_SMI, "ovl1_smi", "disp", 30),
++	GATE_HWV_OVL11(MT6991_CLK_OVL1_DLO5, "ovl1_dlo_async5", "disp", 20),
+ };
+ 
+ static const struct mtk_clk_desc mt6991_ovl1_desc = {
+--- a/drivers/clk/mediatek/clk-mt8196-disp0.c
++++ b/drivers/clk/mediatek/clk-mt8196-disp0.c
+@@ -10,6 +10,7 @@
+ 
+ #include <linux/clk-provider.h>
+ #include <linux/module.h>
++#include <linux/of.h>
+ #include <linux/of_device.h>
+ #include <linux/platform_device.h>
+ 
+@@ -152,10 +153,15 @@
+ };
+ 
+ static const struct mtk_gate mt6991_disp0_clks[] = {
++	GATE_HWV_MM0(MT6991_CLK_MM0_DLI0, "mm0_dli_async0", "disp", 18),
++	GATE_HWV_MM0(MT6991_CLK_MM0_DLI8, "mm0_dli_async8", "disp", 26),
++	GATE_HWV_MM1(MT6991_CLK_MM0_DLO1, "mm0_dlo_async1", "disp", 3),
++	GATE_HWV_MM1(MT6991_CLK_MM0_DLO2, "mm0_dlo_async2", "disp", 4),
+ 	GATE_HWV_MM0(MT6991_CLK_MM0_MUTEX, "mm_disp_mutex0", "disp", 1),
+ };
+ 
+ static const struct mtk_clk_desc mt6991_disp0_desc = {
++	.need_runtime_pm = true,
+ 	.clks = mt6991_disp0_clks,
+ 	.num_clks = ARRAY_SIZE(mt6991_disp0_clks),
+ };
+@@ -167,8 +173,36 @@
+ };
+ MODULE_DEVICE_TABLE(platform, clk_mt8196_disp0_id_table);
+ 
++static struct clk_hw *mt6991_mm0_fw_get(struct of_phandle_args *spec, void *data)
++{
++	struct clk_hw_onecell_data *clks = data;
++
++	if (spec->args_count != 1)
++		return ERR_PTR(-EINVAL);
++	switch (spec->args[0] & ~1U) {
++	case 2: return clks->hws[MT6991_CLK_MM0_MUTEX];
++	case 36: return clks->hws[MT6991_CLK_MM0_DLI0];
++	case 52: return clks->hws[MT6991_CLK_MM0_DLI8];
++	case 70: return clks->hws[MT6991_CLK_MM0_DLO1];
++	case 72: return clks->hws[MT6991_CLK_MM0_DLO2];
++	default: return ERR_PTR(-ENOENT);
++	}
++}
++
++static int clk_disp0_probe(struct platform_device *pdev)
++{
++	struct device *parent = pdev->dev.parent;
++
++	if (!of_device_is_compatible(parent->of_node, "mediatek,mt6991-mmsys0") ||
++	    !of_property_present(parent->of_node, "mm-hw-ccf-regmap"))
++		return mtk_clk_pdev_probe(pdev);
++	if (!parent->pm_domain)
++		return -EPROBE_DEFER;
++	return mtk_clk_pdev_probe_with_get(pdev, mt6991_mm0_fw_get);
++}
++
+ static struct platform_driver clk_mt8196_disp0_drv = {
+-	.probe = mtk_clk_pdev_probe,
++	.probe = clk_disp0_probe,
+ 	.remove = mtk_clk_pdev_remove,
+ 	.driver = {
+ 		.name = "clk-mt8196-disp0",
+--- a/drivers/clk/mediatek/clk-mt8196-disp1.c
++++ b/drivers/clk/mediatek/clk-mt8196-disp1.c
+@@ -148,6 +148,8 @@
+ };
+ 
+ static const struct mtk_gate mt6991_mm1_clks[] = {
++	GATE_HWV_MM10(MT6991_CLK_MM1_DLI21, "mm1_dli_async21", "disp", 4),
++	GATE_HWV_MM10(MT6991_CLK_MM1_DLI22, "mm1_dli_async22", "disp", 5),
+ 	GATE_HWV_MM10(MT6991_CLK_MM1_DSC_WRAP0, "mm1_disp_dsc_wrap0", "disp", 18),
+ 	GATE_HWV_MM10(MT6991_CLK_MM1_DSC_WRAP1, "mm1_disp_dsc_wrap1", "disp", 19),
+ 	GATE_HWV_MM10(MT6991_CLK_MM1_DSC_WRAP2, "mm1_disp_dsc_wrap2", "disp", 20),
+@@ -173,6 +175,9 @@
+ 	case 4:
+ 		id = MT6991_CLK_MM1_MUTEX;
+ 		break;
++	case 8: case 10:
++		id = MT6991_CLK_MM1_DLI21 + (spec->args[0] - 8) / 2;
++		break;
+ 	case 36: case 38: case 40: case 42:
+ 		id = MT6991_CLK_MM1_DSC_WRAP0 + (spec->args[0] - 36) / 2;
+ 		break;
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -65,6 +65,15 @@
+ #define MT6991_CLK_MM1_DSC_WRAP1           6
+ #define MT6991_CLK_MM1_DSC_WRAP2           7
+ #define MT6991_CLK_MM1_DSC_WRAP3           8
++#define MT6991_CLK_MM1_DLI21               9
++#define MT6991_CLK_MM1_DLI22               10
++#define MT6991_CLK_MM0_DLI0                1
++#define MT6991_CLK_MM0_DLI8                2
++#define MT6991_CLK_MM0_DLO1                3
++#define MT6991_CLK_MM0_DLO2                4
++#define MT6991_CLK_OVL0_DLO5               12
++#define MT6991_CLK_OVL1_DLO5               12
++
+ #define MT6991_CLK_MM0_MUTEX               0
+ #define MT6991_CLK_OVL0_MUTEX              0
+ #define MT6991_CLK_OVL0_EXDMA0             1
+--- a/drivers/clk/mediatek/clk-mt6991-ovl.h
++++ b/drivers/clk/mediatek/clk-mt6991-ovl.h
+@@ -15,6 +15,8 @@
+ 	id = args->args[0];
+ 	if (id >= 6 && id <= 27)
+ 		return clks->hws[MT6991_CLK_OVL0_MUTEX + (id - 6) / 2];
++	if (id == 104 || id == 105)
++		return clks->hws[MT6991_CLK_OVL0_DLO5];
+ 	if (id == 124 || id == 125)
+ 		return clks->hws[MT6991_CLK_OVL0_SMI];
+ 	return ERR_PTR(-ENOENT);

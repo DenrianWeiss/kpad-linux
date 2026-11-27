@@ -1,0 +1,72 @@
+Subject: [RFC PATCH] wifi: mt76: give MT6653 an eeprom buffer and a wiphy
+
+Allocate the eeprom buffer through mt76_eeprom_init() and register the device
+after the runtime MCU transport is in place, so the PCI device produces a
+wlan interface. The eeprom layout and calibration are still unknown, so no
+band is enabled and the MAC address stays zero for now.
+
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_eeprom.c
+@@ -0,0 +1,29 @@
++// SPDX-License-Identifier: BSD-3-Clause-Clear
++/* MT6653 eeprom buffer and wireless device registration. */
++#include <linux/etherdevice.h>
++#include <linux/module.h>
++
++#include "mt76.h"
++#include "mt6653.h"
++
++#define MT6653_EEPROM_SIZE	0x2000
++
++/* Register the wiphy so the device shows up as wlan0. The eeprom layout and
++ * the calibration data are still unknown, so no band is enabled yet.
++ */
++int mt6653_register_device(struct mt76_dev *dev)
++{
++	int ret;
++
++	ret = mt76_eeprom_init(dev, MT6653_EEPROM_SIZE);
++	if (ret)
++		dev_warn(dev->dev, "no eeprom data: %d\n", ret);
++
++	ret = mt76_register_device(dev, true, mt76_rates, ARRAY_SIZE(mt76_rates));
++	if (ret)
++		return ret;
++
++	dev_info(dev->dev, "mt6653 registered\n");
++	return 0;
++}
++EXPORT_SYMBOL_GPL(mt6653_register_device);
+--- a/drivers/net/wireless/mediatek/mt76/mt6653.h
++++ b/drivers/net/wireless/mediatek/mt76/mt6653.h
+@@ -17,5 +17,6 @@
+ int mt6653_rom_alloc_rx_queue(struct mt76_dev *dev);
+ int mt6653_rom_boot_ram(struct mt76_dev *dev);
+ int mt6653_pci_boot_ram(struct mt76_dev *dev);
++int mt6653_register_device(struct mt76_dev *dev);
+ 
+ #endif
+--- a/drivers/net/wireless/mediatek/mt76/Makefile
++++ b/drivers/net/wireless/mediatek/mt76/Makefile
+@@ -38,7 +38,7 @@
+ mt76-connac-lib-y := mt76_connac_mcu.o mt76_connac_mac.o mt76_connac3_mac.o
+ mt76-connac-lib-$(CONFIG_PCI) += mt6653_rom.o mt6653_mcu.o
+ obj-$(CONFIG_MT6653) += mt6653.o
+-mt6653-y := mt6653_pci.o
++mt6653-y := mt6653_pci.o mt6653_eeprom.o
+ 
+ mt792x-lib-y := mt792x_core.o mt792x_mac.o mt792x_trace.o \
+ 		mt792x_debugfs.o mt792x_dma.o
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_pci.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_pci.c
+@@ -77,8 +77,9 @@
+ 	/* The WM firmware now answers the runtime command set. */
+ 	mdev->mcu_ops = &mt6653_mcu_ops;
+ 	dev_info(&pdev->dev, "runtime MCU ops installed\n");
+-	return 0;
+ 
++	return mt6653_register_device(mdev);
++
+ out_free:
+ 	mt76_free_device(mdev);
+ 	return ret;

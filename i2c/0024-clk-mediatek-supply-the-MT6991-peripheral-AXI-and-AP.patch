@@ -1,0 +1,54 @@
+From 16e9c15c81a65ae840fd95d37e3fc23449a96db7 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:33:33 +0800
+Subject: [PATCH 24/25] clk: mediatek: supply the MT6991 peripheral AXI and
+ APDMA clocks
+
+---
+ drivers/clk/mediatek/clk-mt8196-peri_ao.c  | 2 ++
+ drivers/clk/mediatek/clk-mt8196-topckgen.c | 9 +++++++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-peri_ao.c b/drivers/clk/mediatek/clk-mt8196-peri_ao.c
+index f97a77d..882611d 100644
+--- a/drivers/clk/mediatek/clk-mt8196-peri_ao.c
++++ b/drivers/clk/mediatek/clk-mt8196-peri_ao.c
+@@ -119,6 +119,8 @@ static const struct mtk_gate peri_ao_clks[] = {
+ };
+ 
+ static const struct mtk_gate mt6991_peri_clks[] = {
++	GATE_PERI_AO1(MT6991_CLK_PERI_AP_DMA_X32W_BCLK, "peri_ao_ap_dma_x32w_bclk",
++		      "p_axi", 26),
+ 	GATE_PERI_AO0(MT6991_CLK_PERI_UART0_BCLK, "peri_ao_uart0_bclk", "uart", 0),
+ 	GATE_HWV_PERI_AO1(MT6991_CLK_PERI_SPI6_BCLK, "peri_ao_spi6_bclk", "spi6_b", 7),
+ };
+diff --git a/drivers/clk/mediatek/clk-mt8196-topckgen.c b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+index 088d86a..e37130c 100644
+--- a/drivers/clk/mediatek/clk-mt8196-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+@@ -958,6 +958,12 @@ static const struct mtk_composite top_aud_divs[] = {
+ };
+ 
+ static const struct mtk_fixed_factor mt6991_divs[] = {
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D7_D8, "mainpll_d7_d8", "mainpll", 1, 56),
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D5_D8, "mainpll_d5_d8", "mainpll", 1, 40),
++	FACTOR(MT6991_CLK_TOP_OSC_D8, "osc_d8", "ulposc", 1, 8),
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D7_D4, "mainpll_d7_d4", "mainpll", 1, 28),
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D5_D4, "mainpll_d5_d4", "mainpll", 1, 20),
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D7_D2, "mainpll_d7_d2", "mainpll", 1, 14),
+ 	FACTOR(MT6991_CLK_TOP_MAINPLL_D4_D8, "mainpll_d4_d8", "mainpll", 1, 32),
+ 	FACTOR(MT6991_CLK_TOP_UNIVPLL_D5_D2, "univpll_d5_d2", "univpll", 1, 10),
+ 	FACTOR(MT6991_CLK_TOP_MAINPLL_D4_D4, "mainpll_d4_d4", "mainpll", 1, 16),
+@@ -971,6 +977,9 @@ static const struct mtk_fixed_factor mt6991_divs[] = {
+ };
+ 
+ static const struct mtk_mux mt6991_muxes[] = {
++	MUX_CLR_SET_UPD(MT6991_CLK_TOP_P_AXI, "p_axi", shared_axi_parents,
++		CLK_CFG_0, CLK_CFG_0_SET, CLK_CFG_0_CLR,
++		24, 3, CLK_CFG_UPDATE, TOP_MUX_PERI_AXI_SHIFT),
+ 	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_I2C_P, "i2c_p", i2c_parents,
+ 		CLK_CFG_11, CLK_CFG_11_SET, CLK_CFG_11_CLR,
+ 		0, 3, 7, CLK_CFG_UPDATE1, TOP_MUX_I2C_PERI_SHIFT,
+-- 
+2.50.1 (Apple Git-155)
+

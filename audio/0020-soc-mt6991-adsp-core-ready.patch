@@ -1,0 +1,142 @@
+--- a/drivers/soc/mediatek/Kconfig
++++ b/drivers/soc/mediatek/Kconfig
+@@ -4,6 +4,12 @@
+ #
+ menu "MediaTek SoC drivers"
+ 	depends on ARCH_MEDIATEK || COMPILE_TEST
++
++config MT6991_ADSP_CORE
++	tristate "MediaTek MT6991 ADSP core notifications"
++	depends on PM && MT6991_ADSP_MBOX
++	help
++	  Receive firmware readiness notifications for the two MT6991 DSP cores.
+ 
+ config MTK_CMDQ
+ 	tristate "MediaTek CMDQ Support"
+--- a/drivers/soc/mediatek/Makefile
++++ b/drivers/soc/mediatek/Makefile
+@@ -1,5 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ obj-$(CONFIG_MTK_CMDQ) += mtk-cmdq-helper.o
++obj-$(CONFIG_MT6991_ADSP_CORE) += mt6991-adsp-core.o
+ obj-$(CONFIG_MTK_DEVAPC) += mtk-devapc.o
+ obj-$(CONFIG_MTK_DVFSRC) += mtk-dvfsrc.o
+ obj-$(CONFIG_MTK_INFRACFG) += mtk-infracfg.o
+--- /dev/null
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -0,0 +1,115 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MT6991 ADSP core firmware notifications */
++#include <linux/mailbox_client.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/soc/mediatek/mt6991-adsp-ipi.h>
++#include <linux/unaligned.h>
++
++#define MT6991_ADSP_IPI_READY	13
++
++struct mt6991_adsp_core {
++	struct mbox_client client;
++	struct mbox_chan *rx;
++	u32 id;
++	atomic_t ready_count;
++};
++
++static void mt6991_adsp_receive(struct mbox_client *client, void *data)
++{
++	struct mt6991_adsp_core *core = container_of(client, struct mt6991_adsp_core, client);
++	const struct mt6991_adsp_ipi *msg = data;
++
++	if (msg->id == MT6991_ADSP_IPI_READY && msg->len >= sizeof(u32) &&
++	    get_unaligned_le32(msg->payload) == core->id)
++		atomic_inc(&core->ready_count);
++}
++
++static ssize_t ready_count_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
++
++	return sysfs_emit(buf, "%u\n", (unsigned int)atomic_read(&core->ready_count));
++}
++static DEVICE_ATTR_RO(ready_count);
++
++static struct attribute *mt6991_adsp_attrs[] = {
++	&dev_attr_ready_count.attr,
++	NULL,
++};
++ATTRIBUTE_GROUPS(mt6991_adsp);
++
++static int mt6991_adsp_resume(struct device *dev)
++{
++	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
++	struct mbox_chan *chan;
++
++	/* The stock core nodes list TX first, then RX. */
++	chan = mbox_request_channel(&core->client, 1);
++	if (IS_ERR(chan))
++		return PTR_ERR(chan);
++	core->rx = chan;
++	return 0;
++}
++
++static int mt6991_adsp_suspend(struct device *dev)
++{
++	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
++
++	mbox_free_channel(core->rx);
++	core->rx = NULL;
++	return 0;
++}
++
++static int mt6991_adsp_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct mt6991_adsp_core *core;
++
++	core = devm_kzalloc(dev, sizeof(*core), GFP_KERNEL);
++	if (!core)
++		return -ENOMEM;
++	core->id = of_device_is_compatible(dev->of_node, "mediatek,mt6991-adsp_core_1") ? 1 : 0;
++	core->client.dev = dev;
++	core->client.rx_callback = mt6991_adsp_receive;
++	platform_set_drvdata(pdev, core);
++	pm_runtime_enable(dev);
++	return 0;
++}
++
++static void mt6991_adsp_remove(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++
++	pm_runtime_disable(dev);
++	if (!pm_runtime_status_suspended(dev))
++		mt6991_adsp_suspend(dev);
++	pm_runtime_set_suspended(dev);
++}
++
++static const struct dev_pm_ops mt6991_adsp_pm = {
++	RUNTIME_PM_OPS(mt6991_adsp_suspend, mt6991_adsp_resume, NULL)
++};
++
++static const struct of_device_id mt6991_adsp_core_match[] = {
++	{ .compatible = "mediatek,mt6991-adsp_core_0" },
++	{ .compatible = "mediatek,mt6991-adsp_core_1" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, mt6991_adsp_core_match);
++
++static struct platform_driver mt6991_adsp_core_driver = {
++	.probe = mt6991_adsp_probe,
++	.remove = mt6991_adsp_remove,
++	.driver = {
++		.name = "mt6991-adsp-core",
++		.of_match_table = mt6991_adsp_core_match,
++		.pm = pm_ptr(&mt6991_adsp_pm),
++		.dev_groups = mt6991_adsp_groups,
++	},
++};
++module_platform_driver(mt6991_adsp_core_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6991 ADSP core notifications");
++MODULE_LICENSE("GPL");

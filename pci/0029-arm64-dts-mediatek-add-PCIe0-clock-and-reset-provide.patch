@@ -1,0 +1,32 @@
+From aa46463b519e003361b7a7ef5ab846fe1b3c73c8 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:01:24 +0800
+Subject: [PATCH] arm64: dts: mediatek: add PCIe0 clock and reset provider on
+ MT6991
+
+---
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index 1a301c4..0805875 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -220,6 +220,14 @@ pericfg: clock-controller@16640000 {
+ 			mediatek,hardware-voter = <&hwv>;
+ 			#clock-cells = <1>;
+ 		};
++
++		pextp0cfg: clock-controller@169b0000 {
++			compatible = "mediatek,mt6991-pextp0cfg-ao",
++				     "mediatek,mt8196-pextp0cfg-ao", "syscon";
++			reg = <0 0x169b0000 0 0x1000>;
++			#clock-cells = <1>;
++			#reset-cells = <1>;
++		};
+ 	};
+ 
+ 	timer {
+-- 
+2.50.1 (Apple Git-155)
+

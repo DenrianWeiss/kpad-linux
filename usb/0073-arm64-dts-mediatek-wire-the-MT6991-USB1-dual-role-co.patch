@@ -1,0 +1,82 @@
+From 707a15bf9f565d402dcc9da8233102fb4352f6bf Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 07:27:26 +0800
+Subject: [PATCH 73/73] arm64: dts: mediatek: wire the MT6991 USB1 dual-role
+ controller
+
+Describe the high-speed controller and the child host MAC, including their IRQs, clocks, power domain, reset and wakeup resources. Describe the Turner role switch and leave the parent disabled until the resource handshake and connector are supported.
+---
+ .../dts/mediatek/mt6991-xiaomi-turner.dts     |  4 +++
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi      | 34 +++++++++++++++++++
+ 2 files changed, 38 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+index d0b456d..9adf024 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
++++ b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+@@ -187,6 +187,10 @@ &spi6 {
+ 	status = "okay";
+ };
+ 
++&ssusb1 {
++	usb-role-switch;
++};
++
+ &uart0 {
+ 	status = "okay";
+ };
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index 8f1a617..71cf8c7 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+ #include <dt-bindings/clock/mediatek,mt6991-clock.h>
+ #include <dt-bindings/clock/mediatek,mt8196-clock.h>
++#include <dt-bindings/phy/phy.h>
+ #include <dt-bindings/power/mediatek,mt6991-power.h>
+ #include <dt-bindings/reset/mediatek,mt8196-resets.h>
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
+@@ -264,6 +265,39 @@ pericfg: clock-controller@16640000 {
+ 			#clock-cells = <1>;
+ 		};
+ 
++		ssusb1: usb@16711000 {
++			compatible = "mediatek,mt6991-mtu3", "mediatek,mtu3";
++			reg = <0 0x16711000 0 0x2e00>,
++			      <0 0x16713e00 0 0x100>;
++			reg-names = "mac", "ippc";
++			interrupts = <GIC_SPI 602 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&topckgen MT6991_CLK_TOP_USB_TOP_1P>,
++				 <&topckgen MT6991_CLK_TOP_USB_XHCI_1P>,
++				 <&topckgen MT6991_CLK_TOP_USB_FMCNT_P1>;
++			clock-names = "sys_ck", "xhci_ck", "frmcnt_ck";
++			phys = <&u2port1 PHY_TYPE_USB2>;
++			power-domains = <&spm MT6991_POWER_DOMAIN_SSUSB_P1>;
++			resets = <&usb_cfg 1>;
++			wakeup-source;
++			mediatek,syscon-wakeup = <&usb_wakeup 0x200 108>;
++			dr_mode = "otg";
++			maximum-speed = "high-speed";
++			#address-cells = <2>;
++			#size-cells = <2>;
++			ranges;
++			status = "disabled";
++
++			usb@16710000 {
++				compatible = "mediatek,mt6991-xhci", "mediatek,mtk-xhci";
++				reg = <0 0x16710000 0 0x1000>;
++				reg-names = "mac";
++				interrupts = <GIC_SPI 603 IRQ_TYPE_LEVEL_HIGH>;
++				clocks = <&topckgen MT6991_CLK_TOP_USB_XHCI_1P>;
++				clock-names = "sys_ck";
++				usb2-lpm-disable;
++			};
++		};
++
+ 		usb_cfg: syscon@16790000 {
+ 			compatible = "mediatek,mt6991-usbcfg", "syscon";
+ 			reg = <0 0x16790000 0 0x100>;
+-- 
+2.50.1 (Apple Git-155)
+

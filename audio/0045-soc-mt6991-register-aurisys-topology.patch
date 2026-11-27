@@ -1,0 +1,192 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -73,13 +73,13 @@
+ 
+ static bool mt6991_adsp_pcm_ack(const struct mt6991_adsp_ipi *msg, u16 command, u8 direction)
+ {
+-	if (command == 0x15)
++	if (command == 0x15 || command == 0xada0)
+ 		return msg->id == 9 && msg->len == 72 &&
+ 			get_unaligned_le16(msg->payload) == 0x8888 &&
+-			msg->payload[2] == 32 && msg->payload[3] == 0x20 &&
++			msg->payload[2] == (command == 0x15 ? 32 : 38) && msg->payload[3] == 0x20 &&
+ 			msg->payload[4] == 2 && msg->payload[5] == 2 &&
+ 			get_unaligned_le16(msg->payload + 6) == command &&
+-			get_unaligned_le32(msg->payload + 8) == 5452;
++			get_unaligned_le32(msg->payload + 8) == (command == 0x15 ? 5452 : 97968);
+ 
+ 	if (mt6991_adsp_has_descriptor(command))
+ 		return msg->id == 9 && msg->len == 24 &&
+@@ -628,6 +628,9 @@
+ }
+ 
+ /* Firmware ABI: the scene table occupies the first 0x8480 bytes of block 2. */
++#define TURNER_CTRL_RING (ALIGN(0x8484, 128) + SZ_32K + SZ_64K)
++static int mt6991_adsp_configure_aurisys(struct device *dev);
++
+ static int mt6991_adsp_register_ipi_pool(struct device *dev)
+ {
+ 	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
+@@ -670,11 +673,15 @@
+ 	writel(pool->size, mem + 0x10);
+ 	writel(0x8480, mem + 0x8480);
+ 	writel(data_offset, mem + 0x8484);
+-	/* The sole registered scene takes the first two free extents. */
++	/* Playback and its Aurisys controller own disjoint pairs of extents. */
+ 	writel(data_offset, mem + scene_offset + 0x80);
+ 	writel(SZ_32K, mem + scene_offset + 0x84);
+ 	writel(data_offset + SZ_32K, mem + scene_offset + 0x200);
+ 	writel(SZ_64K, mem + scene_offset + 0x204);
++	writel(TURNER_CTRL_RING, mem + 38 * 0x300 + 0x80);
++	writel(SZ_128K, mem + 38 * 0x300 + 0x84);
++	writel(TURNER_CTRL_RING + SZ_128K, mem + 38 * 0x300 + 0x200);
++	writel(SZ_32K, mem + 38 * 0x300 + 0x204);
+ 	wmb();
+ 
+ 	put_unaligned_le16(0x8888, msg.payload);
+@@ -687,12 +694,12 @@
+ 	put_unaligned_le64(pool->address, msg.payload + 16);
+ 	put_unaligned_le64(pool->size, msg.payload + 24);
+ 	ret = mbox_send_message(tx, &msg);
+-	if (ret >= 0) {
++	for (int idx = 0; ret >= 0 && idx < 2; idx++) {
+ 		msg.len = 16;
+ 		msg.payload[4] = 0;
+ 		msg.payload[5] = 1;
+ 		put_unaligned_le16(0xadd1, msg.payload + 6);
+-		put_unaligned_le32(ADSP_AUDIO_PLAYBACK, msg.payload + 8);
++		put_unaligned_le32(idx ? 38 : ADSP_AUDIO_PLAYBACK, msg.payload + 8);
+ 		reinit_completion(&a->pcm_reply);
+ 		WRITE_ONCE(a->pending_command, 0xadd1);
+ 		ret = mbox_send_message(tx, &msg);
+@@ -703,18 +710,26 @@
+ 	}
+ 	mbox_free_channel(tx);
+ 	/* A timed-out command can still arrive. Only stop_pair releases the pool. */
++	if (!ret)
++		ret = mt6991_adsp_configure_aurisys(dev);
+ 	a->ipi_pool_result = ret;
+ 	return ret;
+ }
+ 
+ #define TURNER_MUSIC_FIRMWARE "mediatek/turner/smartpa-music.bin"
+ MODULE_FIRMWARE(TURNER_MUSIC_FIRMWARE);
++#define TURNER_TOPOLOGY_FIRMWARE "mediatek/turner/aurisys-controller.bin"
++MODULE_FIRMWARE(TURNER_TOPOLOGY_FIRMWARE);
+ 
+ /* boot_lock serializes the sole producer. The DSP owns the read cursor. */
+-static int mt6991_adsp_send_music_config(struct device *dev)
+-{
+-	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
+-	void __iomem *desc = a->ipi_pool + ADSP_AUDIO_PLAYBACK * 0x300 + 0x80;
++static int mt6991_adsp_send_config(struct device *dev, bool topology)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	u8 scene = topology ? 38 : ADSP_AUDIO_PLAYBACK;
++	u16 cmd = topology ? 0xada0 : 0x15;
++	u32 offset = topology ? TURNER_CTRL_RING : ALIGN(0x8484, 128);
++	u32 capacity = topology ? SZ_128K : SZ_32K;
++	void __iomem *desc = a->ipi_pool + scene * 0x300 + 0x80;
+ 	struct mbox_client client = { .dev = dev, .tx_block = true, .tx_tout = 200 };
+ 	struct mt6991_adsp_tx msg = { .id = ADSP_AUDIO_IPI, .len = 72 };
+ 	const struct firmware *fw;
+@@ -723,16 +738,18 @@
+ 	u32 write, tail, next;
+ 	int ret;
+ 
+-	if (readl(desc) != ALIGN(0x8484, 128) || readl(desc + 4) != SZ_32K)
++	if (readl(desc) != offset || readl(desc + 4) != capacity)
+ 		return -EIO;
+ 	write = readl(desc + 0x100);
+-	if (write >= SZ_32K || !IS_ALIGNED(write, 128) || readl(desc + 0x80) != write)
++	if (write >= capacity || !IS_ALIGNED(write, 128) || readl(desc + 0x80) != write)
+ 		return -EBUSY;
+-	ret = request_firmware(&fw, TURNER_MUSIC_FIRMWARE, dev);
+-	if (ret)
+-		return ret;
+-	if (fw->size != 5452 || get_unaligned_le32(fw->data) != 0x55667788 ||
+-	    get_unaligned_le32(fw->data + fw->size - 4) != 0xaabbccdd) {
++	ret = request_firmware(&fw, topology ? TURNER_TOPOLOGY_FIRMWARE : TURNER_MUSIC_FIRMWARE, dev);
++	if (ret)
++		return ret;
++	if (topology ? (fw->size != 97968 ||
++	    memcmp(fw->data + 10 * 328 + 132, "smartpa_tfaxxxx", 16)) :
++	    (fw->size != 5452 || get_unaligned_le32(fw->data) != 0x55667788 ||
++	    get_unaligned_le32(fw->data + fw->size - 4) != 0xaabbccdd)) {
+ 		ret = -EINVAL;
+ 		goto release;
+ 	}
+@@ -742,28 +759,28 @@
+ 		goto release;
+ 	}
+ 
+-	ring = a->ipi_pool + ALIGN(0x8484, 128);
+-	tail = min_t(size_t, SZ_32K - write, fw->size);
++	ring = a->ipi_pool + offset;
++	tail = min_t(size_t, capacity - write, fw->size);
+ 	memcpy_toio(ring + write, fw->data, tail);
+ 	if (tail < fw->size)
+ 		memcpy_toio(ring, fw->data + tail, fw->size - tail);
+-	next = (write + ALIGN(fw->size, 128)) % SZ_32K;
++	next = (write + ALIGN(fw->size, 128)) % capacity;
+ 	wmb();
+ 	writel(next, desc + 0x100);
+ 	wmb();
+ 
+ 	put_unaligned_le16(0x8888, msg.payload);
+-	msg.payload[2] = ADSP_AUDIO_PLAYBACK;
++	msg.payload[2] = scene;
+ 	msg.payload[3] = 0x20;
+ 	msg.payload[4] = 2;
+ 	msg.payload[5] = 1;
+-	put_unaligned_le16(0x15, msg.payload + 6);
++	put_unaligned_le16(cmd, msg.payload + 6);
+ 	put_unaligned_le32(fw->size, msg.payload + 8);
+ 	put_unaligned_le32(fw->size, msg.payload + 0x24);
+ 	put_unaligned_le32(write, msg.payload + 0x30);
+ 	put_unaligned_le32(fw->size, msg.payload + 0x34);
+ 	reinit_completion(&a->pcm_reply);
+-	WRITE_ONCE(a->pending_command, 0x15);
++	WRITE_ONCE(a->pending_command, cmd);
+ 	ret = mbox_send_message(tx, &msg);
+ 	if (ret >= 0)
+ 		ret = wait_for_completion_timeout(&a->pcm_reply, msecs_to_jiffies(750)) ?
+@@ -777,13 +794,37 @@
+ 	return ret;
+ }
+ 
++static int mt6991_adsp_configure_aurisys(struct device *dev)
++{
++	struct mbox_client client = { .dev = dev, .tx_block = true, .tx_tout = 200 };
++	struct mt6991_adsp_tx msg = { .id = ADSP_AUDIO_IPI, .len = 16 };
++	struct mbox_chan *tx;
++	int ret;
++
++	ret = mt6991_adsp_send_config(dev, true);
++	if (ret)
++		return ret;
++	tx = mbox_request_channel(&client, 0);
++	if (IS_ERR(tx))
++		return PTR_ERR(tx);
++	/* HAL set_aurisys_on(), controller A, message-only, bypass ACK. */
++	put_unaligned_le16(0x8888, msg.payload);
++	msg.payload[2] = 38;
++	msg.payload[3] = 0x20;
++	put_unaligned_le16(0xada3, msg.payload + 6);
++	put_unaligned_le32(1, msg.payload + 8);
++	ret = mbox_send_message(tx, &msg);
++	mbox_free_channel(tx);
++	return min(ret, 0);
++}
++
+ static int mt6991_adsp_open_playback_task(struct device *dev)
+ {
+ 	int ret;
+ 
+ 	ret = mt6991_adsp_register_ipi_pool(dev);
+ 	if (!ret)
+-		ret = mt6991_adsp_send_music_config(dev);
++		ret = mt6991_adsp_send_config(dev, false);
+ 	if (ret)
+ 		return ret;
+ 	return mt6991_adsp_pcm_command(dev, 1, 1);

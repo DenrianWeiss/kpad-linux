@@ -1,0 +1,58 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] dt-bindings: power: mediatek: describe MT6991 MFG controller
+
+MT6991 controls an additional clock gate during the GPUEB wake and
+sleep handshake. Its shared memory region is the GPUFreq suballocation.
+
+--- a/Documentation/devicetree/bindings/power/mediatek,mt8196-gpufreq.yaml
++++ b/Documentation/devicetree/bindings/power/mediatek,mt8196-gpufreq.yaml
+@@ -19,19 +19,24 @@
+ 
+   compatible:
+     enum:
++      - mediatek,mt6991-gpufreq
+       - mediatek,mt8196-gpufreq
+ 
+   reg:
++    minItems: 3
+     items:
+       - description: GPR memory area
+       - description: RPC memory area
+       - description: SoC variant ID register
++      - description: EB clock gate status, set and clear registers
+ 
+   reg-names:
++    minItems: 3
+     items:
+       - const: gpr
+       - const: rpc
+       - const: hw-revision
++      - const: eb-gate
+ 
+   clocks:
+     items:
+@@ -83,6 +88,24 @@
+   shader-present:
+     type: object
+ 
++allOf:
++  - if:
++      properties:
++        compatible:
++          const: mediatek,mt6991-gpufreq
++    then:
++      properties:
++        reg:
++          minItems: 4
++        reg-names:
++          minItems: 4
++    else:
++      properties:
++        reg:
++          maxItems: 3
++        reg-names:
++          maxItems: 3
++
+ dependencies:
+   shader-present: [ "#nvmem-cell-cells" ]
+ 

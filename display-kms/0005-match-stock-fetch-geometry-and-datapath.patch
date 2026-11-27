@@ -1,0 +1,84 @@
+Subject: [PATCH] drm: mediatek: turner: match stock fetch geometry and datapath
+
+Program the SMI ID, GCLAST, request and burst controls observed in the
+active MT6991 dual-pipe configuration. Keep the established 940-pixel
+output geometry: widening only the OVL path starves the 940-pixel DSC input.
+
+--- a/drivers/gpu/drm/mediatek/turner/scan-path.h
++++ b/drivers/gpu/drm/mediatek/turner/scan-path.h
+@@ -2,6 +2,10 @@
+ #include <linux/mfd/syscon.h>
+ #include <linux/regmap.h>
+ 
++#define TURNER_HALF_WIDTH 940U
++#define TURNER_FETCH_WIDTH TURNER_HALF_WIDTH
++#define TURNER_RIGHT_X TURNER_HALF_WIDTH
++
+ enum block_id { FETCH_L, FETCH_R, DSC_L, DSC_R, BLEND_L, BLEND_R, OUT_L, OUT_R, MUT_DIS0, MUT_DIS1, MUT_OVL0, MUT_OVL1, BLOCKS };
+ struct scan_block {
+ 	void __iomem *base;
+@@ -24,6 +30,7 @@ static const struct { u8 bank; u16 reg; u32 val; } route[] = {
+ 	{ OVL0, 0xe04, BIT(0) }, { OVL0, 0xf10, BIT(0) },
+ 	{ OVL1, 0xe04, BIT(0) }, { OVL1, 0xf10, BIT(0) },
+-	{ OVL0, 0x29c, (3008 << 16) | 940 }, { OVL1, 0x29c, (3008 << 16) | 940 },
++	{ OVL0, 0x29c, (3008 << 16) | TURNER_FETCH_WIDTH },
++	{ OVL1, 0x29c, (3008 << 16) | TURNER_FETCH_WIDTH },
+ 	/* DLI0 / DLI8 -> PQ bypass 6 / 7 -> panel crossbar 1 / 2 -> DLO1 / 2. */
+ 	{ DISP0, 0xdd0, BIT(2) }, { DISP0, 0xe54, BIT(1) }, { DISP0, 0xd84, BIT(1) },
+ 	{ DISP0, 0xdf0, BIT(3) }, { DISP0, 0xe58, BIT(2) }, { DISP0, 0xd88, BIT(2) },
+@@ -129,7 +136,7 @@ static int start_scan_path(struct scan_path *p, struct device *dev)
+ 		"/soc/disp-ovl0-outproc0@32970000", "/soc/disp-ovl1-outproc0@32d70000",
+ 	};
+ 
+-	const u32 shape = (3008 << 16) | 940;
++	const u32 shape = (3008 << 16) | TURNER_FETCH_WIDTH;
+ 	u32 pps[20] = {};
+ 	int i, j, ret;
+ 
+--- a/drivers/gpu/drm/mediatek/turner/fetch.h
++++ b/drivers/gpu/drm/mediatek/turner/fetch.h
+@@ -1,14 +1,14 @@
+ /* Acquired by the scan fixture after checking both DMA mappings. */
+ static void turner_program_fetch(struct scan_path *path, const dma_addr_t addr[2])
+ {
+-	const u32 shape = (3008 << 16) | 940;
++	const u32 shape = (3008 << 16) | TURNER_FETCH_WIDTH;
+ 	unsigned int side;
+ 
+ 	for (side = 0; side < 2; ++side) {
+ 		struct scan_block *fetch = &path->block[FETCH_L + side];
+ 		struct scan_block *blend = &path->block[BLEND_L + side];
+ 		struct scan_block *mutex = &path->block[MUT_OVL0 + side];
+-		dma_addr_t start = addr[side] + side * 940 * sizeof(u32);
++		dma_addr_t start = addr[side] + side * TURNER_RIGHT_X * sizeof(u32);
+ 
+ 		scan_write(fetch, 0x28, BIT(2), BIT(2));
+ 		/* Direct-link FIFO and SMI request thresholds from MT6991 EXDMA. */
+@@ -16,11 +16,14 @@ static void turner_program_fetch(struct scan_path *path, const dma_addr_t addr[2
+ 		scan_write(fetch, 0x110, U32_MAX, 1536U << 16);
+ 		scan_write(fetch, 0x1e0, U32_MAX, BIT(29) | (255U << 16) | 511);
+-		scan_write(fetch, 0x1f8, U32_MAX, 0xf1ffffff);
+-		scan_write(fetch, 0x1fc, U32_MAX, 0xffff);
++		scan_write(fetch, 0x1f4, U32_MAX, 0xd6666442);
++		scan_write(fetch, 0x1f8, U32_MAX, 0xf1ff00ff);
++		scan_write(fetch, 0x1fc, U32_MAX, 0xff);
+ 		scan_write(fetch, 0x20c, U32_MAX, 0x8040);
+ 		scan_write(fetch, 0x210, U32_MAX, 0);
+ 		scan_write(fetch, 0x220, U32_MAX, BIT(31));
+ 		scan_write(fetch, 0x0c, GENMASK(19, 18), 0);
++		scan_write(fetch, 0x14, BIT(0) | BIT(24) | BIT(25),
++			   BIT(0) | BIT(24) | BIT(25));
+ 		scan_write(fetch, 0x30, U32_MAX, shape);
+ 		scan_write(fetch, 0x44, U32_MAX, 0);
+ 		scan_write(fetch, 0x48, U32_MAX, shape);
+--- a/drivers/gpu/drm/mediatek/turner/command-host.c
++++ b/drivers/gpu/drm/mediatek/turner/command-host.c
+@@ -464,7 +464,7 @@ static void sample_video(struct turner_host *ctx, const struct drm_display_mode
+ 			if (k->pending >= 0) {
+ 				const dma_addr_t *next = k->slot[k->pending].addr;
+ 				writel(lower_32_bits(next[0]), path->block[FETCH_L].base+0xf40);
+-				writel(lower_32_bits(next[1]+3760), path->block[FETCH_R].base+0xf40);
++				writel(lower_32_bits(next[1]+TURNER_RIGHT_X*sizeof(u32)), path->block[FETCH_R].base+0xf40);
+ 				k->retiring = k->front;
+ 				k->front = k->pending;
+ 				k->pending = -1;

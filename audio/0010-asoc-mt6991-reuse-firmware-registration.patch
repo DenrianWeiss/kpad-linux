@@ -1,0 +1,114 @@
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -3,7 +3,9 @@
+ #include <linux/arm-smccc.h>
+ #include <linux/clk.h>
+ #include <linux/io.h>
++#include <linux/mfd/syscon.h>
+ #include <linux/module.h>
++#include <linux/regmap.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
+@@ -11,6 +13,9 @@
+ 
+ #include "../common/mtk-base-afe.h"
+ 
++#define MT6991_AUDIO_PWR_CON	0xe4c
++#define MT6991_AUDIO_PWR_ACK	GENMASK(31, 30)
++
+ #define AFE_DL0_CON0	0x4460
+ 
+ enum mt6991_bus_clock {
+@@ -21,18 +26,58 @@
+ 	struct clk_bulk_data bus[NUM_BUS_CLKS];
+ 	struct clk *clksq;
+ 	void __iomem *base;
+-};
++	struct regmap *spm;
++	bool firmware_ready;
++};
++
++static long mt6991_audio_call(unsigned int op)
++{
++	struct arm_smccc_res res;
++
++	arm_smccc_smc(MTK_SIP_AUDIO_CONTROL, op, 0, 0, 0, 0, 0, 0, &res);
++	return res.a0;
++}
++
++static int mt6991_audio_result(struct device *dev, unsigned int op, long status)
++{
++	if (!status)
++		return 0;
++	dev_err(dev, "audio firmware operation %u returned %ld\n", op, status);
++	return -EIO;
++}
+ 
+ static int mt6991_audio_smc(struct device *dev, unsigned int op)
+ {
+-	struct arm_smccc_res res;
+-
+-	arm_smccc_smc(MTK_SIP_AUDIO_CONTROL, op, 0, 0, 0, 0, 0, 0, &res);
+-	if (res.a0) {
+-		dev_err(dev, "audio firmware operation %u returned %#lx\n", op, res.a0);
+-		return -EIO;
+-	}
+-	return 0;
++	return mt6991_audio_result(dev, op, mt6991_audio_call(op));
++}
++
++static int mt6991_afe_sidebands(struct device *dev, struct mt6991_afe *afe)
++{
++	long status = mt6991_audio_call(MTK_AUDIO_SMC_OP_DOMAIN_SIDEBANDS);
++	unsigned int power;
++	int ret;
++
++	/*
++	 * Firmware keeps the AUDIO registration across unbind and kexec.
++	 * A first sideband call returns -5 for either a missing registration
++	 * or an unpowered domain. INIT consumes a slot on every invocation.
++	 */
++	if (status == -5 && !afe->firmware_ready) {
++		ret = regmap_read(afe->spm, MT6991_AUDIO_PWR_CON, &power);
++		if (ret)
++			return ret;
++		if ((power & MT6991_AUDIO_PWR_ACK) == MT6991_AUDIO_PWR_ACK) {
++			ret = mt6991_audio_smc(dev, MTK_AUDIO_SMC_OP_INIT);
++			if (ret)
++				return ret;
++			afe->firmware_ready = true;
++			dev_dbg(dev, "registered AUDIO firmware resource\n");
++			status = mt6991_audio_call(MTK_AUDIO_SMC_OP_DOMAIN_SIDEBANDS);
++		}
++	}
++	if (!status)
++		afe->firmware_ready = true;
++	return mt6991_audio_result(dev, MTK_AUDIO_SMC_OP_DOMAIN_SIDEBANDS, status);
+ }
+ 
+ static int mt6991_afe_runtime_resume(struct device *dev)
+@@ -55,7 +100,7 @@
+ 			}
+ 		}
+ 	}
+-	ret = mt6991_audio_smc(dev, MTK_AUDIO_SMC_OP_DOMAIN_SIDEBANDS);
++	ret = mt6991_afe_sidebands(dev, afe);
+ 	if (!ret)
+ 		ret = mt6991_audio_smc(dev, MTK_AUDIO_SMC_OP_SRAM_REQUEST);
+ 	if (!ret)
+@@ -107,10 +152,10 @@
+ 	afe->base = devm_ioremap(dev, res->start, resource_size(res));
+ 	if (!afe->base)
+ 		return -ENOMEM;
+-	/* The firmware requires INIT before accepting any runtime operation. */
+-	ret = mt6991_audio_smc(dev, MTK_AUDIO_SMC_OP_INIT);
+-	if (ret)
+-		return dev_err_probe(dev, ret, "initializing audio firmware service\n");
++	/* On MT6991 the first power-domains phandle points to the SPM syscon. */
++	afe->spm = syscon_regmap_lookup_by_phandle(dev->of_node, "power-domains");
++	if (IS_ERR(afe->spm))
++		return dev_err_probe(dev, PTR_ERR(afe->spm), "getting AUDIO power status\n");
+ 
+ 	platform_set_drvdata(pdev, afe);
+ 	pm_runtime_enable(dev);

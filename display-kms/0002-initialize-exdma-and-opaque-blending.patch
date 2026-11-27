@@ -1,0 +1,41 @@
+Subject: [PATCH] drm: mediatek: turner: set direct-link fetch thresholds and opaque XR24 blending
+
+--- a/drivers/gpu/drm/mediatek/turner/fetch.h
++++ b/drivers/gpu/drm/mediatek/turner/fetch.h
+@@ -11,6 +11,16 @@
+ 		dma_addr_t start = addr[side] + side * 940 * sizeof(u32);
+ 
+ 		scan_write(fetch, 0x28, BIT(2), BIT(2));
++		/* Direct-link FIFO and SMI request thresholds from MT6991 EXDMA. */
++		scan_write(fetch, 0x108, U32_MAX, 0x03ff03ff);
++		scan_write(fetch, 0x110, U32_MAX, 1536U << 16);
++		scan_write(fetch, 0x1e0, U32_MAX, BIT(29) | (255U << 16) | 511);
++		scan_write(fetch, 0x1f8, U32_MAX, 0xf1ffffff);
++		scan_write(fetch, 0x1fc, U32_MAX, 0xffff);
++		scan_write(fetch, 0x20c, U32_MAX, 0x8040);
++		scan_write(fetch, 0x210, U32_MAX, 0);
++		scan_write(fetch, 0x220, U32_MAX, BIT(31));
++		scan_write(fetch, 0x0c, GENMASK(19, 18), 0);
+ 		scan_write(fetch, 0x30, U32_MAX, shape);
+ 		scan_write(fetch, 0x44, U32_MAX, 0);
+ 		scan_write(fetch, 0x48, U32_MAX, shape);
+@@ -24,6 +34,8 @@
+ 		scan_write(fetch, 0x20, BIT(0), BIT(0));
+ 		scan_write(blend, 0x48, U32_MAX, shape);
+ 		scan_write(blend, 0x50, U32_MAX, 2);
++		/* XR24 carries no alpha; select the constant alpha on the blender. */
++		scan_write(blend, 0x208, BIT(24), BIT(24));
+ 		scan_write(blend, 0x200, U32_MAX, 0x10ff);
+ 		scan_write(blend, 0x10, GENMASK(5, 4), BIT(4));
+ 		scan_write(blend, 0x40, BIT(0), BIT(0));
+--- a/drivers/gpu/drm/mediatek/turner/scan-path.h
++++ b/drivers/gpu/drm/mediatek/turner/scan-path.h
+@@ -196,7 +196,7 @@
+ 
+ 		scan_write(blend, 0x28, BIT(2), BIT(2));
+ 		scan_write(blend, 0x30, U32_MAX, shape);
+-		scan_write(blend, 0x104, U32_MAX, i ? 0xff00ff00 : 0xffff0000);
++		scan_write(blend, 0x104, U32_MAX, 0xff000000);
+ 		scan_write(blend, 0x10, BIT(0)|BIT(4)|BIT(5), BIT(4));
+ 		scan_write(blend, 0x40, BIT(0), 0);
+ 		scan_write(blend, 0x20, 0x31, 1);

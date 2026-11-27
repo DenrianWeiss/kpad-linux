@@ -1,0 +1,26 @@
+Subject: [PATCH] virt: geniezone: preserve the hypervisor error on batch queries
+
+--- a/arch/arm64/geniezone/vm.c
++++ b/arch/arm64/geniezone/vm.c
+@@ -239,7 +239,8 @@
+ 		return ret;
+ 
+ 	if (res.a1 == 0 ||
+-	    GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE % (PAGE_SIZE * res.a1) != 0)
++	    res.a1 > GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE / PAGE_SIZE ||
++	    (GZVM_BLOCK_BASED_DEMAND_PAGE_SIZE / PAGE_SIZE) % res.a1 != 0)
+ 		return -EFAULT;
+ 
+ 	cap->args[0] = res.a1;
+@@ -254,8 +255,9 @@
+ 	int ret;
+ 
+ 	ret = gzvm_arch_enable_cap(cap, &res);
+-	/* destroy page batch size should be power of 2 */
+-	if (ret || ((res.a1 & (res.a1 - 1)) != 0))
++	if (ret)
++		return ret;
++	if (!is_power_of_2(res.a1) || res.a1 > U32_MAX)
+ 		return -EINVAL;
+ 
+ 	cap->args[0] = res.a1;

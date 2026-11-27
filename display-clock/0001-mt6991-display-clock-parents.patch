@@ -1,0 +1,218 @@
+Subject: [PATCH] clk: mediatek: expose the firmware-selected MT6991 display clock
+
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -95,4 +95,10 @@
+ #define MT6991_CLK_VDISP_AO_DPC            1
+ #define MT6991_CLK_VDISP_AO_SMI_SUB_COMMON 2
+ 
++#define MT6991_CLK_APMIXED2_MAINPLL2 0
++#define MT6991_CLK_APMIXED2_UNIVPLL2 1
++#define MT6991_CLK_APMIXED2_MMPLL2   2
++#define MT6991_CLK_CK2_DISP_SEL     17
++#define MT6991_CLK_CK2_DISP         76
++
+ #endif
+--- a/Documentation/devicetree/bindings/clock/mediatek,mt8196-sys-clock.yaml
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt8196-sys-clock.yaml
+@@ -28,6 +28,8 @@
+     items:
+       - enum:
+           - mediatek,mt6991-apmixedsys
++          - mediatek,mt6991-apmixedsys_gp2
++          - mediatek,mt6991-cksys_gp2
+           - mediatek,mt6991-mfgpll-pll-ctrl
+           - mediatek,mt6991-mfgpll-sc0-pll-ctrl
+           - mediatek,mt6991-mfgpll-sc1-pll-ctrl
+--- a/drivers/clk/mediatek/clk-mt8196-apmixedsys.c
++++ b/drivers/clk/mediatek/clk-mt8196-apmixedsys.c
+@@ -116,6 +116,47 @@
+ 	},
+ };
+ 
++static const struct mtk_pll_data mt6991_gp2_plls[] = {
++	{
++		.id = MT6991_CLK_APMIXED2_MAINPLL2,
++		.name = "mainpll2",
++		.pd_reg = MAINPLL2_CON1,
++		.pd_shift = 24,
++		.pcw_reg = MAINPLL2_CON1,
++		.pcwbits = 22,
++		.pcwibits = 8,
++		.flags = PLL_GET_RATE_NOCACHE,
++		.ops = &mtk_pll_read_only_ops,
++	},
++	{
++		.id = MT6991_CLK_APMIXED2_UNIVPLL2,
++		.name = "univpll2",
++		.pd_reg = UNIVPLL2_CON1,
++		.pd_shift = 24,
++		.pcw_reg = UNIVPLL2_CON1,
++		.pcwbits = 22,
++		.pcwibits = 8,
++		.flags = PLL_GET_RATE_NOCACHE,
++		.ops = &mtk_pll_read_only_ops,
++	},
++	{
++		.id = MT6991_CLK_APMIXED2_MMPLL2,
++		.name = "mmpll2",
++		.pd_reg = MMPLL2_CON1,
++		.pd_shift = 24,
++		.pcw_reg = MMPLL2_CON1,
++		.pcwbits = 22,
++		.pcwibits = 8,
++		.flags = PLL_GET_RATE_NOCACHE,
++		.ops = &mtk_pll_read_only_ops,
++	},
++};
++
++static const struct mtk_pll_desc mt6991_gp2_desc = {
++	.clks = mt6991_gp2_plls,
++	.num_clks = ARRAY_SIZE(mt6991_gp2_plls),
++};
++
+ static const struct mtk_pll_desc mt6991_apmixed_desc = {
+ 	.clks = mt6991_plls,
+ 	.num_clks = ARRAY_SIZE(mt6991_plls),
+@@ -214,6 +255,7 @@
+ }
+ 
+ static const struct of_device_id of_match_clk_mt8196_apmixed[] = {
++	{ .compatible = "mediatek,mt6991-apmixedsys_gp2", .data = &mt6991_gp2_desc },
+ 	{ .compatible = "mediatek,mt6991-apmixedsys", .data = &mt6991_apmixed_desc },
+ 	{ .compatible = "mediatek,mt8196-apmixedsys", .data = &apmixed_desc },
+ 	{ .compatible = "mediatek,mt8196-apmixedsys-gp2",
+--- a/drivers/clk/mediatek/Makefile
++++ b/drivers/clk/mediatek/Makefile
+@@ -151,6 +151,7 @@
+ obj-$(CONFIG_COMMON_CLK_MT8195_VENCSYS) += clk-mt8195-venc.o
+ obj-$(CONFIG_COMMON_CLK_MT8195_VPPSYS) += clk-mt8195-vpp0.o clk-mt8195-vpp1.o
+ obj-$(CONFIG_COMMON_CLK_MT8195_WPESYS) += clk-mt8195-wpe.o
++obj-$(CONFIG_COMMON_CLK_MT8196) += clk-mt6991-disp.o
+ obj-$(CONFIG_COMMON_CLK_MT8196) += clk-mt8196-apmixedsys.o clk-mt8196-topckgen.o \
+ 				   clk-mt8196-topckgen2.o clk-mt8196-vlpckgen.o \
+ 				   clk-mt8196-peri_ao.o
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6991-disp.c
+@@ -0,0 +1,100 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Firmware-owned display clock selection on MT6991. */
++#include <linux/clk-provider.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/unaligned.h>
++#include <dt-bindings/clock/mediatek,mt6991-clock.h>
++
++static const struct {
++	const char *name;
++	const char *source;
++	u8 divisor;
++} parents[] = {
++	{ "clk26m" },
++	{ "disp_mainpll_d10", "mainpll", 10 },
++	{ "disp_mainpll_d8", "mainpll", 8 },
++	{ "disp_mainpll_d6", "mainpll", 6 },
++	{ "disp_mainpll2_d5", "mainpll2", 5 },
++	{ "disp_mmpll2_d6", "mmpll2", 6 },
++	{ "disp_mainpll2_d4", "mainpll2", 4 },
++	{ "disp_univpll2_d4", "univpll2", 4 },
++	{ "disp_mainpll2_d3", "mainpll2", 3 },
++};
++
++static int mt6991_disp_clk_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	const char *names[ARRAY_SIZE(parents)];
++	struct clk_hw_onecell_data *data;
++	struct clk_hw *hw;
++	void __iomem *base;
++	const u8 *chipid;
++	u32 revision;
++	int len, i;
++
++	chipid = of_get_property(of_chosen, "atag,chipid", &len);
++	if (!chipid || len < 20)
++		return dev_err_probe(dev, -ENODATA, "missing chip revision\n");
++	revision = get_unaligned_le32(chipid + 16);
++	if (revision > 1)
++		return dev_err_probe(dev, -ENODEV, "unknown revision %u\n", revision);
++
++	base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(base))
++		return PTR_ERR(base);
++	data = devm_kzalloc(dev, struct_size(data, hws, MT6991_CLK_CK2_DISP + 1),
++			   GFP_KERNEL);
++	if (!data)
++		return -ENOMEM;
++	data->num = MT6991_CLK_CK2_DISP + 1;
++	for (i = 0; i < data->num; i++)
++		data->hws[i] = ERR_PTR(-ENOENT);
++	names[0] = parents[0].name;
++	for (i = 1; i < ARRAY_SIZE(parents); i++) {
++		const char *source = parents[i].source;
++		u8 divisor = parents[i].divisor;
++
++		names[i] = parents[i].name;
++		if (i == 4 && revision == 1) {
++			names[i] = "disp_mmpll2_d4";
++			source = "mmpll2";
++			divisor = 4;
++		}
++		hw = devm_clk_hw_register_fixed_factor(dev, names[i], source,
++						      CLK_GET_RATE_NOCACHE, 1, divisor);
++		if (IS_ERR(hw))
++			return PTR_ERR(hw);
++	}
++
++	hw = devm_clk_hw_register_mux(dev, "disp_sel", names, ARRAY_SIZE(names),
++				     CLK_GET_RATE_NOCACHE, base + 0x50, 24, 4,
++				     CLK_MUX_READ_ONLY, NULL);
++	if (IS_ERR(hw))
++		return PTR_ERR(hw);
++	data->hws[MT6991_CLK_CK2_DISP_SEL] = hw;
++	hw = devm_clk_hw_register_fixed_factor_parent_hw(dev, "disp", hw,
++							CLK_GET_RATE_NOCACHE, 1, 1);
++	if (IS_ERR(hw))
++		return PTR_ERR(hw);
++	data->hws[MT6991_CLK_CK2_DISP] = hw;
++	return devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get, data);
++}
++
++static const struct of_device_id mt6991_disp_clk_match[] = {
++	{ .compatible = "mediatek,mt6991-cksys_gp2" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, mt6991_disp_clk_match);
++
++static struct platform_driver mt6991_disp_clk_driver = {
++	.probe = mt6991_disp_clk_probe,
++	.driver = {
++		.name = "mt6991-disp-clock",
++		.of_match_table = mt6991_disp_clk_match,
++	},
++};
++module_platform_driver(mt6991_disp_clk_driver);
++MODULE_DESCRIPTION("MediaTek MT6991 display clock selector");
++MODULE_LICENSE("GPL");
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -247,6 +247,18 @@
+ 			#clock-cells = <1>;
+ 		};
+ 
++		clock-controller@1000c000 {
++			compatible = "mediatek,mt6991-cksys_gp2", "syscon";
++			reg = <0 0x1000c000 0 0x800>;
++			#clock-cells = <1>;
++		};
++
++		clock-controller@1000c800 {
++			compatible = "mediatek,mt6991-apmixedsys_gp2", "syscon";
++			reg = <0 0x1000c800 0 0x1000>;
++			#clock-cells = <1>;
++		};
++
+ 		dsi_phy0: dsi-phy@130b0000 {
+ 			compatible = "mediatek,mt6991-mipi-tx";
+ 			reg = <0 0x130b0000 0 0x1000>;

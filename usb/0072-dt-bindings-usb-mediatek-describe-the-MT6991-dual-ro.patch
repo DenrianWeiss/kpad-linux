@@ -1,0 +1,111 @@
+From 01f5ab4f55140f9f852549e31618a9005d64f74e Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 07:27:26 +0800
+Subject: [PATCH 72/73] dt-bindings: usb: mediatek: describe the MT6991
+ dual-role controller
+
+MT6991 uses system, xHCI and frame counter clocks for the parent. Its child host MAC has a single bus clock. Preserve the ordered clock lists for the existing SoCs.
+---
+ .../bindings/usb/mediatek,mtk-xhci.yaml       |  1 +
+ .../bindings/usb/mediatek,mtu3.yaml           | 56 ++++++++++++++-----
+ 2 files changed, 43 insertions(+), 14 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/usb/mediatek,mtk-xhci.yaml b/Documentation/devicetree/bindings/usb/mediatek,mtk-xhci.yaml
+index 231e6f3..625048d 100644
+--- a/Documentation/devicetree/bindings/usb/mediatek,mtk-xhci.yaml
++++ b/Documentation/devicetree/bindings/usb/mediatek,mtk-xhci.yaml
+@@ -25,6 +25,7 @@ properties:
+       - enum:
+           - mediatek,mt2701-xhci
+           - mediatek,mt2712-xhci
++          - mediatek,mt6991-xhci
+           - mediatek,mt7622-xhci
+           - mediatek,mt7623-xhci
+           - mediatek,mt7629-xhci
+diff --git a/Documentation/devicetree/bindings/usb/mediatek,mtu3.yaml b/Documentation/devicetree/bindings/usb/mediatek,mtu3.yaml
+index ef987f9..83021f8 100644
+--- a/Documentation/devicetree/bindings/usb/mediatek,mtu3.yaml
++++ b/Documentation/devicetree/bindings/usb/mediatek,mtu3.yaml
+@@ -13,6 +13,45 @@ maintainers:
+ allOf:
+   - $ref: usb-drd.yaml
+ 
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6991-mtu3
++    then:
++      properties:
++        clocks:
++          items:
++            - description: USB controller system clock
++            - description: xHCI host clock
++            - description: Frame counter clock
++        clock-names:
++          items:
++            - const: sys_ck
++            - const: xhci_ck
++            - const: frmcnt_ck
++    else:
++      properties:
++        clocks:
++          minItems: 1
++          items:
++            - description: Controller clock used by normal mode
++            - description: Reference clock used by low power mode etc
++            - description: Mcu bus clock for register access
++            - description: DMA bus clock for data transfer
++            - description: DRD controller clock
++            - description: Frame count clock
++
++        clock-names:
++          minItems: 1
++          items:
++            - const: sys_ck  # required, others are optional
++            - const: ref_ck
++            - const: mcu_ck
++            - const: dma_ck
++            - const: xhci_ck
++            - const: frmcnt_ck
++
+ description: |
+   The DRD controller has a glue layer IPPC (IP Port Control), and its host is
+   based on xHCI.
+@@ -22,6 +61,7 @@ properties:
+     items:
+       - enum:
+           - mediatek,mt2712-mtu3
++          - mediatek,mt6991-mtu3
+           - mediatek,mt8173-mtu3
+           - mediatek,mt8183-mtu3
+           - mediatek,mt8186-mtu3
+@@ -62,23 +102,11 @@ properties:
+ 
+   clocks:
+     minItems: 1
+-    items:
+-      - description: Controller clock used by normal mode
+-      - description: Reference clock used by low power mode etc
+-      - description: Mcu bus clock for register access
+-      - description: DMA bus clock for data transfer
+-      - description: DRD controller clock
+-      - description: Frame count clock
++    maxItems: 6
+ 
+   clock-names:
+     minItems: 1
+-    items:
+-      - const: sys_ck  # required, others are optional
+-      - const: ref_ck
+-      - const: mcu_ck
+-      - const: dma_ck
+-      - const: xhci_ck
+-      - const: frmcnt_ck
++    maxItems: 6
+ 
+   phys:
+     description:
+-- 
+2.50.1 (Apple Git-155)
+

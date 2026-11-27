@@ -1,0 +1,59 @@
+Subject: [RFC PATCH] PCI: mediatek-gen3: only assert the initial shared PHY reset at probe
+
+The suspend path already releases its PHY deassert reference. Asserting
+the shared reset again on resume attempts to release a nonexistent reference and
+triggers a warning. Move the initial assertion to setup, paired with its
+bootstrap deassertion. Retain the variant-specific reset delays.
+
+--- a/drivers/pci/controller/pcie-mediatek-gen3.c
++++ b/drivers/pci/controller/pcie-mediatek-gen3.c
+@@ -985,13 +985,6 @@
+ 	resource_size_t addr;
+ 	int err;
+ 
+-	/*
+-	 * The controller may have been left out of reset by the bootloader
+-	 * so make sure that we get a clean start by asserting resets here.
+-	 */
+-	reset_control_bulk_assert(pcie->soc->phy_resets.num_resets,
+-				  pcie->phy_resets);
+-
+ 	/* Wait for the time needed to complete the reset lines assert. */
+ 	msleep(PCIE_EN7581_RESET_TIME_MS);
+ 
+@@ -1092,12 +1085,6 @@
+ 	struct device *dev = pcie->dev;
+ 	int err;
+ 
+-	/*
+-	 * The controller may have been left out of reset by the bootloader
+-	 * so make sure that we get a clean start by asserting resets here.
+-	 */
+-	reset_control_bulk_assert(pcie->soc->phy_resets.num_resets,
+-				  pcie->phy_resets);
+ 	reset_control_assert(pcie->mac_reset);
+ 	usleep_range(PCIE_MTK_RESET_TIME_US, 2 * PCIE_MTK_RESET_TIME_US);
+ 
+@@ -1184,11 +1171,18 @@
+ 		return err;
+ 
+ 	/*
+-	 * Deassert the line in order to avoid unbalance in deassert_count
+-	 * counter since the bulk is shared.
++	 * The bootloader may have left the PHY out of reset. Acquire a
++	 * shared deassert reference before asserting it for initial
++	 * power-up. On resume, power_down() has already asserted the PHY.
+ 	 */
+-	reset_control_bulk_deassert(pcie->soc->phy_resets.num_resets,
+-				    pcie->phy_resets);
++	err = reset_control_bulk_deassert(pcie->soc->phy_resets.num_resets,
++					  pcie->phy_resets);
++	if (err)
++		return err;
++	err = reset_control_bulk_assert(pcie->soc->phy_resets.num_resets,
++					pcie->phy_resets);
++	if (err)
++		return err;
+ 
+ 	/* Don't touch the hardware registers before power up */
+ 	err = pcie->soc->power_up(pcie);

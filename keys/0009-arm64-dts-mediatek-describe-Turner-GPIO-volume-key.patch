@@ -1,0 +1,62 @@
+From f073d24928ce15e3f55d03b4f9b2a44e66baf6bb Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 02:17:09 +0800
+Subject: [PATCH] arm64: dts: mediatek: describe the Turner GPIO volume key
+
+Use the keycode, pull resistor setting, active-low polarity and debounce interval from the stock Turner device tree. The other volume key is on the separate keypad controller.
+---
+ .../dts/mediatek/mt6991-xiaomi-turner.dts     | 23 +++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+index 88ac94a..b52111e 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
++++ b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+@@ -1,6 +1,8 @@
+ // SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+ /dts-v1/;
+ 
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/input.h>
+ #include "mt8196-pinfunc.h"
+ #include "mt6991.dtsi"
+ 
+@@ -13,6 +15,19 @@ aliases {
+ 		serial0 = &uart0;
+ 	};
+ 
++	gpio-keys {
++		compatible = "gpio-keys";
++		pinctrl-names = "default";
++		pinctrl-0 = <&volume_key_pins>;
++
++		key-volume-up {
++			linux,code = <KEY_VOLUMEUP>;
++			gpios = <&pio 60 GPIO_ACTIVE_LOW>;
++			debounce-interval = <32>;
++			wakeup-source;
++		};
++	};
++
+ 	/* Boot firmware must supply the final DRAM banks and carveouts. */
+ 	memory@80000000 {
+ 		device_type = "memory";
+@@ -29,7 +44,15 @@ pins {
+ 				 <PINMUX_GPIO84__FUNC_SPI6_B_MI>;
+ 			drive-strength = <10>;
+ 		};
+ 	};
++
++	volume_key_pins: volume-key-pins {
++		pins {
++			pinmux = <PINMUX_GPIO60__FUNC_GPIO60>;
++			input-enable;
++			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
++		};
++	};
+ };
+ 
+ &spi6 {
+-- 
+2.50.1 (Apple Git-155)
+

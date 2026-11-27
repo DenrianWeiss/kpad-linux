@@ -1,0 +1,55 @@
+From 99a86e29c2661474e51d1b4201e450c16dcc2fcb Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 05:48:57 +0800
+Subject: [PATCH] dt-bindings: phy: mediatek: describe MT6991 DSI PHY
+
+Each MT6991 MIPI TX instance has a PLL reference input and its own power domain. The PLL programming and lane controls differ from MT8196, so describe MT6991 with a dedicated compatible.
+---
+ .../bindings/phy/mediatek,dsi-phy.yaml          | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/phy/mediatek,dsi-phy.yaml b/Documentation/devicetree/bindings/phy/mediatek,dsi-phy.yaml
+index 9df1dbe..d6a52e2 100644
+--- a/Documentation/devicetree/bindings/phy/mediatek,dsi-phy.yaml
++++ b/Documentation/devicetree/bindings/phy/mediatek,dsi-phy.yaml
+@@ -37,6 +37,7 @@ properties:
+               - mediatek,mt8365-mipi-tx
+           - const: mediatek,mt8183-mipi-tx
+       - const: mediatek,mt2701-mipi-tx
++      - const: mediatek,mt6991-mipi-tx
+       - const: mediatek,mt8173-mipi-tx
+       - const: mediatek,mt8183-mipi-tx
+       - const: mediatek,mt8196-mipi-tx
+@@ -48,6 +49,9 @@ properties:
+     items:
+       - description: PLL reference clock
+ 
++  power-domains:
++    maxItems: 1
++
+   clock-output-names:
+     maxItems: 1
+ 
+@@ -81,6 +85,19 @@ required:
+   - "#phy-cells"
+   - "#clock-cells"
+ 
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6991-mipi-tx
++    then:
++      required:
++        - power-domains
++    else:
++      properties:
++        power-domains: false
++
+ additionalProperties: false
+ 
+ examples:
+-- 
+2.50.1 (Apple Git-155)
+

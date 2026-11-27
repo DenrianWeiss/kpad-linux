@@ -1,0 +1,70 @@
+From 2ce3214576feaab89a7224640bd4a81c8cb1dfc9 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 10:04:16 +0800
+Subject: [PATCH 91/92] pmdomain: mediatek: add MT6991 overlay and DISP0 voters
+
+---
+ drivers/pmdomain/mediatek/mt6991-pm-domains.h | 40 +++++++++----------
+ 1 file changed, 18 insertions(+), 22 deletions(-)
+
+diff --git a/drivers/pmdomain/mediatek/mt6991-pm-domains.h b/drivers/pmdomain/mediatek/mt6991-pm-domains.h
+index 96bd9b203..27d5dd054 100644
+--- a/drivers/pmdomain/mediatek/mt6991-pm-domains.h
++++ b/drivers/pmdomain/mediatek/mt6991-pm-domains.h
+@@ -102,6 +102,19 @@ static const struct scpsys_soc_data mt6991_spm_hwv_data = {
+ 	.type = SCPSYS_MTCMOS_TYPE_HW_VOTER,
+ };
+ 
++#define MT6991_MM_DISP_VOTER(_id, _name, _bit)	\
++	[MT6991_POWER_DOMAIN_##_id] = {	\
++		.name = _name,	\
++		.set = 0x218,	\
++		.clr = 0x21c,	\
++		.done = 0x141c,	\
++		.en = 0x1410,	\
++		.set_sta = 0x146c,	\
++		.clr_sta = 0x1470,	\
++		.setclr_bit = _bit,	\
++		.sleepable = true,	\
++	}
++
+ static const struct scpsys_hwv_domain_data mt6991_mm_voters[] = {
+ 	[MT6991_POWER_DOMAIN_DSI_PHY0] = {
+ 		.name = "dsi-phy0",
+@@ -114,28 +127,11 @@ static const struct scpsys_hwv_domain_data mt6991_mm_voters[] = {
+ 		.setclr_bit = 7,
+ 		.sleepable = true,
+ 	},
+-	[MT6991_POWER_DOMAIN_DISP_VCORE] = {
+-		.name = "disp-vcore",
+-		.set = 0x218,
+-		.clr = 0x21c,
+-		.done = 0x141c,
+-		.en = 0x1410,
+-		.set_sta = 0x146c,
+-		.clr_sta = 0x1470,
+-		.setclr_bit = 24,
+-		.sleepable = true,
+-	},
+-	[MT6991_POWER_DOMAIN_DIS1_DORMANT] = {
+-		.name = "dis1-dormant",
+-		.set = 0x218,
+-		.clr = 0x21c,
+-		.done = 0x141c,
+-		.en = 0x1410,
+-		.set_sta = 0x146c,
+-		.clr_sta = 0x1470,
+-		.setclr_bit = 26,
+-		.sleepable = true,
+-	},
++	MT6991_MM_DISP_VOTER(DISP_VCORE, "disp-vcore", 24),
++	MT6991_MM_DISP_VOTER(DIS0_DORMANT, "dis0-dormant", 25),
++	MT6991_MM_DISP_VOTER(DIS1_DORMANT, "dis1-dormant", 26),
++	MT6991_MM_DISP_VOTER(OVL0_DORMANT, "ovl0-dormant", 27),
++	MT6991_MM_DISP_VOTER(OVL1_DORMANT, "ovl1-dormant", 28),
+ };
+ 
+ static const struct scpsys_soc_data mt6991_mm_hwv_data = {
+-- 
+2.50.1 (Apple Git-155)
+

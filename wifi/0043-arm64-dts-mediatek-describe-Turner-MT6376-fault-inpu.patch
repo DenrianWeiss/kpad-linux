@@ -1,0 +1,43 @@
+From 59e2749ce8039e329a054116b74a6e0dcb5f863a Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:54:02 +0800
+Subject: [PATCH] arm64: dts: mediatek: describe Turner MT6376 fault input
+ states
+
+FAULTB needs a pull-up while the connectivity PMIC is powered. Pull it down after the shutdown delay. Ensure the SoC never drives this input through its GPIO output buffer.
+---
+ .../boot/dts/mediatek/mt6991-xiaomi-turner.dts | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+index 49668a6..7baf3d5 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
++++ b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+@@ -74,6 +74,24 @@ pins {
+ 		};
+ 	};
+ 
++	mt6376_fault_active_pins: mt6376-fault-active-pins {
++		pins {
++			pinmux = <PINMUX_GPIO245__FUNC_GPIO245>;
++			output-disable;
++			input-enable;
++			bias-pull-up;
++		};
++	};
++
++	mt6376_fault_sleep_pins: mt6376-fault-sleep-pins {
++		pins {
++			pinmux = <PINMUX_GPIO245__FUNC_GPIO245>;
++			output-disable;
++			input-enable;
++			bias-pull-down;
++		};
++	};
++
+ 	pcie0_reset_pins: pcie0-reset-pins {
+ 		pins-perst {
+ 			pinmux = <PINMUX_GPIO241__FUNC_GPIO241>;
+-- 
+2.50.1 (Apple Git-155)
+

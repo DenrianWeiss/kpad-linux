@@ -1,0 +1,40 @@
+From e6b148308f73b58dd7f125c66e0f01a89c5e9224 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:48:35 +0800
+Subject: [PATCH] pinctrl: mediatek: paris: support setting GPIO output enable
+ separately
+
+Turner connectivity pins must stop driving during the pull-down and pull-up phases. Input-enable on Paris hardware controls the input buffer independently of the GPIO direction. Implement the generic output-enable configuration using DIR, leaving the output latch and input buffer intact.
+---
+ drivers/pinctrl/mediatek/pinctrl-paris.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/drivers/pinctrl/mediatek/pinctrl-paris.c b/drivers/pinctrl/mediatek/pinctrl-paris.c
+index 09098b6..a233428 100644
+--- a/drivers/pinctrl/mediatek/pinctrl-paris.c
++++ b/drivers/pinctrl/mediatek/pinctrl-paris.c
+@@ -161,6 +161,11 @@ static int mtk_pinconf_get(struct pinctrl_dev *pctldev,
+ 				err = -EINVAL;
+ 		}
+ 		break;
++	case PIN_CONFIG_OUTPUT_ENABLE:
++		err = mtk_hw_get_value(hw, desc, PINCTRL_PIN_REG_DIR, &ret);
++		if (!err && !ret)
++			err = -EINVAL;
++		break;
+ 	case PIN_CONFIG_SLEW_RATE:
+ 		err = mtk_hw_get_value(hw, desc, PINCTRL_PIN_REG_SR, &ret);
+ 		break;
+@@ -292,6 +297,9 @@ static int mtk_pinconf_set(struct pinctrl_dev *pctldev, unsigned int pin,
+ 		/* regard all non-zero value as enable */
+ 		err = mtk_hw_set_value(hw, desc, PINCTRL_PIN_REG_SR, !!arg);
+ 		break;
++	case PIN_CONFIG_OUTPUT_ENABLE:
++		err = mtk_hw_set_value(hw, desc, PINCTRL_PIN_REG_DIR, !!arg);
++		break;
+ 	case PIN_CONFIG_LEVEL:
+ 		err = mtk_hw_set_value(hw, desc, PINCTRL_PIN_REG_DO,
+ 				       arg);
+-- 
+2.50.1 (Apple Git-155)
+

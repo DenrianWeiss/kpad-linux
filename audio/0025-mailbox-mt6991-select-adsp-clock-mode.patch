@@ -1,0 +1,105 @@
+--- a/drivers/mailbox/mt6991-adsp-mailbox.c
++++ b/drivers/mailbox/mt6991-adsp-mailbox.c
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* MediaTek MT6991 audio DSP direct receive mailboxes */
++#include <linux/arm-smccc.h>
+ #include <linux/clk.h>
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+@@ -12,6 +13,9 @@
+ 
+ #define MT6991_ADSP_SPM_WAKEUPSRC(core) (0x5c + 4 * (core))
+ #define MT6991_ADSP_WAKEUP_SPM BIT(0)
++#define MT6991_SIP_ADSP_CONTROL 0xc200052b
++#define MT6991_ADSP_SET_CLOCK_MUX 11
++#define MT6991_ADSP_MAGIC 0xad5bad5b
+ #define MT6991_ADSP_CORE_CONTROL 0x108
+ 
+ struct mt6991_rx {
+@@ -25,6 +29,8 @@
+ 	struct mbox_controller controller;
+ 	void __iomem *core_control;
+ 	struct clk *clk;
++	struct clk *pll;
++	struct clk *clk26m;
+ 	struct mbox_chan chan[2];
+ 	struct mt6991_rx rx[2];
+ };
+@@ -51,6 +57,55 @@
+ 	return IRQ_HANDLED;
+ }
+ 
++/* The local DSP mux is owned by the secure firmware. */
++static int mt6991_adsp_local_mux(struct device *dev, bool high)
++{
++	struct arm_smccc_res res;
++
++	arm_smccc_smc(MT6991_SIP_ADSP_CONTROL, MT6991_ADSP_SET_CLOCK_MUX,
++		      MT6991_ADSP_MAGIC, high, 0, 0, 0, 0, &res);
++	if (!res.a0)
++		return 0;
++
++	dev_err(dev, "firmware rejected ADSP clock mode %u (%#lx)\n", high, res.a0);
++	return -EIO;
++}
++
++static int mt6991_adsp_runtime_resume(struct device *dev)
++{
++	struct mt6991_adsp_mailbox *mb = dev_get_drvdata(dev);
++	struct clk *old_parent = clk_get_parent(mb->clk);
++	int ret;
++
++	if (!old_parent)
++		return -ENODEV;
++	ret = clk_set_parent(mb->clk, mb->pll);
++	if (ret)
++		return ret;
++	ret = mt6991_adsp_local_mux(dev, true);
++	if (ret && clk_set_parent(mb->clk, old_parent))
++		dev_err(dev, "failed to restore ADSP clock parent\n");
++	return ret;
++}
++
++static int mt6991_adsp_runtime_suspend(struct device *dev)
++{
++	struct mt6991_adsp_mailbox *mb = dev_get_drvdata(dev);
++	int ret;
++
++	ret = mt6991_adsp_local_mux(dev, false);
++	if (ret)
++		return ret;
++	ret = clk_set_parent(mb->clk, mb->clk26m);
++	if (ret)
++		mt6991_adsp_local_mux(dev, true);
++	return ret;
++}
++
++static const struct dev_pm_ops mt6991_adsp_pm_ops = {
++	RUNTIME_PM_OPS(mt6991_adsp_runtime_suspend, mt6991_adsp_runtime_resume, NULL)
++};
++
+ static int mt6991_adsp_startup(struct mbox_chan *chan)
+ {
+ 	struct mt6991_adsp_mailbox *mb = dev_get_drvdata(chan->mbox->dev);
+@@ -140,6 +195,12 @@
+ 	mb->clk = devm_clk_get(dev, "clk_top_adsp_sel");
+ 	if (IS_ERR(mb->clk))
+ 		return dev_err_probe(dev, PTR_ERR(mb->clk), "getting ADSP clock\n");
++	mb->pll = devm_clk_get(dev, "clk_top_adsppll");
++	if (IS_ERR(mb->pll))
++		return dev_err_probe(dev, PTR_ERR(mb->pll), "getting ADSP PLL\n");
++	mb->clk26m = devm_clk_get(dev, "clk_top_clk26m");
++	if (IS_ERR(mb->clk26m))
++		return dev_err_probe(dev, PTR_ERR(mb->clk26m), "getting 26 MHz clock\n");
+ 	platform_set_drvdata(pdev, mb);
+ 
+ 	for (i = 0; i < ARRAY_SIZE(mb->rx); i++) {
+@@ -194,6 +255,7 @@
+ 	.driver = {
+ 		.name = "mt6991-adsp-mailbox",
+ 		.of_match_table = mt6991_adsp_match,
++		.pm = pm_ptr(&mt6991_adsp_pm_ops),
+ 	},
+ };
+ module_platform_driver(mt6991_adsp_mailbox_driver);

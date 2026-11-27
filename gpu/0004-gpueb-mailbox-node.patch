@@ -1,0 +1,26 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] arm64: dts: mediatek: describe MT6991 GPUEB mailbox
+
+Describe the data and control windows, level interrupt and EB clock.
+Leave the controller disabled until the GPU power consumer is ready.
+
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -603,6 +603,17 @@
+ 			#clock-cells = <1>;
+ 			status = "disabled";
+ 		};
++
++		gpueb_mbox: mailbox@4b09fd80 {
++			compatible = "mediatek,mt6991-gpueb-mbox",
++				     "mediatek,mt8196-gpueb-mbox";
++			reg = <0 0x4b09fd80 0 0x280>, <0 0x4b170000 0 0x7c>;
++			reg-names = "data", "ctl";
++			clocks = <&topckgen MT6991_CLK_TOP_MFG_EB>;
++			interrupts = <GIC_SPI 608 IRQ_TYPE_LEVEL_HIGH>;
++			#mbox-cells = <1>;
++			status = "disabled";
++		};
+ 	};
+ 
+ 	timer {

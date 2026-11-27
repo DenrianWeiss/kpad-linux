@@ -1,0 +1,70 @@
+Subject: [PATCH] i2c: mediatek: support the MT6991 camera AP channel
+
+--- a/drivers/i2c/busses/i2c-mt65xx.c
++++ b/drivers/i2c/busses/i2c-mt65xx.c
+@@ -295,6 +295,9 @@
+ 	struct i2c_timings timing_info;
+ 
+ 	/* set in i2c probe */
++	void __iomem *shadow;
++	void __iomem *scp;
++	void __iomem *ccu;
+ 	void __iomem *base;		/* i2c base addr */
+ 	void __iomem *pdmabase;		/* dma base address*/
+ 	struct clk_bulk_data clocks[I2C_MT65XX_CLK_MAX]; /* clocks for i2c */
+@@ -582,6 +585,14 @@
+ 	u16 intr_stat_reg;
+ 	u16 ext_conf_val;
+ 
++	/* MT6991 AP v1 shares the controller with SCP and CCU. */
++	if (i2c->shadow && !mtk_i2c_readw(i2c, OFFSET_TIMING)) {
++		writel(BIT(1), i2c->shadow + i2c->dev_comp->regs[OFFSET_MULTI_DMA]);
++		wmb();
++		writel(BIT(0), i2c->base + 0x40);
++		writel(BIT(2), i2c->scp + 0x40);
++		writel(BIT(1), i2c->ccu + 0x40);
++	}
+ 	mtk_i2c_writew(i2c, I2C_CHN_CLR_FLAG, OFFSET_START);
+ 	intr_stat_reg = mtk_i2c_readw(i2c, OFFSET_INTR_STAT);
+ 	mtk_i2c_writew(i2c, intr_stat_reg, OFFSET_INTR_STAT);
+@@ -1175,6 +1186,8 @@
+ 	mtk_i2c_writew(i2c, restart_flag | I2C_HS_NACKERR | I2C_ACKERR |
+ 			    I2C_ARB_LOST | I2C_TRANSAC_COMP, OFFSET_INTR_STAT);
+ 
++	if (i2c->shadow)
++		mtk_i2c_writew(i2c, BIT(2), OFFSET_FIFO_ADDR_CLR);
+ 	mtk_i2c_writew(i2c, I2C_FIFO_ADDR_CLR, OFFSET_FIFO_ADDR_CLR);
+ 
+ 	/* Enable interrupt */
+@@ -1536,14 +1549,30 @@
+ 	int ret = 0;
+ 	struct mtk_i2c *i2c;
+ 	int i, irq, speed_clk;
++	struct resource *res;
++	u32 channel, ap, scp, ccu;
+ 
+ 	i2c = devm_kzalloc(&pdev->dev, sizeof(*i2c), GFP_KERNEL);
+ 	if (!i2c)
+ 		return -ENOMEM;
+ 
+-	i2c->base = devm_platform_get_and_ioremap_resource(pdev, 0, NULL);
++	i2c->base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+ 	if (IS_ERR(i2c->base))
+ 		return PTR_ERR(i2c->base);
++
++	if (of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-i2c") &&
++	    !device_property_read_u32(&pdev->dev, "ch-offset-i2c", &channel) && channel) {
++		if (device_property_read_u32(&pdev->dev, "i2c-offset-ap", &ap) ||
++		    device_property_read_u32(&pdev->dev, "ch-offset-scp", &scp) ||
++		    device_property_read_u32(&pdev->dev, "ch-offset-ccu", &ccu) ||
++		    channel != 0x10000 || channel != ap || scp != 0x30000 ||
++		    ccu != 0x20000 || resource_size(res) < scp + 0x1000)
++			return -EOPNOTSUPP;
++		i2c->shadow = i2c->base;
++		i2c->scp = i2c->base + scp;
++		i2c->ccu = i2c->base + ccu;
++		i2c->base += channel;
++	}
+ 
+ 	i2c->pdmabase = devm_platform_get_and_ioremap_resource(pdev, 1, NULL);
+ 	if (IS_ERR(i2c->pdmabase))

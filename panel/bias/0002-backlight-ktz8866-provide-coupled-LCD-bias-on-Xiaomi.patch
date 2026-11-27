@@ -1,0 +1,203 @@
+From 0fdd43047c6f2720c2bcb3d7b8133bee1d62304c Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 08:59:05 +0800
+Subject: [RFC PATCH 2/2] backlight: ktz8866: provide coupled LCD bias on
+ Xiaomi Turner
+
+---
+ drivers/video/backlight/ktz8866.c | 133 ++++++++++++++++++++++++++++--
+ 1 file changed, 126 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/video/backlight/ktz8866.c b/drivers/video/backlight/ktz8866.c
+index 53c1301..4b2ba5a 100644
+--- a/drivers/video/backlight/ktz8866.c
++++ b/drivers/video/backlight/ktz8866.c
+@@ -12,6 +12,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/regmap.h>
++#include <linux/regulator/driver.h>
+ 
+ #define DEFAULT_BRIGHTNESS 1500
+ #define MAX_BRIGHTNESS 2047
+@@ -47,6 +48,7 @@ struct ktz8866 {
+ 	struct i2c_client *client;
+ 	struct regmap *regmap;
+ 	bool led_on;
++	bool turner;
+ 	struct gpio_desc *enable_gpio;
+ };
+ 
+@@ -68,11 +70,110 @@ static int ktz8866_update_bits(struct ktz8866 *ktz, unsigned int reg,
+ 	return regmap_update_bits(ktz->regmap, reg, mask, val);
+ }
+ 
++/* Turner uses four LED strings and enables PWM option 2 on unblank. */
++static int ktz8866_turner_brightness(struct ktz8866 *ktz, unsigned int brightness)
++{
++	int ret;
++
++	ret = ktz8866_write(ktz, BL_BRT_LSB, brightness & 7);
++	if (ret)
++		return ret;
++	ret = ktz8866_write(ktz, BL_BRT_MSB, brightness >> 3);
++	if (ret || !brightness || ktz->led_on) {
++		if (!ret && !brightness)
++			ktz->led_on = false;
++		return ret;
++	}
++	ret = ktz8866_write(ktz, BL_EN, 0x4f);
++	if (!ret)
++		ret = ktz8866_write(ktz, BL_OPTION2, 0x37);
++	if (!ret)
++		ktz->led_on = true;
++	return ret;
++}
++
++#if IS_ENABLED(CONFIG_REGULATOR)
++static const struct reg_sequence turner_config[] = {
++	{ BL_CFG1, 0x53 }, { BL_CFG2, 0xcd }, { LCD_BOOST_CFG, 0x34 },
++	{ PWM_RAMP_TIME, 0xd9 }, { OUTP_CFG, 0x2a }, { OUTN_CFG, 0x24 },
++};
++
++static const struct reg_sequence turner_enable[] = {
++	{ LCD_BIAS_CFG1, 0x9c, 5000 }, { LCD_BIAS_CFG1, 0x9e, 8000 },
++};
++
++static const struct reg_sequence turner_disable[] = {
++	{ LCD_BIAS_CFG1, 0x9c, 5000 }, { LCD_BIAS_CFG1, 0x98, 2000 },
++	{ LCD_BIAS_CFG1, 0x18 },
++};
++
++static int ktz8866_bias_disable(struct regulator_dev *rdev)
++{
++	return regmap_multi_reg_write(rdev_get_regmap(rdev), turner_disable,
++				      ARRAY_SIZE(turner_disable));
++}
++
++static int ktz8866_bias_enable(struct regulator_dev *rdev)
++{
++	struct regmap *map = rdev_get_regmap(rdev);
++	int ret;
++
++	ret = regmap_multi_reg_write(map, turner_config, ARRAY_SIZE(turner_config));
++	if (ret)
++		return ret;
++	ret = regmap_multi_reg_write(map, turner_enable, ARRAY_SIZE(turner_enable));
++	if (ret && ktz8866_bias_disable(rdev))
++		dev_err(&rdev->dev, "failed to unwind LCD bias\n");
++	return ret;
++}
++
++static int ktz8866_bias_is_enabled(struct regulator_dev *rdev)
++{
++	unsigned int value;
++	int ret = regmap_read(rdev_get_regmap(rdev), LCD_BIAS_CFG1, &value);
++
++	return ret ? ret : value == 0x9e;
++}
++
++static const struct regulator_ops turner_bias_ops = {
++	.enable = ktz8866_bias_enable,
++	.disable = ktz8866_bias_disable,
++	.is_enabled = ktz8866_bias_is_enabled,
++};
++
++static const struct regulator_desc turner_bias_desc = {
++	.name = "ktz8866-lcd-bias",
++	.of_match = "lcd-bias",
++	.ops = &turner_bias_ops,
++	.type = REGULATOR_VOLTAGE,
++	.owner = THIS_MODULE,
++};
++
++static int ktz8866_register_bias(struct ktz8866 *ktz)
++{
++	struct regulator_config config = {
++		.dev = &ktz->client->dev,
++		.regmap = ktz->regmap,
++	};
++
++	return PTR_ERR_OR_ZERO(devm_regulator_register(config.dev, &turner_bias_desc,
++						       &config));
++}
++#else
++static int ktz8866_register_bias(struct ktz8866 *ktz)
++{
++	return -EOPNOTSUPP;
++}
++#endif
++
+ static int ktz8866_backlight_update_status(struct backlight_device *backlight_dev)
+ {
+ 	struct ktz8866 *ktz = bl_get_data(backlight_dev);
+ 	unsigned int brightness = backlight_get_brightness(backlight_dev);
+ 
++	if (ktz->turner)
++		return ktz8866_turner_brightness(ktz, brightness);
++
+ 	if (!ktz->led_on && brightness > 0) {
+ 		ktz8866_update_bits(ktz, BL_EN, BL_EN_BIT, BL_EN_BIT);
+ 		ktz->led_on = true;
+@@ -140,19 +241,27 @@ static int ktz8866_probe(struct i2c_client *client)
+ 	if (IS_ERR(ktz->regmap))
+ 		return dev_err_probe(&client->dev, PTR_ERR(ktz->regmap), "failed to init regmap\n");
+ 
+-	ret = devm_regulator_get_enable(&client->dev, "vddpos");
+-	if (ret)
+-		return dev_err_probe(&client->dev, ret, "get regulator vddpos failed\n");
+-	ret = devm_regulator_get_enable(&client->dev, "vddneg");
+-	if (ret)
+-		return dev_err_probe(&client->dev, ret, "get regulator vddneg failed\n");
++	ktz->turner = of_device_is_compatible(client->dev.of_node, "xiaomi,turner-ktz8866");
++	if (!ktz->turner) {
++		ret = devm_regulator_get_enable(&client->dev, "vddpos");
++		if (ret)
++			return dev_err_probe(&client->dev, ret, "get regulator vddpos failed\n");
++		ret = devm_regulator_get_enable(&client->dev, "vddneg");
++		if (ret)
++			return dev_err_probe(&client->dev, ret, "get regulator vddneg failed\n");
++	}
+ 
+-	ktz->enable_gpio = devm_gpiod_get_optional(&client->dev, "enable", GPIOD_OUT_HIGH);
++	if (ktz->turner)
++		ktz->enable_gpio = devm_gpiod_get(&client->dev, "enable", GPIOD_OUT_HIGH);
++	else
++		ktz->enable_gpio = devm_gpiod_get_optional(&client->dev, "enable", GPIOD_OUT_HIGH);
+ 	if (IS_ERR(ktz->enable_gpio))
+ 		return PTR_ERR(ktz->enable_gpio);
+ 
+ 	memset(&props, 0, sizeof(props));
+ 	props.type = BACKLIGHT_RAW;
++	if (ktz->turner)
++		props.power = BACKLIGHT_POWER_OFF;
+ 	props.max_brightness = MAX_BRIGHTNESS;
+ 	props.brightness = DEFAULT_BRIGHTNESS;
+ 	props.scale = BACKLIGHT_SCALE_LINEAR;
+@@ -163,6 +272,14 @@ static int ktz8866_probe(struct i2c_client *client)
+ 		return dev_err_probe(&client->dev, PTR_ERR(backlight_dev),
+ 				"failed to register backlight device\n");
+ 
++	if (ktz->turner) {
++		ret = ktz8866_register_bias(ktz);
++		if (ret)
++			return dev_err_probe(&client->dev, ret, "register LCD bias\n");
++		i2c_set_clientdata(client, backlight_dev);
++		return 0;
++	}
++
+ 	ktz8866_init(ktz);
+ 
+ 	i2c_set_clientdata(client, backlight_dev);
+@@ -186,6 +303,8 @@ MODULE_DEVICE_TABLE(i2c, ktz8866_ids);
+ 
+ static const struct of_device_id ktz8866_match_table[] = {
+ 	{
++		.compatible = "xiaomi,turner-ktz8866",
++	}, {
+ 		.compatible = "kinetic,ktz8866",
+ 	},
+ 	{},
+-- 
+2.50.1 (Apple Git-155)
+

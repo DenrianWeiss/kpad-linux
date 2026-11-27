@@ -1,0 +1,36 @@
+From 5cfd1c07d67c22148e23107056fb6e458c528953 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 07:31:56 +0800
+Subject: [PATCH] dt-bindings: pinctrl: mediatek: allow raw RSEL values on
+ MT8196
+
+The Paris driver accepts the encoded selector when resistances in SI units are not requested. Turner uses the maximum selector for the I2C3 pin pair. Document the existing interface for both bias directions.
+---
+ .../devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml  | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml b/Documentation/devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml
+index 33a3093..2e467fe 100644
+--- a/Documentation/devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml
++++ b/Documentation/devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml
+@@ -124,6 +124,8 @@ patternProperties:
+           bias-pull-down:
+             oneOf:
+               - type: boolean
++              - enum: [200, 201, 202, 203, 204, 205, 206, 207]
++                description: Raw three-bit pull resistor selector from mt65xx.h.
+               - enum: [100, 101, 102, 103]
+                 description: mt8196 pull down PUPD/R0/R1 type define value.
+               - enum: [75000, 5000]
+@@ -143,6 +145,8 @@ patternProperties:
+           bias-pull-up:
+             oneOf:
+               - type: boolean
++              - enum: [200, 201, 202, 203, 204, 205, 206, 207]
++                description: Raw three-bit pull resistor selector from mt65xx.h.
+               - enum: [100, 101, 102, 103]
+                 description: mt8196 pull up PUPD/R0/R1 type define value.
+               - enum: [1000, 1500, 2000, 3000, 4000, 5000, 75000]
+-- 
+2.50.1 (Apple Git-155)
+

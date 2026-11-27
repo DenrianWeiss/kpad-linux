@@ -1,0 +1,116 @@
+From b5df3e36f7ba3f57057ff1ad436d07cbbb9a7e27 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:06:27 +0800
+Subject: [PATCH 15/15] phy: mediatek: xsphy: apply MT6991 USB2 impedance
+ calibration
+
+Read the USB2 trim cells at probe time for MT6991 and apply them on
+port power-on. The vendor driver skips each zero field independently.
+Preserve the other register bits and report invalid cell values before
+starting the PHY.
+
+---
+ drivers/phy/mediatek/phy-mtk-xsphy.c | 53 ++++++++++++++++++++++++++++
+ 1 file changed, 53 insertions(+)
+
+diff --git a/drivers/phy/mediatek/phy-mtk-xsphy.c b/drivers/phy/mediatek/phy-mtk-xsphy.c
+index cc1d669..d123bc6 100644
+--- a/drivers/phy/mediatek/phy-mtk-xsphy.c
++++ b/drivers/phy/mediatek/phy-mtk-xsphy.c
+@@ -13,6 +13,7 @@
+ #include <linux/iopoll.h>
+ #include <linux/mfd/syscon.h>
+ #include <linux/module.h>
++#include <linux/nvmem-consumer.h>
+ #include <linux/of_address.h>
+ #include <linux/phy/phy.h>
+ #include <linux/platform_device.h>
+@@ -62,6 +63,12 @@
+ #define P2A6_RG_BC11_SW_EN	BIT(23)
+ #define P2A6_RG_OTG_VBUSCMP_EN	BIT(20)
+ 
++#define XSP_U2_HS_TRIM0		(SSUSB_SIFSLV_U2PHY_COM + 0x040)
++#define P2_HSRX_TERM_CAL	GENMASK(19, 16)
++#define P2_HSTX_IMPN		GENMASK(24, 20)
++#define XSP_U2_HS_TRIM1		(SSUSB_SIFSLV_U2PHY_COM + 0x044)
++#define P2_HSTX_IMPP		GENMASK(12, 8)
++
+ #define XSP_U2PHYDTM1		((SSUSB_SIFSLV_U2PHY_COM) + 0x06C)
+ #define P2D_FORCE_IDDIG		BIT(9)
+ #define P2D_RG_VBUSVALID	BIT(5)
+@@ -103,6 +110,9 @@ struct xsphy_instance {
+ 	int efuse_intr;
+ 	int efuse_tx_imp;
+ 	int efuse_rx_imp;
++	u32 hsrx_term;
++	u32 hstx_impn;
++	u32 hstx_impp;
+ 	/* u2 eye diagram */
+ 	int eye_src;
+ 	int eye_vrt;
+@@ -187,12 +197,49 @@ static void u2_phy_instance_init(struct mtk_xsphy *xsphy,
+ 	mtk_phy_set_bits(pbase + XSP_USBPHYACR0, P2A0_RG_INTR_EN);
+ }
+ 
++static int u2_phy_read_trims(struct xsphy_instance *inst)
++{
++	struct device *dev = &inst->phy->dev;
++	int ret;
++
++	if (!device_property_present(dev, "nvmem-cells"))
++		return 0;
++
++	ret = nvmem_cell_read_variable_le_u32(dev, "hsrx-term", &inst->hsrx_term);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read HS RX termination trim\n");
++	ret = nvmem_cell_read_variable_le_u32(dev, "hstx-impn", &inst->hstx_impn);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read HS TX NMOS trim\n");
++	ret = nvmem_cell_read_variable_le_u32(dev, "hstx-impp", &inst->hstx_impp);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read HS TX PMOS trim\n");
++
++	if (!FIELD_FIT(P2_HSRX_TERM_CAL, inst->hsrx_term) ||
++	    !FIELD_FIT(P2_HSTX_IMPN, inst->hstx_impn) ||
++	    !FIELD_FIT(P2_HSTX_IMPP, inst->hstx_impp))
++		return dev_err_probe(dev, -ERANGE, "invalid USB2 trim value\n");
++
++	return 0;
++}
++
+ static void u2_phy_instance_power_on(struct mtk_xsphy *xsphy,
+ 				     struct xsphy_instance *inst)
+ {
+ 	void __iomem *pbase = inst->port_base;
+ 	u32 index = inst->index;
+ 
++	/* A zero trim leaves the corresponding factory setting in place. */
++	if (inst->hsrx_term)
++		mtk_phy_update_field(pbase + XSP_U2_HS_TRIM0, P2_HSRX_TERM_CAL,
++				     inst->hsrx_term);
++	if (inst->hstx_impn)
++		mtk_phy_update_field(pbase + XSP_U2_HS_TRIM0, P2_HSTX_IMPN,
++				     inst->hstx_impn);
++	if (inst->hstx_impp)
++		mtk_phy_update_field(pbase + XSP_U2_HS_TRIM1, P2_HSTX_IMPP,
++				     inst->hstx_impp);
++
+ 	mtk_phy_set_bits(pbase + XSP_USBPHYACR6, P2A6_RG_OTG_VBUSCMP_EN);
+ 
+ 	mtk_phy_update_bits(pbase + XSP_U2PHYDTM1,
+@@ -587,6 +634,12 @@ static int mtk_xsphy_probe(struct platform_device *pdev)
+ 			return PTR_ERR(inst->ref_clk);
+ 		}
+ 
++		if (of_device_is_compatible(np, "mediatek,mt6991-xsphy")) {
++			retval = u2_phy_read_trims(inst);
++			if (retval)
++				return retval;
++		}
++
+ 		retval = phy_type_syscon_get(inst, child_np);
+ 		if (retval)
+ 			return retval;
+-- 
+2.50.1 (Apple Git-155)
+

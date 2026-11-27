@@ -1,0 +1,43 @@
+--- a/drivers/clk/mediatek/clk-mt8196-vlpckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-vlpckgen.c
+@@ -648,6 +648,23 @@
+ 	.num_mux_clks = ARRAY_SIZE(mt6991_vlp_muxes),
+ };
+ 
++/* Firmware uses the full MT6991 VLP clock table. */
++static struct clk_hw *mt6991_fw_usb_clk(struct of_phandle_args *spec, void *data)
++{
++	struct clk_hw_onecell_data *clks = data;
++
++	if (spec->args_count != 1)
++		return ERR_PTR(-EINVAL);
++	switch (spec->args[0]) {
++	case 34:
++		return clks->hws[MT6991_CLK_VLP_USB_TOP];
++	case 35:
++		return clks->hws[MT6991_CLK_VLP_USB_XHCI];
++	default:
++		return ERR_PTR(-ENOENT);
++	}
++}
++
+ static int clk_mt8196_vlp_probe(struct platform_device *pdev)
+ {
+ 	static void __iomem *base;
+@@ -657,6 +674,8 @@
+ 	struct device *dev = &pdev->dev;
+ 	struct regmap *regmap;
+ 
++	if (of_device_is_compatible(node, "mediatek,mt6991-vlp_cksys"))
++		return mtk_clk_simple_probe_with_get(pdev, mt6991_fw_usb_clk);
+ 	if (device_get_match_data(dev))
+ 		return mtk_clk_simple_probe(pdev);
+ 
+@@ -730,6 +749,7 @@
+ }
+ 
+ static const struct of_device_id of_match_clk_mt8196_vlp_ck[] = {
++	{ .compatible = "mediatek,mt6991-vlp_cksys", .data = &mt6991_vlp_desc },
+ 	{ .compatible = "mediatek,mt6991-vlpckgen", .data = &mt6991_vlp_desc },
+ 	{ .compatible = "mediatek,mt8196-vlpckgen" },
+ 	{ /* sentinel */ }

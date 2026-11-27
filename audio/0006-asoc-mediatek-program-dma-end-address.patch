@@ -1,0 +1,99 @@
+--- a/sound/soc/mediatek/common/mtk-afe-fe-dai.c
++++ b/sound/soc/mediatek/common/mtk-afe-fe-dai.c
+@@ -8,6 +8,7 @@
+ 
+ #include <linux/io.h>
+ #include <linux/module.h>
++#include <linux/overflow.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/regmap.h>
+ #include <sound/soc.h>
+@@ -400,50 +401,48 @@
+ 		       size_t dma_bytes)
+ {
+ 	struct mtk_base_afe_memif *memif = &afe->memif[id];
+-	int msb_at_bit33 = upper_32_bits(dma_addr) ? 1 : 0;
+-	unsigned int phys_buf_addr = lower_32_bits(dma_addr);
+-	unsigned int phys_buf_addr_upper_32 = upper_32_bits(dma_addr);
++	const struct mtk_base_memif_data *data = memif->data;
++	dma_addr_t end;
++	int end_reg, ret;
++
++	if (!dma_bytes || check_add_overflow(dma_addr, dma_bytes - 1, &end))
++		return -EINVAL;
++
++	end_reg = data->reg_ofs_end ?: data->reg_ofs_base + AFE_BASE_END_OFFSET;
++	ret = mtk_regmap_write(afe->regmap, data->reg_ofs_base, lower_32_bits(dma_addr));
++	if (ret)
++		return ret;
++	ret = mtk_regmap_write(afe->regmap, end_reg, lower_32_bits(end));
++	if (ret)
++		return ret;
++
++	if (data->reg_ofs_base_msb) {
++		ret = mtk_regmap_write(afe->regmap, data->reg_ofs_base_msb,
++				       upper_32_bits(dma_addr));
++		if (ret)
++			return ret;
++		ret = mtk_regmap_write(afe->regmap, data->reg_ofs_end_msb,
++				       upper_32_bits(end));
++		if (ret)
++			return ret;
++	}
++
++	if (data->msb_reg) {
++		ret = mtk_regmap_update_bits(afe->regmap, data->msb_reg, 1,
++					     !!upper_32_bits(dma_addr), data->msb_shift);
++		if (ret)
++			return ret;
++	}
++	if (data->msb_end_reg) {
++		ret = mtk_regmap_update_bits(afe->regmap, data->msb_end_reg, 1,
++					     !!upper_32_bits(end), data->msb_end_shift);
++		if (ret)
++			return ret;
++	}
+ 
+ 	memif->dma_area = dma_area;
+ 	memif->dma_addr = dma_addr;
+ 	memif->dma_bytes = dma_bytes;
+-
+-	/* start */
+-	mtk_regmap_write(afe->regmap, memif->data->reg_ofs_base,
+-			 phys_buf_addr);
+-	/* end */
+-	if (memif->data->reg_ofs_end)
+-		mtk_regmap_write(afe->regmap,
+-				 memif->data->reg_ofs_end,
+-				 phys_buf_addr + dma_bytes - 1);
+-	else
+-		mtk_regmap_write(afe->regmap,
+-				 memif->data->reg_ofs_base +
+-				 AFE_BASE_END_OFFSET,
+-				 phys_buf_addr + dma_bytes - 1);
+-
+-	/* set start, end, upper 32 bits */
+-	if (memif->data->reg_ofs_base_msb) {
+-		mtk_regmap_write(afe->regmap, memif->data->reg_ofs_base_msb,
+-				 phys_buf_addr_upper_32);
+-		mtk_regmap_write(afe->regmap,
+-				 memif->data->reg_ofs_end_msb,
+-				 phys_buf_addr_upper_32);
+-	}
+-
+-	/*
+-	 * set MSB to 33-bit, for memif address
+-	 * only for memif base address, if msb_end_reg exists
+-	 */
+-	if (memif->data->msb_reg)
+-		mtk_regmap_update_bits(afe->regmap, memif->data->msb_reg,
+-				       1, msb_at_bit33, memif->data->msb_shift);
+-
+-	/* set MSB to 33-bit, for memif end address */
+-	if (memif->data->msb_end_reg)
+-		mtk_regmap_update_bits(afe->regmap, memif->data->msb_end_reg,
+-				       1, msb_at_bit33,
+-				       memif->data->msb_end_shift);
+ 
+ 	return 0;
+ }

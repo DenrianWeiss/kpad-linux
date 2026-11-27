@@ -1,0 +1,381 @@
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -52,6 +52,8 @@
+ #define MT6991_CLK_TOP_AES_UFSFDE             41
+ #define MT6991_CLK_TOP_UFS                    42
+ #define MT6991_CLK_TOP_UNIVPLL_D6             43
++#define MT6991_CLK_TOP_AUD_1                  44
++#define MT6991_CLK_TOP_AUD_2                  45
+ 
+ #define MT6991_CLK_VLP_USB_TOP                0
+ #define MT6991_CLK_VLP_USB_XHCI               1
+@@ -133,4 +135,128 @@
+ #define MT6991_CLK_CK2_DISP_SEL     17
+ #define MT6991_CLK_CK2_DISP         76
+ 
++/* AUDIOSYS */
++#define MT6991_CLK_AFE_PCM1                          0
++#define MT6991_CLK_AFE_PCM1_AFE                      1
++#define MT6991_CLK_AFE_PCM0                          2
++#define MT6991_CLK_AFE_PCM0_AFE                      3
++#define MT6991_CLK_AFE_CM2                           4
++#define MT6991_CLK_AFE_CM2_AFE                       5
++#define MT6991_CLK_AFE_CM1                           6
++#define MT6991_CLK_AFE_CM1_AFE                       7
++#define MT6991_CLK_AFE_CM0                           8
++#define MT6991_CLK_AFE_CM0_AFE                       9
++#define MT6991_CLK_AFE_STF                           10
++#define MT6991_CLK_AFE_STF_AFE                       11
++#define MT6991_CLK_AFE_HW_GAIN23                     12
++#define MT6991_CLK_AFE_HW_GAIN23_AFE                 13
++#define MT6991_CLK_AFE_HW_GAIN01                     14
++#define MT6991_CLK_AFE_HW_GAIN01_AFE                 15
++#define MT6991_CLK_AFE_FM_I2S                        16
++#define MT6991_CLK_AFE_FM_I2S_AFE                    17
++#define MT6991_CLK_AFE_MTKAIFV4                      18
++#define MT6991_CLK_AFE_MTKAIFV4_AFE                  19
++#define MT6991_CLK_AFE_UL2_ADC_HIRES_TML             20
++#define MT6991_CLK_AFE_UL2_ADC_HIRES_TML_AFE         21
++#define MT6991_CLK_AFE_UL2_ADC_HIRES                 22
++#define MT6991_CLK_AFE_UL2_ADC_HIRES_AFE             23
++#define MT6991_CLK_AFE_UL2_TML                       24
++#define MT6991_CLK_AFE_UL2_TML_AFE                   25
++#define MT6991_CLK_AFE_UL2_ADC                       26
++#define MT6991_CLK_AFE_UL2_ADC_AFE                   27
++#define MT6991_CLK_AFE_UL1_ADC_HIRES_TML             28
++#define MT6991_CLK_AFE_UL1_ADC_HIRES_TML_AFE         29
++#define MT6991_CLK_AFE_UL1_ADC_HIRES                 30
++#define MT6991_CLK_AFE_UL1_ADC_HIRES_AFE             31
++#define MT6991_CLK_AFE_UL1_TML                       32
++#define MT6991_CLK_AFE_UL1_TML_AFE                   33
++#define MT6991_CLK_AFE_UL1_ADC                       34
++#define MT6991_CLK_AFE_UL1_ADC_AFE                   35
++#define MT6991_CLK_AFE_UL0_ADC_HIRES_TML             36
++#define MT6991_CLK_AFE_UL0_ADC_HIRES_TML_AFE         37
++#define MT6991_CLK_AFE_UL0_ADC_HIRES                 38
++#define MT6991_CLK_AFE_UL0_ADC_HIRES_AFE             39
++#define MT6991_CLK_AFE_UL0_TML                       40
++#define MT6991_CLK_AFE_UL0_TML_AFE                   41
++#define MT6991_CLK_AFE_UL0_ADC                       42
++#define MT6991_CLK_AFE_UL0_ADC_AFE                   43
++#define MT6991_CLK_AFE_ETDM_IN6                      44
++#define MT6991_CLK_AFE_ETDM_IN6_AFE                  45
++#define MT6991_CLK_AFE_ETDM_IN5                      46
++#define MT6991_CLK_AFE_ETDM_IN5_AFE                  47
++#define MT6991_CLK_AFE_ETDM_IN4                      48
++#define MT6991_CLK_AFE_ETDM_IN4_AFE                  49
++#define MT6991_CLK_AFE_ETDM_IN3                      50
++#define MT6991_CLK_AFE_ETDM_IN3_AFE                  51
++#define MT6991_CLK_AFE_ETDM_IN2                      52
++#define MT6991_CLK_AFE_ETDM_IN2_AFE                  53
++#define MT6991_CLK_AFE_ETDM_IN1                      54
++#define MT6991_CLK_AFE_ETDM_IN1_AFE                  55
++#define MT6991_CLK_AFE_ETDM_IN0                      56
++#define MT6991_CLK_AFE_ETDM_IN0_AFE                  57
++#define MT6991_CLK_AFE_ETDM_OUT6                     58
++#define MT6991_CLK_AFE_ETDM_OUT6_AFE                 59
++#define MT6991_CLK_AFE_ETDM_OUT5                     60
++#define MT6991_CLK_AFE_ETDM_OUT5_AFE                 61
++#define MT6991_CLK_AFE_ETDM_OUT4                     62
++#define MT6991_CLK_AFE_ETDM_OUT4_AFE                 63
++#define MT6991_CLK_AFE_ETDM_OUT3                     64
++#define MT6991_CLK_AFE_ETDM_OUT3_AFE                 65
++#define MT6991_CLK_AFE_ETDM_OUT2                     66
++#define MT6991_CLK_AFE_ETDM_OUT2_AFE                 67
++#define MT6991_CLK_AFE_ETDM_OUT1                     68
++#define MT6991_CLK_AFE_ETDM_OUT1_AFE                 69
++#define MT6991_CLK_AFE_ETDM_OUT0                     70
++#define MT6991_CLK_AFE_ETDM_OUT0_AFE                 71
++#define MT6991_CLK_AFE_TDM_OUT                       72
++#define MT6991_CLK_AFE_TDM_OUT_AFE                   73
++#define MT6991_CLK_AFE_GENERAL15_ASRC                74
++#define MT6991_CLK_AFE_GENERAL15_ASRC_AFE            75
++#define MT6991_CLK_AFE_GENERAL14_ASRC                76
++#define MT6991_CLK_AFE_GENERAL14_ASRC_AFE            77
++#define MT6991_CLK_AFE_GENERAL13_ASRC                78
++#define MT6991_CLK_AFE_GENERAL13_ASRC_AFE            79
++#define MT6991_CLK_AFE_GENERAL12_ASRC                80
++#define MT6991_CLK_AFE_GENERAL12_ASRC_AFE            81
++#define MT6991_CLK_AFE_GENERAL11_ASRC                82
++#define MT6991_CLK_AFE_GENERAL11_ASRC_AFE            83
++#define MT6991_CLK_AFE_GENERAL10_ASRC                84
++#define MT6991_CLK_AFE_GENERAL10_ASRC_AFE            85
++#define MT6991_CLK_AFE_GENERAL9_ASRC                 86
++#define MT6991_CLK_AFE_GENERAL9_ASRC_AFE             87
++#define MT6991_CLK_AFE_GENERAL8_ASRC                 88
++#define MT6991_CLK_AFE_GENERAL8_ASRC_AFE             89
++#define MT6991_CLK_AFE_GENERAL7_ASRC                 90
++#define MT6991_CLK_AFE_GENERAL7_ASRC_AFE             91
++#define MT6991_CLK_AFE_GENERAL6_ASRC                 92
++#define MT6991_CLK_AFE_GENERAL6_ASRC_AFE             93
++#define MT6991_CLK_AFE_GENERAL5_ASRC                 94
++#define MT6991_CLK_AFE_GENERAL5_ASRC_AFE             95
++#define MT6991_CLK_AFE_GENERAL4_ASRC                 96
++#define MT6991_CLK_AFE_GENERAL4_ASRC_AFE             97
++#define MT6991_CLK_AFE_GENERAL3_ASRC                 98
++#define MT6991_CLK_AFE_GENERAL3_ASRC_AFE             99
++#define MT6991_CLK_AFE_GENERAL2_ASRC                 100
++#define MT6991_CLK_AFE_GENERAL2_ASRC_AFE             101
++#define MT6991_CLK_AFE_GENERAL1_ASRC                 102
++#define MT6991_CLK_AFE_GENERAL1_ASRC_AFE             103
++#define MT6991_CLK_AFE_GENERAL0_ASRC                 104
++#define MT6991_CLK_AFE_GENERAL0_ASRC_AFE             105
++#define MT6991_CLK_AFE_CONNSYS_I2S_ASRC              106
++#define MT6991_CLK_AFE_CONNSYS_I2S_ASRC_AFE          107
++#define MT6991_CLK_AFE_AUDIO_HOPPING                 108
++#define MT6991_CLK_AFE_AUDIO_HOPPING_AFE             109
++#define MT6991_CLK_AFE_AUDIO_F26M                    110
++#define MT6991_CLK_AFE_AUDIO_F26M_AFE                111
++#define MT6991_CLK_AFE_APLL1                         112
++#define MT6991_CLK_AFE_APLL1_AFE                     113
++#define MT6991_CLK_AFE_APLL2                         114
++#define MT6991_CLK_AFE_APLL2_AFE                     115
++#define MT6991_CLK_AFE_H208M                         116
++#define MT6991_CLK_AFE_H208M_AFE                     117
++#define MT6991_CLK_AFE_APLL_TUNER2                   118
++#define MT6991_CLK_AFE_APLL_TUNER2_AFE               119
++#define MT6991_CLK_AFE_APLL_TUNER1                   120
++#define MT6991_CLK_AFE_APLL_TUNER1_AFE               121
++
+ #endif
+--- a/drivers/clk/mediatek/clk-mt8196-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+@@ -991,6 +991,14 @@
+ };
+ 
+ static const struct mtk_mux mt6991_muxes[] = {
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_AUD_1, "aud_1", aud_1_parents,
++		CLK_CFG_13, CLK_CFG_13_SET, CLK_CFG_13_CLR,
++		0, 1, 7, CLK_CFG_UPDATE1, TOP_MUX_AUD_1_SHIFT,
++		CLK_FENC_STATUS_MON_1, 11),
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_AUD_2, "aud_2", aud_2_parents,
++		CLK_CFG_13, CLK_CFG_13_SET, CLK_CFG_13_CLR,
++		8, 1, 15, CLK_CFG_UPDATE1, TOP_MUX_AUD_2_SHIFT,
++		CLK_FENC_STATUS_MON_1, 10),
+ 	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_AES_UFSFDE, "aes_ufsfde", aes_ufsfde_parents,
+ 		CLK_CFG_12, CLK_CFG_12_SET, CLK_CFG_12_CLR,
+ 		0, 3, 7, CLK_CFG_UPDATE1, TOP_MUX_AES_UFSFDE_SHIFT,
+@@ -1124,6 +1132,14 @@
+ 		return clks->hws[MT6991_CLK_TOP_AES_UFSFDE];
+ 	case 42:
+ 		return clks->hws[MT6991_CLK_TOP_UFS];
++	case 43:
++	case 178:
++		return clks->hws[MT6991_CLK_TOP_AUD_1];
++	case 44:
++	case 179:
++		return clks->hws[MT6991_CLK_TOP_AUD_2];
++	case 98:
++		return clks->hws[MT6991_CLK_TOP_MAINPLL_D4_D4];
+ 	case 96:
+ 		return clks->hws[MT6991_CLK_TOP_MAINPLL_D4];
+ 	case 97:
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6991-afe.c
+@@ -0,0 +1,179 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * MediaTek MT6991 audio front-end clock gates
++ * Copyright (c) 2023 MediaTek Inc.
++ */
++
++#include <dt-bindings/clock/mediatek,mt6991-clock.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++
++#include "clk-gate.h"
++#include "clk-mtk.h"
++
++static const struct mtk_gate_regs afe_regs[] = {
++	[0] = { .sta_ofs = 0x0, .set_ofs = 0x0, .clr_ofs = 0x0 },
++	[1] = { .sta_ofs = 0x10, .set_ofs = 0x10, .clr_ofs = 0x10 },
++	[2] = { .sta_ofs = 0x4, .set_ofs = 0x4, .clr_ofs = 0x4 },
++	[3] = { .sta_ofs = 0x8, .set_ofs = 0x8, .clr_ofs = 0x8 },
++	[4] = { .sta_ofs = 0xc, .set_ofs = 0xc, .clr_ofs = 0xc },
++};
++
++#define GATE_AFE(_id, _name, _parent, _bank, _shift) \
++	GATE_MTK(MT6991_CLK_AFE_##_id, _name, _parent, &afe_regs[_bank], \
++		 _shift, &mtk_clk_gate_ops_no_setclr)
++
++static const struct mtk_gate afe_gates[] = {
++	GATE_AFE(PCM1, "afe_pcm1", "vlp_aud_clksq", 0, 13),
++	GATE_AFE(PCM0, "afe_pcm0", "vlp_aud_clksq", 0, 14),
++	GATE_AFE(CM2, "afe_cm2", "vlp_aud_clksq", 0, 16),
++	GATE_AFE(CM1, "afe_cm1", "vlp_aud_clksq", 0, 17),
++	GATE_AFE(CM0, "afe_cm0", "vlp_aud_clksq", 0, 18),
++	GATE_AFE(STF, "afe_stf", "vlp_aud_clksq", 0, 19),
++	GATE_AFE(HW_GAIN23, "afe_hw_gain23", "vlp_aud_clksq", 0, 20),
++	GATE_AFE(HW_GAIN01, "afe_hw_gain01", "vlp_aud_clksq", 0, 21),
++	GATE_AFE(FM_I2S, "afe_fm_i2s", "vlp_aud_clksq", 0, 24),
++	GATE_AFE(MTKAIFV4, "afe_mtkaifv4", "vlp_aud_clksq", 0, 25),
++	GATE_AFE(AUDIO_HOPPING, "afe_audio_hopping_ck", "vlp_aud_clksq", 1, 0),
++	GATE_AFE(AUDIO_F26M, "afe_audio_f26m_ck", "vlp_aud_clksq", 1, 1),
++	GATE_AFE(APLL1, "afe_apll1_ck", "aud_1", 1, 2),
++	GATE_AFE(APLL2, "afe_apll2_ck", "aud_2", 1, 3),
++	GATE_AFE(H208M, "afe_h208m_ck", "vlp_audio_h", 1, 4),
++	GATE_AFE(APLL_TUNER2, "afe_apll_tuner2", "vlp_aud_engen2", 1, 12),
++	GATE_AFE(APLL_TUNER1, "afe_apll_tuner1", "vlp_aud_engen1", 1, 13),
++	GATE_AFE(UL2_ADC_HIRES_TML, "afe_ul2_aht", "vlp_audio_h", 2, 12),
++	GATE_AFE(UL2_ADC_HIRES, "afe_ul2_adc_hires", "vlp_audio_h", 2, 13),
++	GATE_AFE(UL2_TML, "afe_ul2_tml", "vlp_aud_clksq", 2, 14),
++	GATE_AFE(UL2_ADC, "afe_ul2_adc", "vlp_aud_clksq", 2, 15),
++	GATE_AFE(UL1_ADC_HIRES_TML, "afe_ul1_aht", "vlp_audio_h", 2, 16),
++	GATE_AFE(UL1_ADC_HIRES, "afe_ul1_adc_hires", "vlp_audio_h", 2, 17),
++	GATE_AFE(UL1_TML, "afe_ul1_tml", "vlp_aud_clksq", 2, 18),
++	GATE_AFE(UL1_ADC, "afe_ul1_adc", "vlp_aud_clksq", 2, 19),
++	GATE_AFE(UL0_ADC_HIRES_TML, "afe_ul0_aht", "vlp_audio_h", 2, 20),
++	GATE_AFE(UL0_ADC_HIRES, "afe_ul0_adc_hires", "vlp_audio_h", 2, 21),
++	GATE_AFE(UL0_TML, "afe_ul0_tml", "vlp_aud_clksq", 2, 22),
++	GATE_AFE(UL0_ADC, "afe_ul0_adc", "vlp_aud_clksq", 2, 23),
++	GATE_AFE(ETDM_IN6, "afe_etdm_in6", "vlp_aud_clksq", 3, 7),
++	GATE_AFE(ETDM_IN5, "afe_etdm_in5", "vlp_aud_clksq", 3, 8),
++	GATE_AFE(ETDM_IN4, "afe_etdm_in4", "vlp_aud_clksq", 3, 9),
++	GATE_AFE(ETDM_IN3, "afe_etdm_in3", "vlp_aud_clksq", 3, 10),
++	GATE_AFE(ETDM_IN2, "afe_etdm_in2", "vlp_aud_clksq", 3, 11),
++	GATE_AFE(ETDM_IN1, "afe_etdm_in1", "vlp_aud_clksq", 3, 12),
++	GATE_AFE(ETDM_IN0, "afe_etdm_in0", "vlp_aud_clksq", 3, 13),
++	GATE_AFE(ETDM_OUT6, "afe_etdm_out6", "vlp_aud_clksq", 3, 15),
++	GATE_AFE(ETDM_OUT5, "afe_etdm_out5", "vlp_aud_clksq", 3, 16),
++	GATE_AFE(ETDM_OUT4, "afe_etdm_out4", "vlp_aud_clksq", 3, 17),
++	GATE_AFE(ETDM_OUT3, "afe_etdm_out3", "vlp_aud_clksq", 3, 18),
++	GATE_AFE(ETDM_OUT2, "afe_etdm_out2", "vlp_aud_clksq", 3, 19),
++	GATE_AFE(ETDM_OUT1, "afe_etdm_out1", "vlp_aud_clksq", 3, 20),
++	GATE_AFE(ETDM_OUT0, "afe_etdm_out0", "vlp_aud_clksq", 3, 21),
++	GATE_AFE(TDM_OUT, "afe_tdm_out", "aud_1", 3, 24),
++	GATE_AFE(GENERAL15_ASRC, "afe_general15_asrc", "vlp_aud_clksq", 4, 9),
++	GATE_AFE(GENERAL14_ASRC, "afe_general14_asrc", "vlp_aud_clksq", 4, 10),
++	GATE_AFE(GENERAL13_ASRC, "afe_general13_asrc", "vlp_aud_clksq", 4, 11),
++	GATE_AFE(GENERAL12_ASRC, "afe_general12_asrc", "vlp_aud_clksq", 4, 12),
++	GATE_AFE(GENERAL11_ASRC, "afe_general11_asrc", "vlp_aud_clksq", 4, 13),
++	GATE_AFE(GENERAL10_ASRC, "afe_general10_asrc", "vlp_aud_clksq", 4, 14),
++	GATE_AFE(GENERAL9_ASRC, "afe_general9_asrc", "vlp_aud_clksq", 4, 15),
++	GATE_AFE(GENERAL8_ASRC, "afe_general8_asrc", "vlp_aud_clksq", 4, 16),
++	GATE_AFE(GENERAL7_ASRC, "afe_general7_asrc", "vlp_aud_clksq", 4, 17),
++	GATE_AFE(GENERAL6_ASRC, "afe_general6_asrc", "vlp_aud_clksq", 4, 18),
++	GATE_AFE(GENERAL5_ASRC, "afe_general5_asrc", "vlp_aud_clksq", 4, 19),
++	GATE_AFE(GENERAL4_ASRC, "afe_general4_asrc", "vlp_aud_clksq", 4, 20),
++	GATE_AFE(GENERAL3_ASRC, "afe_general3_asrc", "vlp_aud_clksq", 4, 21),
++	GATE_AFE(GENERAL2_ASRC, "afe_general2_asrc", "vlp_aud_clksq", 4, 22),
++	GATE_AFE(GENERAL1_ASRC, "afe_general1_asrc", "vlp_aud_clksq", 4, 23),
++	GATE_AFE(GENERAL0_ASRC, "afe_general0_asrc", "vlp_aud_clksq", 4, 24),
++	GATE_AFE(CONNSYS_I2S_ASRC, "afe_connsys_i2s_asrc", "vlp_aud_clksq", 4, 25),
++};
++
++static const struct mtk_fixed_factor afe_aliases[] = {
++	FACTOR(MT6991_CLK_AFE_PCM1_AFE, "afe_pcm1_afe", "afe_pcm1", 1, 1),
++	FACTOR(MT6991_CLK_AFE_PCM0_AFE, "afe_pcm0_afe", "afe_pcm0", 1, 1),
++	FACTOR(MT6991_CLK_AFE_CM2_AFE, "afe_cm2_afe", "afe_cm2", 1, 1),
++	FACTOR(MT6991_CLK_AFE_CM1_AFE, "afe_cm1_afe", "afe_cm1", 1, 1),
++	FACTOR(MT6991_CLK_AFE_CM0_AFE, "afe_cm0_afe", "afe_cm0", 1, 1),
++	FACTOR(MT6991_CLK_AFE_STF_AFE, "afe_stf_afe", "afe_stf", 1, 1),
++	FACTOR(MT6991_CLK_AFE_HW_GAIN23_AFE, "afe_hw_gain23_afe", "afe_hw_gain23", 1, 1),
++	FACTOR(MT6991_CLK_AFE_HW_GAIN01_AFE, "afe_hw_gain01_afe", "afe_hw_gain01", 1, 1),
++	FACTOR(MT6991_CLK_AFE_FM_I2S_AFE, "afe_fm_i2s_afe", "afe_fm_i2s", 1, 1),
++	FACTOR(MT6991_CLK_AFE_MTKAIFV4_AFE, "afe_mtkaifv4_afe", "afe_mtkaifv4", 1, 1),
++	FACTOR(MT6991_CLK_AFE_AUDIO_HOPPING_AFE, "afe_audio_hopping_ck_afe", "afe_audio_hopping_ck", 1, 1),
++	FACTOR(MT6991_CLK_AFE_AUDIO_F26M_AFE, "afe_audio_f26m_ck_afe", "afe_audio_f26m_ck", 1, 1),
++	FACTOR(MT6991_CLK_AFE_APLL1_AFE, "afe_apll1_ck_afe", "afe_apll1_ck", 1, 1),
++	FACTOR(MT6991_CLK_AFE_APLL2_AFE, "afe_apll2_ck_afe", "afe_apll2_ck", 1, 1),
++	FACTOR(MT6991_CLK_AFE_H208M_AFE, "afe_h208m_ck_afe", "afe_h208m_ck", 1, 1),
++	FACTOR(MT6991_CLK_AFE_APLL_TUNER2_AFE, "afe_apll_tuner2_afe", "afe_apll_tuner2", 1, 1),
++	FACTOR(MT6991_CLK_AFE_APLL_TUNER1_AFE, "afe_apll_tuner1_afe", "afe_apll_tuner1", 1, 1),
++	FACTOR(MT6991_CLK_AFE_UL2_ADC_HIRES_TML_AFE, "afe_ul2_aht_afe", "afe_ul2_aht", 1, 1),
++	FACTOR(MT6991_CLK_AFE_UL2_ADC_HIRES_AFE, "afe_ul2_adc_hires_afe", "afe_ul2_adc_hires", 1, 1),
++	FACTOR(MT6991_CLK_AFE_UL2_TML_AFE, "afe_ul2_tml_afe", "afe_ul2_tml", 1, 1),
++	FACTOR(MT6991_CLK_AFE_UL2_ADC_AFE, "afe_ul2_adc_afe", "afe_ul2_adc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_UL1_ADC_HIRES_TML_AFE, "afe_ul1_aht_afe", "afe_ul1_aht", 1, 1),
++	FACTOR(MT6991_CLK_AFE_UL1_ADC_HIRES_AFE, "afe_ul1_adc_hires_afe", "afe_ul1_adc_hires", 1, 1),
++	FACTOR(MT6991_CLK_AFE_UL1_TML_AFE, "afe_ul1_tml_afe", "afe_ul1_tml", 1, 1),
++	FACTOR(MT6991_CLK_AFE_UL1_ADC_AFE, "afe_ul1_adc_afe", "afe_ul1_adc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_UL0_ADC_HIRES_TML_AFE, "afe_ul0_aht_afe", "afe_ul0_aht", 1, 1),
++	FACTOR(MT6991_CLK_AFE_UL0_ADC_HIRES_AFE, "afe_ul0_adc_hires_afe", "afe_ul0_adc_hires", 1, 1),
++	FACTOR(MT6991_CLK_AFE_UL0_TML_AFE, "afe_ul0_tml_afe", "afe_ul0_tml", 1, 1),
++	FACTOR(MT6991_CLK_AFE_UL0_ADC_AFE, "afe_ul0_adc_afe", "afe_ul0_adc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_IN6_AFE, "afe_etdm_in6_afe", "afe_etdm_in6", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_IN5_AFE, "afe_etdm_in5_afe", "afe_etdm_in5", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_IN4_AFE, "afe_etdm_in4_afe", "afe_etdm_in4", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_IN3_AFE, "afe_etdm_in3_afe", "afe_etdm_in3", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_IN2_AFE, "afe_etdm_in2_afe", "afe_etdm_in2", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_IN1_AFE, "afe_etdm_in1_afe", "afe_etdm_in1", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_IN0_AFE, "afe_etdm_in0_afe", "afe_etdm_in0", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_OUT6_AFE, "afe_etdm_out6_afe", "afe_etdm_out6", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_OUT5_AFE, "afe_etdm_out5_afe", "afe_etdm_out5", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_OUT4_AFE, "afe_etdm_out4_afe", "afe_etdm_out4", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_OUT3_AFE, "afe_etdm_out3_afe", "afe_etdm_out3", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_OUT2_AFE, "afe_etdm_out2_afe", "afe_etdm_out2", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_OUT1_AFE, "afe_etdm_out1_afe", "afe_etdm_out1", 1, 1),
++	FACTOR(MT6991_CLK_AFE_ETDM_OUT0_AFE, "afe_etdm_out0_afe", "afe_etdm_out0", 1, 1),
++	FACTOR(MT6991_CLK_AFE_TDM_OUT_AFE, "afe_tdm_out_afe", "afe_tdm_out", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL15_ASRC_AFE, "afe_general15_asrc_afe", "afe_general15_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL14_ASRC_AFE, "afe_general14_asrc_afe", "afe_general14_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL13_ASRC_AFE, "afe_general13_asrc_afe", "afe_general13_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL12_ASRC_AFE, "afe_general12_asrc_afe", "afe_general12_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL11_ASRC_AFE, "afe_general11_asrc_afe", "afe_general11_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL10_ASRC_AFE, "afe_general10_asrc_afe", "afe_general10_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL9_ASRC_AFE, "afe_general9_asrc_afe", "afe_general9_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL8_ASRC_AFE, "afe_general8_asrc_afe", "afe_general8_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL7_ASRC_AFE, "afe_general7_asrc_afe", "afe_general7_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL6_ASRC_AFE, "afe_general6_asrc_afe", "afe_general6_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL5_ASRC_AFE, "afe_general5_asrc_afe", "afe_general5_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL4_ASRC_AFE, "afe_general4_asrc_afe", "afe_general4_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL3_ASRC_AFE, "afe_general3_asrc_afe", "afe_general3_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL2_ASRC_AFE, "afe_general2_asrc_afe", "afe_general2_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL1_ASRC_AFE, "afe_general1_asrc_afe", "afe_general1_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_GENERAL0_ASRC_AFE, "afe_general0_asrc_afe", "afe_general0_asrc", 1, 1),
++	FACTOR(MT6991_CLK_AFE_CONNSYS_I2S_ASRC_AFE, "afe_connsys_i2s_asrc_afe", "afe_connsys_i2s_asrc", 1, 1),
++};
++
++static const struct mtk_clk_desc afe_desc = {
++	.clks = afe_gates,
++	.num_clks = ARRAY_SIZE(afe_gates),
++	.factor_clks = afe_aliases,
++	.num_factor_clks = ARRAY_SIZE(afe_aliases),
++	.need_runtime_pm = true,
++};
++
++static const struct of_device_id mt6991_afe_of_match[] = {
++	{ .compatible = "mediatek,mt6991-audiosys", .data = &afe_desc },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, mt6991_afe_of_match);
++
++static struct platform_driver mt6991_afe_driver = {
++	.probe = mtk_clk_simple_probe,
++	.remove = mtk_clk_simple_remove,
++	.driver = {
++		.name = "clk-mt6991-afe",
++		.of_match_table = mt6991_afe_of_match,
++	},
++};
++module_platform_driver(mt6991_afe_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6991 AFE clock driver");
++MODULE_LICENSE("GPL");
+--- a/drivers/clk/mediatek/Makefile
++++ b/drivers/clk/mediatek/Makefile
+@@ -151,7 +151,7 @@
+ obj-$(CONFIG_COMMON_CLK_MT8195_VENCSYS) += clk-mt8195-venc.o
+ obj-$(CONFIG_COMMON_CLK_MT8195_VPPSYS) += clk-mt8195-vpp0.o clk-mt8195-vpp1.o
+ obj-$(CONFIG_COMMON_CLK_MT8195_WPESYS) += clk-mt8195-wpe.o
+-obj-$(CONFIG_COMMON_CLK_MT8196) += clk-mt6991-disp.o
++obj-$(CONFIG_COMMON_CLK_MT8196) += clk-mt6991-disp.o clk-mt6991-afe.o
+ obj-$(CONFIG_COMMON_CLK_MT8196) += clk-mt8196-apmixedsys.o clk-mt8196-topckgen.o \
+ 				   clk-mt8196-topckgen2.o clk-mt8196-vlpckgen.o \
+ 				   clk-mt8196-peri_ao.o
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -433,6 +433,13 @@
+ 			#clock-cells = <1>;
+ 			#reset-cells = <1>;
+ 		};
++		afe_clk: clock-controller@1a110000 {
++			compatible = "mediatek,mt6991-audiosys", "syscon";
++			reg = <0 0x1a110000 0 0x1000>;
++			power-domains = <&spm MT6991_POWER_DOMAIN_AUDIO>;
++			#clock-cells = <1>;
++		};
++
+ 		syscon@1c004000 {
+ 			compatible = "mediatek,mt6991-scpsys", "syscon", "simple-mfd";
+ 			reg = <0 0x1c004000 0 0x1000>;

@@ -1,0 +1,210 @@
+From c338636711eb391bb4e471f5f1ead8ca535c8347 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:56:06 +0800
+Subject: [PATCH] pmdomain: mediatek: support MT6376 shared connectivity power
+
+---
+ drivers/pmdomain/mediatek/Kconfig  |   7 ++
+ drivers/pmdomain/mediatek/Makefile |   1 +
+ drivers/pmdomain/mediatek/mt6376.c | 161 +++++++++++++++++++++++++++++
+ 3 files changed, 169 insertions(+)
+ create mode 100644 drivers/pmdomain/mediatek/mt6376.c
+
+diff --git a/drivers/pmdomain/mediatek/Kconfig b/drivers/pmdomain/mediatek/Kconfig
+index a2eb704..724a66d 100644
+--- a/drivers/pmdomain/mediatek/Kconfig
++++ b/drivers/pmdomain/mediatek/Kconfig
+@@ -3,6 +3,13 @@
+ menu "MediaTek PM Domains"
+ 	depends on ARCH_MEDIATEK || COMPILE_TEST
+ 
++config MT6376_POWER
++	bool "MediaTek MT6376 connectivity power controller"
++	depends on OF && PM && GPIOLIB && PINCTRL
++	select PM_GENERIC_DOMAINS
++	help
++	  Manage the shared connectivity supply of the MediaTek MT6376.
++
+ config MTK_SCPSYS
+ 	bool "MediaTek SCPSYS Support"
+ 	default ARCH_MEDIATEK
+diff --git a/drivers/pmdomain/mediatek/Makefile b/drivers/pmdomain/mediatek/Makefile
+index b424f1e..901530a 100644
+--- a/drivers/pmdomain/mediatek/Makefile
++++ b/drivers/pmdomain/mediatek/Makefile
+@@ -1,4 +1,5 @@
+ # SPDX-License-Identifier: GPL-2.0-only
++obj-$(CONFIG_MT6376_POWER)		+= mt6376.o
+ obj-$(CONFIG_MTK_MFG_PM_DOMAIN)		+= mtk-mfg-pmdomain.o
+ obj-$(CONFIG_MTK_SCPSYS)		+= mtk-scpsys.o
+ obj-$(CONFIG_MTK_SCPSYS_PM_DOMAINS) 	+= mtk-pm-domains.o
+diff --git a/drivers/pmdomain/mediatek/mt6376.c b/drivers/pmdomain/mediatek/mt6376.c
+new file mode 100644
+index 0000000..a831a5d
+--- /dev/null
++++ b/drivers/pmdomain/mediatek/mt6376.c
+@@ -0,0 +1,161 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MT6376 connectivity power control */
++
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/interrupt.h>
++#include <linux/of.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/platform_device.h>
++#include <linux/pm_domain.h>
++
++struct mt6376 {
++	struct generic_pm_domain domain;
++	struct device *dev;
++	struct gpio_desc *enable;
++	struct gpio_desc *fault;
++	struct pinctrl *pinctrl;
++	struct pinctrl_state *active;
++	struct pinctrl_state *idle;
++	int irq;
++};
++
++static irqreturn_t mt6376_fault(int irq, void *data)
++{
++	struct mt6376 *pmic = data;
++	int fault;
++
++	msleep(10);
++	fault = gpiod_get_value_cansleep(pmic->fault);
++	if (fault < 0)
++		dev_err_ratelimited(pmic->dev, "cannot sample FAULTB: %d\n", fault);
++	else if (fault)
++		dev_err_ratelimited(pmic->dev, "connectivity power fault\n");
++
++	return IRQ_HANDLED;
++}
++
++static int mt6376_power_on(struct generic_pm_domain *domain)
++{
++	struct mt6376 *pmic = container_of(domain, struct mt6376, domain);
++	int ret;
++
++	msleep(30);
++	ret = gpiod_set_value_cansleep(pmic->enable, 1);
++	if (ret)
++		return ret;
++
++	msleep(20);
++	ret = pinctrl_select_state(pmic->pinctrl, pmic->active);
++	if (ret) {
++		/* Observe the power-down interval even on a failed startup. */
++		msleep(210);
++		pinctrl_select_state(pmic->pinctrl, pmic->idle);
++		msleep(20);
++		if (gpiod_set_value_cansleep(pmic->enable, 0))
++			dev_err(pmic->dev, "failed to roll back power enable\n");
++		return ret;
++	}
++
++	enable_irq(pmic->irq);
++	return 0;
++}
++
++static int mt6376_power_off(struct generic_pm_domain *domain)
++{
++	struct mt6376 *pmic = container_of(domain, struct mt6376, domain);
++	int ret;
++
++	msleep(210);
++	/* Drain the threaded sampler before pulling FAULTB low. */
++	disable_irq(pmic->irq);
++	ret = pinctrl_select_state(pmic->pinctrl, pmic->idle);
++	if (!ret) {
++		msleep(20);
++		ret = gpiod_set_value_cansleep(pmic->enable, 0);
++	}
++	if (ret) {
++		if (pinctrl_select_state(pmic->pinctrl, pmic->active))
++			dev_err(pmic->dev, "failed to restore FAULTB pull-up\n");
++		enable_irq(pmic->irq);
++	}
++
++	return ret;
++}
++
++static int mt6376_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct mt6376 *pmic;
++	int ret;
++
++	pmic = devm_kzalloc(dev, sizeof(*pmic), GFP_KERNEL);
++	if (!pmic)
++		return -ENOMEM;
++	pmic->dev = dev;
++	pmic->enable = devm_gpiod_get(dev, "enable", GPIOD_ASIS);
++	if (IS_ERR(pmic->enable))
++		return dev_err_probe(dev, PTR_ERR(pmic->enable), "enable GPIO\n");
++
++	/* An already powered radio may still belong to the boot environment. */
++	ret = gpiod_get_value_cansleep(pmic->enable);
++	if (ret)
++		return dev_err_probe(dev, ret < 0 ? ret : -EBUSY,
++				     "cannot take over connectivity power\n");
++
++	pmic->fault = devm_gpiod_get(dev, "fault", GPIOD_IN);
++	if (IS_ERR(pmic->fault))
++		return dev_err_probe(dev, PTR_ERR(pmic->fault), "fault GPIO\n");
++
++	pmic->pinctrl = devm_pinctrl_get(dev);
++	if (IS_ERR(pmic->pinctrl))
++		return dev_err_probe(dev, PTR_ERR(pmic->pinctrl), "pinctrl\n");
++	pmic->idle = pinctrl_lookup_state(pmic->pinctrl, "fault-idle");
++	if (IS_ERR(pmic->idle))
++		return dev_err_probe(dev, PTR_ERR(pmic->idle), "idle pins\n");
++	pmic->active = pinctrl_lookup_state(pmic->pinctrl, "fault-active");
++	if (IS_ERR(pmic->active))
++		return dev_err_probe(dev, PTR_ERR(pmic->active), "active pins\n");
++
++	ret = gpiod_direction_output(pmic->enable, 0);
++	if (ret)
++		return ret;
++	ret = pinctrl_select_state(pmic->pinctrl, pmic->idle);
++	if (ret)
++		return ret;
++	pmic->irq = gpiod_to_irq(pmic->fault);
++	if (pmic->irq < 0)
++		return dev_err_probe(dev, pmic->irq, "fault interrupt\n");
++	ret = devm_request_threaded_irq(dev, pmic->irq, NULL, mt6376_fault,
++					IRQF_TRIGGER_FALLING | IRQF_ONESHOT | IRQF_NO_AUTOEN,
++					dev_name(dev), pmic);
++	if (ret)
++		return dev_err_probe(dev, ret, "request FAULTB interrupt\n");
++
++	pmic->domain.name = dev_name(dev);
++	pmic->domain.power_on = mt6376_power_on;
++	pmic->domain.power_off = mt6376_power_off;
++	ret = pm_genpd_init(&pmic->domain, NULL, true);
++	if (ret)
++		return ret;
++	ret = of_genpd_add_provider_simple(dev->of_node, &pmic->domain);
++	if (ret)
++		pm_genpd_remove(&pmic->domain);
++
++	return ret;
++}
++
++static const struct of_device_id mt6376_of_match[] = {
++	{ .compatible = "mediatek,mt6376" },
++	{ }
++};
++
++static struct platform_driver mt6376_driver = {
++	.probe = mt6376_probe,
++	.driver = {
++		.name = "mt6376-power",
++		.of_match_table = mt6376_of_match,
++		.suppress_bind_attrs = true,
++	},
++};
++builtin_platform_driver(mt6376_driver);
+-- 
+2.50.1 (Apple Git-155)
+

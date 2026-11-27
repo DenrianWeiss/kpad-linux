@@ -1,0 +1,93 @@
+Subject: [PATCH] drm: mediatek: turner: gate panel light on paired valid frames
+
+--- a/drivers/gpu/drm/mediatek/turner/kms.h
++++ b/drivers/gpu/drm/mediatek/turner/kms.h
+@@ -141,10 +141,14 @@
+ 	.atomic_flush = drm_crtc_vblank_atomic_flush,
+ };
+ 
++static bool preferred_mode_only;
++module_param(preferred_mode_only, bool, 0444);
++MODULE_PARM_DESC(preferred_mode_only, "Expose only the preferred panel timing");
++
+ static int turner_get_modes(struct drm_connector *connector)
+ {
+ 	unsigned int i;
+-	for (i = 0; i < ARRAY_SIZE(turner_modes); i++) {
++	for (i = 0; i < (preferred_mode_only ? 1 : ARRAY_SIZE(turner_modes)); i++) {
+ 		struct drm_display_mode *m = drm_mode_duplicate(connector->dev, &turner_modes[i]);
+ 
+ 		if (!m)
+@@ -161,7 +165,7 @@
+ {
+ 	unsigned int i;
+ 
+-	for (i = 0; i < ARRAY_SIZE(turner_modes); i++)
++	for (i = 0; i < (preferred_mode_only ? 1 : ARRAY_SIZE(turner_modes)); i++)
+ 		if (drm_mode_equal(mode, &turner_modes[i]))
+ 			return MODE_OK;
+ 	return MODE_BAD;
+--- a/drivers/gpu/drm/mediatek/turner/command-host.c
++++ b/drivers/gpu/drm/mediatek/turner/command-host.c
+@@ -373,6 +373,8 @@
+ 	struct turner_host *ports[] = { ctx, ctx->peer };
+ 	u32 clock[2], mode[2], dual = readl(ctx->peer->regs + 0x30);
+ 	unsigned int i, frame[2] = {}, max_y[2] = {}, moving[2] = {}, prev[2] = {};
++	struct drm_panel *panel = mipi_dsi_get_drvdata(ctx->panel);
++	bool enable_attempted = false;
+ 	u32 fifo[2][3], reset_select[2], reserved[2];
+ 	unsigned int reported = 0, drained = 0;
+ 	ktime_t deadline = 0;
+@@ -478,6 +480,16 @@
+ 					first_us[i] = last_us[i];
+ 			}
+ 		}
++		if (!enable_attempted && frame[0] >= 2 && frame[1] >= 2 &&
++		    READ_ONCE(ctx->kms->sequence) && !READ_ONCE(ctx->kms->finished) &&
++		    READ_ONCE(ctx->kms->hz) == drm_mode_vrefresh(profile) &&
++		    (readl(path->block[DSC_L].base + 8) & BIT(0)) &&
++		    (readl(path->block[DSC_R].base + 8) & BIT(0))) {
++			enable_attempted = true;
++			drm_panel_enable(panel);
++			dev_notice(ctx->host.dev, "paired scan frames=%u/%u backlight enabled=%u\n",
++				   frame[0], frame[1], panel->enabled);
++		}
+ 		usleep_range(250, 450);
+ 		if (READ_ONCE(kms_stop))
+ 			schedule_work(&ctx->kms->shutdown);
+@@ -485,6 +497,8 @@
+ 		    READ_ONCE(ctx->kms->hz) != drm_mode_vrefresh(profile)))
+ 			deadline = ktime_add_ms(ktime_get(), 100);
+ 	} while (!deadline || (drained != 3 && ktime_before(ktime_get(), deadline)));
++	if (panel->enabled)
++		drm_panel_disable(panel);
+ 	for (i = 0; i < 2; ++i) {
+ 		void __iomem *f = path->block[FETCH_L+i].base;
+ 		u32 data = readl(f + 0x24c);
+@@ -523,6 +537,8 @@
+ 		writel(clock[i], base + 0x1d0);
+ 	}
+ 	writel(dual, ctx->peer->regs + 0x30);
++	if (panel->enabled)
++		drm_panel_disable(panel);
+ 	for (i = 0; i < 2; ++i) {
+ 		void __iomem *f = path->block[FETCH_L+i].base;
+ 		/* The OEM stop sequence clears engine enable and resets the layer. */
+@@ -659,7 +675,6 @@
+ 	ret = panel->prepared ? 0 : -EIO;
+ 	dev_notice(dev, "panel prepare=%d transactions=%u\n", ret, ctx->transfers);
+ 	if (panel->prepared) {
+-		drm_panel_enable(panel);
+ 		inspect_backlight(ctx->panel, panel->enabled);
+ 		inspect_mm_smmu(dev);
+ 		dev_notice(dev, "panel enabled=%d raw RX primary=%#x secondary=%#x\n",
+@@ -675,7 +690,8 @@
+ 		ret = turner_memory_frame(ctx);
+ 		dev_notice(dev, "memory frame test=%d\n", ret);
+ 		inspect_backlight(ctx->panel, panel->enabled);
+-		drm_panel_disable(panel);
++		if (panel->enabled)
++			drm_panel_disable(panel);
+ 		inspect_backlight(ctx->panel, panel->enabled);
+ 		drm_panel_unprepare(panel);
+ 		dev_notice(dev, "panel teardown enabled=%u prepared=%u transactions=%u\n",

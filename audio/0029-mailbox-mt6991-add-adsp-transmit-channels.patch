@@ -1,0 +1,247 @@
+--- a/drivers/mailbox/mt6991-adsp-mailbox.c
++++ b/drivers/mailbox/mt6991-adsp-mailbox.c
+@@ -1,5 +1,5 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+-/* MediaTek MT6991 audio DSP direct receive mailboxes */
++/* MediaTek MT6991 audio DSP direct mailboxes */
+ #include <linux/arm-smccc.h>
+ #include <linux/clk.h>
+ #include <linux/interrupt.h>
+@@ -23,8 +23,9 @@
+ #define MT6991_ADSP_DBG_PEND_CNT 0x15c
+ #define MT6991_ADSP_CORE_CONTROL 0x108
+ 
+-struct mt6991_rx {
++struct mt6991_channel {
+ 	void __iomem *base;
++	void __iomem *set;
+ 	void __iomem *clear;
+ 	void __iomem *wakeup;
+ 	int irq;
+@@ -39,24 +40,24 @@
+ 	bool runtime_clock;
+ 	bool needs_reload;
+ 	void __iomem *pending;
+-	struct mbox_chan chan[2];
+-	struct mt6991_rx rx[2];
++	struct mbox_chan chan[4];
++	struct mt6991_channel port[4];
+ };
+ 
+ static irqreturn_t mt6991_adsp_rx_irq(int irq, void *data)
+ {
+ 	struct mbox_chan *chan = data;
+-	struct mt6991_rx *rx = chan->con_priv;
++	struct mt6991_channel *port = chan->con_priv;
+ 	struct mt6991_adsp_ipi msg;
+ 
+-	if (!(readl(rx->clear) & BIT(0)))
++	if (!(readl(port->clear) & BIT(0)))
+ 		return IRQ_NONE;
+ 
+ 	/* The DSP can reuse the window as soon as the host acknowledges it. */
+-	memcpy_fromio(&msg, rx->base, sizeof(msg));
+-	writel(BIT(0), rx->clear);
++	memcpy_fromio(&msg, port->base, sizeof(msg));
++	writel(BIT(0), port->clear);
+ 	/* Release this core's SPM wake request before delivering the IPI. */
+-	writel(readl(rx->wakeup) & ~MT6991_ADSP_WAKEUP_SPM, rx->wakeup);
++	writel(readl(port->wakeup) & ~MT6991_ADSP_WAKEUP_SPM, port->wakeup);
+ 	if (msg.len <= sizeof(msg.payload))
+ 		mbox_chan_received_data(chan, &msg);
+ 	else
+@@ -146,7 +147,7 @@
+ static int mt6991_adsp_startup(struct mbox_chan *chan)
+ {
+ 	struct mt6991_adsp_mailbox *mb = dev_get_drvdata(chan->mbox->dev);
+-	struct mt6991_rx *rx = chan->con_priv;
++	struct mt6991_channel *port = chan->con_priv;
+ 	int ret;
+ 
+ 	ret = clk_prepare_enable(mb->clk);
+@@ -157,29 +158,64 @@
+ 		clk_disable_unprepare(mb->clk);
+ 		return ret;
+ 	}
+-	enable_irq(rx->irq);
++	if (!port->set)
++		enable_irq(port->irq);
+ 	return 0;
+ }
+ 
+ static void mt6991_adsp_shutdown(struct mbox_chan *chan)
+ {
+ 	struct mt6991_adsp_mailbox *mb = dev_get_drvdata(chan->mbox->dev);
+-	struct mt6991_rx *rx = chan->con_priv;
+-
+-	disable_irq(rx->irq);
++	struct mt6991_channel *port = chan->con_priv;
++
++	if (!port->set)
++		disable_irq(port->irq);
+ 	pm_runtime_put_sync(chan->mbox->dev);
+ 	clk_disable_unprepare(mb->clk);
+ }
+ 
+-static int mt6991_adsp_rx_send(struct mbox_chan *chan, void *data)
+-{
+-	return -EOPNOTSUPP;
++/* The client holds the target core awake while this transfer is pending. */
++static int mt6991_adsp_send(struct mbox_chan *chan, void *data)
++{
++	struct mt6991_channel *port = chan->con_priv;
++	const struct mt6991_adsp_tx *msg = data;
++	unsigned int i;
++	__le32 word;
++
++	if (!port->set)
++		return -EOPNOTSUPP;
++	if (!msg || msg->len > sizeof(msg->payload))
++		return -EINVAL;
++	if (readl(port->set) & BIT(0))
++		return -EBUSY;
++
++	writel(msg->id, port->base);
++	writel(msg->len, port->base + 4);
++	writel(0xffff0000, port->base + 8);
++	writel(0xdeadbeef, port->base + 12);
++	for (i = 0; i < msg->len; i += sizeof(word)) {
++		word = 0;
++		memcpy(&word, &msg->payload[i], min_t(size_t, sizeof(word), msg->len - i));
++		writel(le32_to_cpu(word), port->base + 16 + i);
++	}
++	/* Publish header and payload before ringing the DSP doorbell. */
++	wmb();
++	writel(BIT(0), port->set);
++	return 0;
++}
++
++static bool mt6991_adsp_tx_done(struct mbox_chan *chan)
++{
++	struct mt6991_channel *port = chan->con_priv;
++
++	return port->set && !(readl(port->set) & BIT(0));
+ }
+ 
+ static const struct mbox_chan_ops mt6991_adsp_ops = {
+ 	.startup = mt6991_adsp_startup,
+ 	.shutdown = mt6991_adsp_shutdown,
+-	.send_data = mt6991_adsp_rx_send,
++	.send_data = mt6991_adsp_send,
++	.last_tx_done = mt6991_adsp_tx_done,
+ };
+ 
+ /* The caller holds the RX channel and hence the ADSP clock and power domain. */
+@@ -191,7 +227,7 @@
+ 	if (!chan || chan->mbox->ops != &mt6991_adsp_ops)
+ 		return -EINVAL;
+ 	mb = dev_get_drvdata(chan->mbox->dev);
+-	if (id >= ARRAY_SIZE(mb->chan) || chan != &mb->chan[id])
++	if (id >= 2 || chan != &mb->chan[2 * id + 1])
+ 		return -EINVAL;
+ 	control = readl(mb->core_control);
+ 	if (control == U32_MAX)
+@@ -282,10 +318,10 @@
+ static struct mbox_chan *mt6991_adsp_xlate(struct mbox_controller *controller,
+ 					  const struct of_phandle_args *spec)
+ {
+-	if (spec->args_count != 1 || (spec->args[0] != 1 && spec->args[0] != 3))
++	if (spec->args_count != 1 || spec->args[0] >= controller->num_chans)
+ 		return ERR_PTR(-EINVAL);
+ 
+-	return &controller->chans[spec->args[0] / 2];
++	return &controller->chans[spec->args[0]];
+ }
+ 
+ static int mt6991_adsp_mbox_probe(struct platform_device *pdev)
+@@ -320,31 +356,38 @@
+ 		return dev_err_probe(dev, PTR_ERR(mb->clk26m), "getting 26 MHz clock\n");
+ 	platform_set_drvdata(pdev, mb);
+ 
+-	for (i = 0; i < ARRAY_SIZE(mb->rx); i++) {
+-		struct mt6991_rx *rx = &mb->rx[i];
++	for (i = 0; i < ARRAY_SIZE(mb->port); i++) {
++		struct mt6991_channel *port = &mb->port[i];
+ 		struct resource *res;
+-		unsigned int id = 2 * i + 1;
++		size_t window_size = i & 1 ? sizeof(struct mt6991_adsp_ipi) : 256;
+ 		char name[16];
+ 
+-		rx->wakeup = cfg + MT6991_ADSP_SPM_WAKEUPSRC(i);
+-		snprintf(name, sizeof(name), "mbox%u_base", id);
++		port->wakeup = cfg + MT6991_ADSP_SPM_WAKEUPSRC(i / 2);
++		snprintf(name, sizeof(name), "mbox%u_base", i);
+ 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
+-		if (!res || resource_size(res) < sizeof(struct mt6991_adsp_ipi))
++		if (!res || resource_size(res) < window_size)
+ 			return dev_err_probe(dev, -EINVAL, "invalid %s window\n", name);
+-		rx->base = devm_ioremap_resource(dev, res);
+-		if (IS_ERR(rx->base))
+-			return PTR_ERR(rx->base);
+-		snprintf(name, sizeof(name), "mbox%u_clr", id);
+-		rx->clear = devm_platform_ioremap_resource_byname(pdev, name);
+-		if (IS_ERR(rx->clear))
+-			return PTR_ERR(rx->clear);
+-		snprintf(name, sizeof(name), "mbox%u", id);
+-		rx->irq = platform_get_irq_byname(pdev, name);
+-		if (rx->irq < 0)
+-			return rx->irq;
+-
+-		mb->chan[i].con_priv = rx;
+-		ret = devm_request_irq(dev, rx->irq, mt6991_adsp_rx_irq, IRQF_NO_AUTOEN,
++		port->base = devm_ioremap_resource(dev, res);
++		if (IS_ERR(port->base))
++			return PTR_ERR(port->base);
++		mb->chan[i].con_priv = port;
++		if (!(i & 1)) {
++			snprintf(name, sizeof(name), "mbox%u_set", i);
++			port->set = devm_platform_ioremap_resource_byname(pdev, name);
++			if (IS_ERR(port->set))
++				return PTR_ERR(port->set);
++			continue;
++		}
++		snprintf(name, sizeof(name), "mbox%u_clr", i);
++		port->clear = devm_platform_ioremap_resource_byname(pdev, name);
++		if (IS_ERR(port->clear))
++			return PTR_ERR(port->clear);
++		snprintf(name, sizeof(name), "mbox%u", i);
++		port->irq = platform_get_irq_byname(pdev, name);
++		if (port->irq < 0)
++			return port->irq;
++
++		ret = devm_request_irq(dev, port->irq, mt6991_adsp_rx_irq, IRQF_NO_AUTOEN,
+ 				       dev_name(dev), &mb->chan[i]);
+ 		if (ret)
+ 			return dev_err_probe(dev, ret, "requesting %s IRQ\n", name);
+@@ -357,6 +400,8 @@
+ 	if (ret)
+ 		return ret;
+ 	mb->controller.dev = dev;
++	mb->controller.txdone_poll = true;
++	mb->controller.txpoll_period = 1;
+ 	mb->controller.ops = &mt6991_adsp_ops;
+ 	mb->controller.chans = mb->chan;
+ 	mb->controller.num_chans = ARRAY_SIZE(mb->chan);
+@@ -380,5 +425,5 @@
+ };
+ module_platform_driver(mt6991_adsp_mailbox_driver);
+ 
+-MODULE_DESCRIPTION("MediaTek MT6991 audio DSP receive mailboxes");
++MODULE_DESCRIPTION("MediaTek MT6991 audio DSP mailboxes");
+ MODULE_LICENSE("GPL");
+--- a/include/linux/soc/mediatek/mt6991-adsp-ipi.h
++++ b/include/linux/soc/mediatek/mt6991-adsp-ipi.h
+@@ -13,6 +13,13 @@
+ 	u8 payload[224];
+ };
+ 
++/* A direct TX pin spans 64 words including its 16-byte transport header. */
++struct mt6991_adsp_tx {
++	u32 id;
++	u32 len;
++	u8 payload[240];
++};
++
+ struct mbox_chan;
+ int mt6991_adsp_require_stall(struct mbox_chan *chan, unsigned int id);
+ 

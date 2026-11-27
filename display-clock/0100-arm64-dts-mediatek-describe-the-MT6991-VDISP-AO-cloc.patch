@@ -1,0 +1,33 @@
+From 06a45dc8478592d83cc3b5deaf223faed7c0144b Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 10:22:38 +0800
+Subject: [PATCH 100/100] arm64: dts: mediatek: describe the MT6991 VDISP AO
+ clock controller
+
+Signed-off-by: Turner Linux Port <turner@localhost>
+---
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index a32c7de73..692777b54 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -595,6 +595,14 @@ ovlsys1: syscon@32c00000 {
+ 			#clock-cells = <1>;
+ 			status = "disabled";
+ 		};
++
++		vdisp_ao: syscon@3e800000 {
++			compatible = "mediatek,mt6991-vdisp-ao", "syscon";
++			reg = <0 0x3e800000 0 0x1000>;
++			mediatek,hardware-voter = <&mm_hwv>;
++			#clock-cells = <1>;
++			status = "disabled";
++		};
+ 	};
+ 
+ 	timer {
+-- 
+2.50.1 (Apple Git-155)
+

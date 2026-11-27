@@ -1,0 +1,146 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -13,6 +13,7 @@
+ #include <linux/soc/mediatek/mt6991-adsp-ipi.h>
+ #include <linux/unaligned.h>
+ 
++#define MT6991_ADSP_IPI_TEST	1
+ #define MT6991_ADSP_IPI_READY	13
+ 
+ struct mt6991_adsp_core {
+@@ -23,6 +24,9 @@
+ 	atomic_t ready_count;
+ 	struct mutex records_lock;
+ 	struct completion ready;
++	struct completion timestamp_reply;
++	u64 timestamp;
++	bool timestamp_failed;
+ 	struct device *peer;
+ 	struct mutex boot_lock;
+ 	unsigned long started;
+@@ -35,6 +39,11 @@
+ {
+ 	struct mt6991_adsp_core *core = container_of(client, struct mt6991_adsp_core, client);
+ 	const struct mt6991_adsp_ipi *msg = data;
++
++	if (msg->id == MT6991_ADSP_IPI_TEST && msg->len == sizeof(u64)) {
++		WRITE_ONCE(core->timestamp, get_unaligned_le64(msg->payload));
++		complete(&core->timestamp_reply);
++	}
+ 
+ 	if (msg->id == MT6991_ADSP_IPI_READY && msg->len >= sizeof(u32) &&
+ 	    get_unaligned_le32(msg->payload) == core->id) {
+@@ -281,6 +290,7 @@
+ 	if (ret)
+ 		goto stop;
+ 	for (i = 0; i < ARRAY_SIZE(cores); i++) {
++		cores[i]->timestamp_failed = false;
+ 		reinit_completion(&cores[i]->ready);
+ 		a->started |= BIT(i);
+ 		ret = mt6991_adsp_set_running(cores[i]->rx, i, true);
+@@ -326,16 +336,83 @@
+ }
+ static DEVICE_ATTR_RW(firmware_state);
+ 
++/* Caller holds the pair boot lock and both runtime PM references. */
++static int mt6991_adsp_query_timestamp(struct device *dev, u64 *timestamp)
++{
++	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
++	struct mt6991_adsp_tx msg = { .id = MT6991_ADSP_IPI_TEST, .len = sizeof(u32) };
++	struct mbox_client client = { .dev = dev, .tx_block = true, .tx_tout = 200 };
++	struct device_node *provider;
++	struct mbox_chan *tx;
++	int ret;
++
++	/* Stock uses a separate pre-wake sequence on variants with these windows. */
++	provider = of_parse_phandle(dev->of_node, "mboxes", 0);
++	if (!provider)
++		return -ENODEV;
++	ret = of_property_match_string(provider, "reg-names", "infracfg_rsv") >= 0 ||
++	      of_property_match_string(provider, "reg-names", "ipic_chn") >= 0;
++	of_node_put(provider);
++	if (ret)
++		return -EOPNOTSUPP;
++
++	/* Replies have no sequence field. Discard late replies until a fresh boot. */
++	if (core->timestamp_failed)
++		return -EPIPE;
++	tx = mbox_request_channel(&client, 0);
++	if (IS_ERR(tx))
++		return PTR_ERR(tx);
++	put_unaligned_le32(0x5a5a, msg.payload);
++	reinit_completion(&core->timestamp_reply);
++	ret = mbox_send_message(tx, &msg);
++	if (ret < 0) {
++		dev_err(dev, "timestamp TX completion failed: %d\n", ret);
++	} else {
++		if (wait_for_completion_timeout(&core->timestamp_reply, msecs_to_jiffies(200))) {
++			*timestamp = READ_ONCE(core->timestamp);
++			ret = 0;
++		} else {
++			dev_err(dev, "timestamp TX consumed; timed out waiting for reply\n");
++			ret = -ETIMEDOUT;
++		}
++	}
++	if (ret < 0)
++		core->timestamp_failed = true;
++	mbox_free_channel(tx);
++	return ret;
++}
++
++static ssize_t firmware_timestamps_show(struct device *dev, struct device_attribute *attr,
++					char *buf)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	u64 first, second;
++	int ret_a, ret_b;
++
++	guard(mutex)(&a->boot_lock);
++	if (!a->pair_ready)
++		return -EHOSTDOWN;
++	ret_a = mt6991_adsp_query_timestamp(dev, &first);
++	ret_b = mt6991_adsp_query_timestamp(a->peer, &second);
++	if (ret_a || ret_b)
++		return ret_a ?: ret_b;
++	return sysfs_emit(buf, "%llu %llu\n", first, second);
++}
++static struct device_attribute dev_attr_firmware_timestamps =
++	__ATTR(firmware_timestamps, 0400, firmware_timestamps_show, NULL);
++
+ static umode_t mt6991_pair_visible(struct kobject *kobj, struct attribute *attr, int index)
+ {
+ 	struct mt6991_adsp_core *core = dev_get_drvdata(kobj_to_dev(kobj));
+ 
+-	if (attr == &dev_attr_firmware_state.attr && !core->peer)
++	if (!core->peer && (attr == &dev_attr_firmware_state.attr ||
++			    attr == &dev_attr_firmware_timestamps.attr))
+ 		return 0;
+ 	return attr->mode;
+ }
+ 
+ static struct attribute *mt6991_adsp_attrs[] = {
++	&dev_attr_firmware_timestamps.attr,
+ 	&dev_attr_firmware_state.attr,
+ 	&dev_attr_boot_records_match.attr,
+ 	&dev_attr_prepare_boot_records.attr,
+@@ -423,6 +500,7 @@
+ 	mutex_init(&core->records_lock);
+ 	mutex_init(&core->boot_lock);
+ 	init_completion(&core->ready);
++	init_completion(&core->timestamp_reply);
+ 	if (!core->id) {
+ 		ret = mt6991_adsp_link_peer(dev, core);
+ 		if (ret)
+--- a/Documentation/ABI/testing/sysfs-platform-mt6991-adsp
++++ b/Documentation/ABI/testing/sysfs-platform-mt6991-adsp
+@@ -23,1 +23,10 @@
+ 		on the DSP pair and do not enable speaker playback.
++
++What:		/sys/bus/platform/devices/.../firmware_timestamps
++Date:		November 2026
++Description:
++		Root may read this attribute on core A while the pair is running.
++		It sends the stock test IPI to A and then B and returns the two
++		unsigned firmware timestamp values in decimal, separated by a space.
++		On a transfer timeout, stop and restart the pair before retrying,
++		as the firmware reply carries no sequence identifier.

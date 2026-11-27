@@ -1,0 +1,45 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] drm/panthor: validate the MT6991 GPUFreq shader mask
+
+The MT6991 firmware selects functional cores from a sparse hardware
+topology. Match the stock backend check before overriding SHADER_PRESENT:
+reject an empty mask or one enabling any absent core. Keep the hardware
+value when there is no cell, and propagate provider errors.
+
+---
+diff --git a/drivers/gpu/drm/panthor/panthor_hw.c b/drivers/gpu/drm/panthor/panthor_hw.c
+--- a/drivers/gpu/drm/panthor/panthor_hw.c
++++ b/drivers/gpu/drm/panthor/panthor_hw.c
+@@ -2,6 +2,7 @@
+ /* Copyright 2025 ARM Limited. All rights reserved. */
+ 
+ #include <linux/nvmem-consumer.h>
++#include <linux/of.h>
+ #include <linux/platform_device.h>
+ 
+ #include <drm/drm_print.h>
+@@ -180,13 +181,20 @@
+ 
+ 	ret = nvmem_cell_read_variable_le_u64(ptdev->base.dev, "shader-present",
+ 					      &contents);
+-	if (!ret)
+-		ptdev->gpu_info.shader_present = contents;
+-	else if (ret == -ENOENT)
++	if (ret == -ENOENT)
+ 		return 0;
+-	else
++	if (ret)
+ 		return dev_err_probe(ptdev->base.dev, ret,
+ 				     "Failed to read shader-present nvmem cell\n");
++
++	/* MT6991 GPUFreq may disable cores from the hardware topology. */
++	if (of_device_is_compatible(ptdev->base.dev->of_node, "mediatek,mt6991-mali") &&
++	    (!contents || (contents & ~ptdev->gpu_info.shader_present)))
++		return dev_err_probe(ptdev->base.dev, -EINVAL,
++				     "Invalid GPUFreq shader mask %#llx (hardware %#llx)\n",
++				     contents, ptdev->gpu_info.shader_present);
++
++	ptdev->gpu_info.shader_present = contents;
+ 
+ 	return 0;
+ }

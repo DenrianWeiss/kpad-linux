@@ -1,0 +1,50 @@
+Subject: [PATCH] dt-bindings: soc: mediatek: document MT6991 firmware overlay clock numbering
+
+--- a/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
++++ b/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
+@@ -46,6 +46,16 @@
+               - mediatek,mt8365-mmsys
+           - const: syscon
+ 
++      - items:
++          - const: mediatek,mt6991-ovlsys_config
++          - const: mediatek,mt6991-ovlsys0
++          - const: syscon
++
++      - items:
++          - const: mediatek,mt6991-ovlsys1_config
++          - const: mediatek,mt6991-ovlsys1
++          - const: syscon
++
+       - description: vdosys0 and vdosys1 are 2 display HW pipelines,
+                      so mt8195 binding should be deprecated.
+         deprecated: true
+@@ -84,7 +94,7 @@
+     $ref: /schemas/types.yaml#/definitions/phandle
+     deprecated: true
+     description:
+-      Hardware voter on MT6991 MMSYS1 firmware nodes. These nodes use the
++      Hardware voter on MT6991 display firmware nodes. These nodes use the
+       firmware clock specifier numbering, including gate and client aliases.
+ 
+   mediatek,hardware-voter:
+@@ -165,8 +175,17 @@
+   else:
+     required:
+       - mediatek,hardware-voter
+-    properties:
+-      mm-hw-ccf-regmap: false
++    if:
++      properties:
++        compatible:
++          not:
++            contains:
++              enum:
++                - mediatek,mt6991-ovlsys_config
++                - mediatek,mt6991-ovlsys1_config
++    then:
++      properties:
++        mm-hw-ccf-regmap: false
+ else:
+   properties:
+     mediatek,hardware-voter: false

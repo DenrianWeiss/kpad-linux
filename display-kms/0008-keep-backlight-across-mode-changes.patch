@@ -1,0 +1,68 @@
+Subject: [RFC PATCH] drm: mediatek: turner: keep the backlight on across mode changes
+
+Every refresh-rate change tore the scan path down and called
+drm_panel_disable(), which switches the KTZ8866 backlight off; the next
+mode then re-enabled it, so the screen blinked on every switch. Keep the
+panel lit while another mode is coming and only blank it when the CRTC is
+turned off or the scan stops.
+
+---
+--- a/drivers/gpu/drm/mediatek/turner/command-host.c
++++ b/drivers/gpu/drm/mediatek/turner/command-host.c
+@@ -423,6 +423,21 @@ put:
+ #include "scan-path.h"
+ #include "fetch.h"
+ 
++/* A refresh-rate change only restarts the pipeline; keep the panel and its
++ * backlight on across it, as the OEM does. Blank the panel only when the CRTC
++ * goes off or the scan stops.
++ */
++static bool turner_panel_stays_on(struct turner_host *ctx,
++				  const struct drm_display_mode *profile)
++{
++	unsigned int hz;
++
++	if (READ_ONCE(kms_stop) || READ_ONCE(ctx->kms->finished))
++		return false;
++	hz = READ_ONCE(ctx->kms->hz);
++
++	return hz && hz != drm_mode_vrefresh(profile);
++}
+ 
+ /* Exercise sync-pulse video between a verified prepare and unprepare. */
+ static void sample_video(struct turner_host *ctx, const struct drm_display_mode *profile,
+@@ -595,7 +610,8 @@ static void sample_video(struct turner_host *ctx, const struct drm_display_mode
+ 		    (readl(path->block[DSC_L].base + 8) & BIT(0)) &&
+ 		    (readl(path->block[DSC_R].base + 8) & BIT(0))) {
+ 			enable_attempted = true;
+-			drm_panel_enable(panel);
++			if (!panel->enabled)
++				drm_panel_enable(panel);
+ 			dev_notice(ctx->host.dev, "paired scan frames=%u/%u backlight enabled=%u\n",
+ 				   frame[0], frame[1], panel->enabled);
+ 		}
+@@ -617,8 +633,13 @@ static void sample_video(struct turner_host *ctx, const struct drm_display_mode
+ 		    READ_ONCE(ctx->kms->hz) != drm_mode_vrefresh(profile)))
+ 			deadline = ktime_add_ms(ktime_get(), 100);
+ 	} while (!deadline || (drained != 3 && ktime_before(ktime_get(), deadline)));
+-	if (panel->enabled)
+-		drm_panel_disable(panel);
++	if (panel->enabled) {
++		if (turner_panel_stays_on(ctx, profile))
++			dev_notice(ctx->host.dev, "panel stays on for %u -> %u Hz\n",
++				   drm_mode_vrefresh(profile), READ_ONCE(ctx->kms->hz));
++		else
++			drm_panel_disable(panel);
++	}
+ 	for (i = 0; i < 2; ++i) {
+ 		void __iomem *f = path->block[FETCH_L+i].base;
+ 		u32 data = readl(f + 0x24c);
+@@ -658,7 +679,7 @@ static void sample_video(struct turner_host *ctx, const struct drm_display_mode
+ 		writel(clock[i], base + 0x1d0);
+ 	}
+ 	writel(dual, ctx->peer->regs + 0x30);
+-	if (panel->enabled)
++	if (panel->enabled && !turner_panel_stays_on(ctx, profile))
+ 		drm_panel_disable(panel);
+ 	for (i = 0; i < 2; ++i) {
+ 		void __iomem *f = path->block[FETCH_L+i].base;

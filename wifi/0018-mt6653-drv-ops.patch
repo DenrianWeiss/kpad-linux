@@ -1,0 +1,59 @@
+Subject: [RFC PATCH] wifi: mt76: fill MT6653 rx_skb and rx_poll_complete
+
+The DMA layer calls dev->drv->rx_skb() for every received buffer and
+dev->drv->rx_poll_complete() whenever the RX NAPI drains; both were NULL
+with the empty mt76_driver_ops, so the first received frame would fault.
+Route the MCU queue to the ROM event parser and leave the rest dropped.
+
+--- a/drivers/net/wireless/mediatek/mt76/mt6653.h
++++ b/drivers/net/wireless/mediatek/mt76/mt6653.h
+@@ -21,6 +21,8 @@
+ int mt6653_rom_alloc_tx_queue(struct mt76_dev *dev, enum mt76_mcuq_id qid);
+ int mt6653_rom_alloc_rx_queue(struct mt76_dev *dev);
+ int mt6653_rom_boot_ram(struct mt76_dev *dev);
++void mt6653_rom_rx_skb(struct mt76_dev *dev, enum mt76_rxq_id qid,
++		       struct sk_buff *skb, u32 *info);
+ int mt6653_pci_boot_ram(struct mt76_dev *dev);
+ int mt6653_mcu_get_eeprom(struct mt76_dev *dev, u32 offset, u8 *buf, u32 buf_len);
+ int mt6653_register_device(struct mt76_dev *dev);
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_pci.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_pci.c
+@@ -67,6 +67,20 @@
+ 	.wake_tx_queue = mt6653_wake_tx_queue,
+ };
+ 
++/* The DMA layer calls these unconditionally: rx_skb for every received
++ * buffer and rx_poll_complete whenever the RX NAPI drains. The ROM boot path
++ * only needs the MCU queue, which mt6653_rom_rx_skb forwards to the MCU
++ * parser.
++ */
++static void mt6653_rx_poll_complete(struct mt76_dev *dev, enum mt76_rxq_id qid)
++{
++}
++
++static const struct mt76_driver_ops mt6653_drv_ops = {
++	.rx_skb = mt6653_rom_rx_skb,
++	.rx_poll_complete = mt6653_rx_poll_complete,
++};
++
+ static const struct pci_device_id mt6653_pci_device_table[] = {
+ 	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, MT6653_PCI_DEVICE_ID) },
+ 	{ },
+@@ -83,7 +97,7 @@
+ static int mt6653_pci_probe(struct pci_dev *pdev,
+ 			    const struct pci_device_id *id)
+ {
+-	static const struct mt76_driver_ops drv_ops;
++
+ 	struct mt6653_dev *dev;
+ 	struct mt76_dev *mdev;
+ 	void __iomem *regs;
+@@ -98,7 +112,7 @@
+ 		return ret;
+ 
+ 	mdev = mt76_alloc_device(&pdev->dev, sizeof(*dev), &mt6653_ops,
+-				 &drv_ops);
++				 &mt6653_drv_ops);
+ 	if (!mdev)
+ 		return -ENOMEM;
+ 	dev = container_of(mdev, struct mt6653_dev, mt76);

@@ -1,0 +1,15 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] dt-bindings: clock: mediatek: add MT6991 MFG EB clock ID
+
+The GPUEB mailbox needs the embedded controller clock.
+
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -45,6 +45,7 @@
+ #define MT6991_CLK_TOP_MAINPLL_D9            34
+ #define MT6991_CLK_TOP_I2C_WEST              35
+ #define MT6991_CLK_TOP_I2C_EAST              36
++#define MT6991_CLK_TOP_MFG_EB                37
+ 
+ #define MT6991_CLK_VLP_USB_TOP                0
+ #define MT6991_CLK_VLP_USB_XHCI               1

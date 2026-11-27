@@ -1,0 +1,18 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] clk: mediatek: register the MT6991 MFG EB clock mux
+
+Both MT6991 vendor clock tables use a mux without a gate at CFG6[17:16].
+Reuse the MT8196 parent array and update bit 26.
+
+--- a/drivers/clk/mediatek/clk-mt8196-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+@@ -986,6 +986,9 @@
+ };
+ 
+ static const struct mtk_mux mt6991_muxes[] = {
++	MUX_CLR_SET_UPD(MT6991_CLK_TOP_MFG_EB, "mfg_eb", mfg_eb_parents,
++			CLK_CFG_6, CLK_CFG_6_SET, CLK_CFG_6_CLR, 16, 2,
++			CLK_CFG_UPDATE, TOP_MUX_MFG_EB_SHIFT),
+ 	MUX_CLR_SET_UPD(MT6991_CLK_TOP_PEXTP0_AXI, "ufs_pextp0_axi",
+ 		shared_axi_parents, CLK_CFG_1, CLK_CFG_1_SET,
+ 		CLK_CFG_1_CLR, 0, 3, CLK_CFG_UPDATE, TOP_MUX_UFS_PEXTP0_AXI_SHIFT),

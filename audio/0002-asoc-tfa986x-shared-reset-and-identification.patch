@@ -1,0 +1,160 @@
+--- a/sound/soc/codecs/Kconfig
++++ b/sound/soc/codecs/Kconfig
+@@ -2293,6 +2293,15 @@
+ 	depends on I2C
+ 	select REGMAP_I2C
+ 
++config SND_SOC_TFA986X
++	tristate "NXP TFA986x smart amplifier"
++	depends on I2C && GPIOLIB && RESET_CONTROLLER && PM
++	select REGMAP_I2C
++	select RESET_GPIO
++	help
++	  Enable identification and shared reset management on TFA986x
++	  amplifiers fitted to the Xiaomi Turner tablet.
++
+ config SND_SOC_TFA9879
+ 	tristate "NXP Semiconductors TFA9879 amplifier"
+ 	depends on I2C
+--- a/sound/soc/codecs/Makefile
++++ b/sound/soc/codecs/Makefile
+@@ -331,6 +331,7 @@
+ snd-soc-tas2781-fmwlib-y := tas2781-fmwlib.o
+ snd-soc-tas2781-i2c-y := tas2781-i2c.o
+ snd-soc-tas2783-sdw-y := tas2783-sdw.o
++snd-soc-tfa986x-y := tfa986x.o
+ snd-soc-tfa9879-y := tfa9879.o
+ snd-soc-tfa989x-y := tfa989x.o
+ snd-soc-tlv320adc3xxx-y := tlv320adc3xxx.o
+@@ -775,6 +776,7 @@
+ obj-$(CONFIG_SND_SOC_TAS675X)	+= snd-soc-tas675x.o
+ obj-$(CONFIG_SND_SOC_TDA7419)	+= snd-soc-tda7419.o
+ obj-$(CONFIG_SND_SOC_TAS2770) += snd-soc-tas2770.o
++obj-$(CONFIG_SND_SOC_TFA986X)	+= snd-soc-tfa986x.o
+ obj-$(CONFIG_SND_SOC_TFA9879)	+= snd-soc-tfa9879.o
+ obj-$(CONFIG_SND_SOC_TFA989X)	+= snd-soc-tfa989x.o
+ obj-$(CONFIG_SND_SOC_TLV320ADC3XXX)	+= snd-soc-tlv320adc3xxx.o
+--- /dev/null
++++ b/sound/soc/codecs/tfa986x.c
+@@ -0,0 +1,121 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* NXP TFA986x smart amplifier */
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
++#include <linux/reset.h>
++
++#define TFA986X_REVISION	0x03
++
++struct tfa986x {
++	struct regmap *regmap;
++	struct reset_control *reset;
++};
++
++/* Serialize the minimum pulse width across both clients sharing one GPIO. */
++static DEFINE_MUTEX(tfa986x_reset_lock);
++
++static const struct regmap_config tfa986x_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 16,
++	.val_format_endian = REGMAP_ENDIAN_BIG,
++};
++
++static int tfa986x_runtime_resume(struct device *dev)
++{
++	struct tfa986x *tfa = dev_get_drvdata(dev);
++	int ret;
++
++	guard(mutex)(&tfa986x_reset_lock);
++	/* The first user releases the common active-low reset. */
++	usleep_range(2000, 2500);
++	ret = reset_control_deassert(tfa->reset);
++	if (ret)
++		return ret;
++	usleep_range(2000, 2500);
++	return 0;
++}
++
++static int tfa986x_runtime_suspend(struct device *dev)
++{
++	struct tfa986x *tfa = dev_get_drvdata(dev);
++
++	guard(mutex)(&tfa986x_reset_lock);
++	return reset_control_assert(tfa->reset);
++}
++
++static void tfa986x_power_off(void *data)
++{
++	struct device *dev = data;
++
++	if (!pm_runtime_status_suspended(dev)) {
++		tfa986x_runtime_suspend(dev);
++		pm_runtime_set_suspended(dev);
++	}
++}
++
++static int tfa986x_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct tfa986x *tfa;
++	unsigned int revision;
++	int ret, suspend_ret;
++
++	tfa = devm_kzalloc(dev, sizeof(*tfa), GFP_KERNEL);
++	if (!tfa)
++		return -ENOMEM;
++	tfa->regmap = devm_regmap_init_i2c(client, &tfa986x_regmap_config);
++	if (IS_ERR(tfa->regmap))
++		return dev_err_probe(dev, PTR_ERR(tfa->regmap), "creating regmap\n");
++	tfa->reset = devm_reset_control_get_shared(dev, NULL);
++	if (IS_ERR(tfa->reset))
++		return dev_err_probe(dev, PTR_ERR(tfa->reset), "getting speaker reset\n");
++	i2c_set_clientdata(client, tfa);
++
++	ret = devm_add_action_or_reset(dev, tfa986x_power_off, dev);
++	if (ret)
++		return ret;
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return ret;
++	ret = regmap_read(tfa->regmap, TFA986X_REVISION, &revision);
++	suspend_ret = pm_runtime_put_sync_suspend(dev);
++	if (ret)
++		return dev_err_probe(dev, ret, "reading amplifier revision\n");
++	if (suspend_ret < 0)
++		return dev_err_probe(dev, suspend_ret, "suspending amplifier\n");
++	if (revision != 0x9866)
++		return dev_err_probe(dev, -ENODEV, "unknown revision %#x\n", revision);
++
++	dev_info(dev, "TFA986x revision %#04x\n", revision);
++	return 0;
++}
++
++static const struct dev_pm_ops tfa986x_pm_ops = {
++	RUNTIME_PM_OPS(tfa986x_runtime_suspend, tfa986x_runtime_resume, NULL)
++};
++
++static const struct of_device_id tfa986x_of_match[] = {
++	{ .compatible = "nxp,tfa986x" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, tfa986x_of_match);
++
++static struct i2c_driver tfa986x_driver = {
++	.driver = {
++		.name = "tfa986x",
++		.of_match_table = tfa986x_of_match,
++		.pm = pm_ptr(&tfa986x_pm_ops),
++	},
++	.probe = tfa986x_probe,
++};
++module_i2c_driver(tfa986x_driver);
++
++MODULE_DESCRIPTION("NXP TFA986x speaker amplifier");
++MODULE_LICENSE("GPL");

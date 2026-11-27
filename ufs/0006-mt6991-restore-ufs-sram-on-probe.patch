@@ -1,0 +1,20 @@
+--- a/drivers/ufs/host/ufs-mediatek.c
++++ b/drivers/ufs/host/ufs-mediatek.c
+@@ -1248,6 +1248,17 @@
+ 	if (!id) {
+ 		err = -EINVAL;
+ 		goto out;
++	}
++
++	/*
++	 * The MT6991 firmware suspend path powers down the controller SRAM.
++	 * After kexec, restore it before the new host submits its first UPIU.
++	 */
++	if (of_machine_is_compatible("mediatek,MT6991") ||
++	    of_device_is_compatible(dev->of_node, "mediatek,mt6991-ufshci")) {
++		ufs_mtk_sram_pwr_ctrl(true, res);
++		if (res.a0)
++			dev_warn(dev, "UFS SRAM power-on returned %#lx\n", res.a0);
+ 	}
+ 
+ 	/* Initialize host capability */

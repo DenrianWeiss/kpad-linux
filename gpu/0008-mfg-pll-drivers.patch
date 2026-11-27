@@ -1,0 +1,63 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] clk: mediatek: expose MT6991 GPU PLL rates
+
+GPUEB controls rate changes independently of the application processor.
+Decode CON1 against the 26 MHz reference on each rate query and leave
+PLL power and frequency control with firmware.
+
+--- a/drivers/clk/mediatek/clk-pll.h
++++ b/drivers/clk/mediatek/clk-pll.h
+@@ -20,6 +20,7 @@
+ #define HAVE_RST_BAR	BIT(0)
+ #define PLL_AO		BIT(1)
+ #define PLL_PARENT_EN	BIT(2)
++#define PLL_GET_RATE_NOCACHE BIT(3)
+ #define POSTDIV_MASK	GENMASK(2, 0)
+ 
+ struct mtk_pll_data {
+--- a/drivers/clk/mediatek/clk-pll.c
++++ b/drivers/clk/mediatek/clk-pll.c
+@@ -367,6 +367,9 @@
+ 	if (data->flags & PLL_PARENT_EN)
+ 		init.flags |= CLK_OPS_PARENT_ENABLE;
+ 
++	if (data->flags & PLL_GET_RATE_NOCACHE)
++		init.flags |= CLK_GET_RATE_NOCACHE;
++
+ 	init.ops = pll_ops;
+ 	if (data->parent_name)
+ 		init.parent_names = &data->parent_name;
+--- a/drivers/clk/mediatek/clk-mt8196-mfg.c
++++ b/drivers/clk/mediatek/clk-mt8196-mfg.c
+@@ -79,7 +79,31 @@
+ 	    0, 0, 0, MFGPLL_SC1_CON1, 0, 22),
+ };
+ 
++/* GPUEB controls these PLLs. The host can report their current rates. */
++#define MT6991_MFG_PLL(_name) {				\
++	.name = _name,					\
++	.pd_reg = MFGPLL_CON1,				\
++	.pd_shift = 24,					\
++	.pcw_reg = MFGPLL_CON1,				\
++	.pcwbits = 22,					\
++	.pcwibits = 8,					\
++	.flags = PLL_GET_RATE_NOCACHE,			\
++	.ops = &mtk_pll_read_only_ops,			\
++}
++
++static const struct mtk_pll_data mt6991_mfg_plls[] = {
++	MT6991_MFG_PLL("mfgpll"),
++	MT6991_MFG_PLL("mfgpll-sc0"),
++	MT6991_MFG_PLL("mfgpll-sc1"),
++};
++
+ static const struct of_device_id of_match_clk_mt8196_mfg[] = {
++	{ .compatible = "mediatek,mt6991-mfgpll-pll-ctrl",
++	  .data = &mt6991_mfg_plls[0] },
++	{ .compatible = "mediatek,mt6991-mfgpll-sc0-pll-ctrl",
++	  .data = &mt6991_mfg_plls[1] },
++	{ .compatible = "mediatek,mt6991-mfgpll-sc1-pll-ctrl",
++	  .data = &mt6991_mfg_plls[2] },
+ 	{ .compatible = "mediatek,mt8196-mfgpll-pll-ctrl",
+ 	  .data = &mfg_ao_plls },
+ 	{ .compatible = "mediatek,mt8196-mfgpll-sc0-pll-ctrl",

@@ -1,0 +1,29 @@
+Subject: [RFC PATCH] clk: mediatek: map the vendor imp_iic_wrap gate aliases
+
+The vendor tree references every I2C gate as "gate index * 2 + 1" on all
+four wrappers, exactly like the west wrapper that 0005 already handles.
+Register the east/north/central wrappers with the same alias callback and
+accept their underscore compatibles, so every I2C bus gets a main clock.
+
+--- a/drivers/clk/mediatek/clk-mt8196-imp_iic_wrap.c
++++ b/drivers/clk/mediatek/clk-mt8196-imp_iic_wrap.c
+@@ -109,12 +109,18 @@
+ 
+ static int mt6991_fw_probe(struct platform_device *pdev)
+ {
+-	if (of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-imp_iic_wrap_w"))
++	if (of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-imp_iic_wrap_w") ||
++	    of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-imp_iic_wrap_e") ||
++	    of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-imp_iic_wrap_n") ||
++	    of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-imp_iic_wrap_c"))
+ 		return mtk_clk_simple_probe_with_get(pdev, mt6991_fw_get);
+ 	return mtk_clk_simple_probe(pdev);
+ }
+ 
+ static const struct of_device_id of_match_clk_mt8196_imp_iic_wrap[] = {
++	{ .compatible = "mediatek,mt6991-imp_iic_wrap_c", .data = &impc_mcd },
++	{ .compatible = "mediatek,mt6991-imp_iic_wrap_e", .data = &impe_mcd },
++	{ .compatible = "mediatek,mt6991-imp_iic_wrap_n", .data = &impn_mcd },
+ 	{ .compatible = "mediatek,mt6991-imp_iic_wrap_w", .data = &impw_mcd },
+ 	{ .compatible = "mediatek,mt8196-imp-iic-wrap-c", .data = &impc_mcd },
+ 	{ .compatible = "mediatek,mt8196-imp-iic-wrap-e", .data = &impe_mcd },

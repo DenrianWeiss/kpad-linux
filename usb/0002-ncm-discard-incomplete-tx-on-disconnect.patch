@@ -1,0 +1,91 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] usb: gadget: f_ncm: discard incomplete TX blocks on disconnect
+
+During NCM enumeration the host may briefly enable the data interface,
+switch back to alt 0, and then select alt 1 again. If the first interval
+produces an incomplete NTB, the TX timer can expire while netdev is
+NULL. Later frames append to that NTB without starting another timer.
+Small replies such as ARP then stall until enough traffic fills it.
+
+Discard the pending block once gether has detached the port, on both
+altsetting changes and function disable. The next frame starts its own
+aggregation timer. Use the same reset on an allocation error.
+
+---
+diff --git a/drivers/usb/gadget/function/f_ncm.c b/drivers/usb/gadget/function/f_ncm.c
+--- a/drivers/usb/gadget/function/f_ncm.c
++++ b/drivers/usb/gadget/function/f_ncm.c
+@@ -516,6 +516,29 @@
+ }
+ 
+ /*-------------------------------------------------------------------------*/
++
++static void ncm_discard_tx(struct f_ncm *ncm)
++{
++	hrtimer_try_to_cancel(&ncm->task_timer);
++	if (ncm->skb_tx_data)
++		dev_kfree_skb_any(ncm->skb_tx_data);
++	if (ncm->skb_tx_ndp)
++		dev_kfree_skb_any(ncm->skb_tx_ndp);
++	ncm->skb_tx_data = NULL;
++	ncm->skb_tx_ndp = NULL;
++	ncm->ndp_dgram_count = 0;
++}
++
++/*
++ * gether_disconnect() detaches the port before returning, so neither
++ * a transmit nor its timer callback can enter wrap for this link.
++ */
++static void ncm_disconnect(struct f_ncm *ncm)
++{
++	WRITE_ONCE(ncm->netdev, NULL);
++	gether_disconnect(&ncm->port);
++	ncm_discard_tx(ncm);
++}
+ 
+ static inline void ncm_reset_values(struct f_ncm *ncm)
+ {
+@@ -883,8 +906,7 @@
+ 
+ 		if (ncm->netdev) {
+ 			DBG(cdev, "reset ncm\n");
+-			ncm->netdev = NULL;
+-			gether_disconnect(&ncm->port);
++			ncm_disconnect(ncm);
+ 			ncm_reset_values(ncm);
+ 		}
+ 
+@@ -919,7 +941,7 @@
+ 			net = gether_connect(&ncm->port);
+ 			if (IS_ERR(net))
+ 				return PTR_ERR(net);
+-			ncm->netdev = net;
++			WRITE_ONCE(ncm->netdev, net);
+ 		}
+ 
+ 		spin_lock(&ncm->lock);
+@@ -1132,10 +1154,7 @@
+ 
+ 	if (skb)
+ 		dev_kfree_skb_any(skb);
+-	if (ncm->skb_tx_data)
+-		dev_kfree_skb_any(ncm->skb_tx_data);
+-	if (ncm->skb_tx_ndp)
+-		dev_kfree_skb_any(ncm->skb_tx_ndp);
++	ncm_discard_tx(ncm);
+ 
+ 	return NULL;
+ }
+@@ -1379,10 +1398,8 @@
+ 
+ 	DBG(cdev, "ncm deactivated\n");
+ 
+-	if (ncm->netdev) {
+-		ncm->netdev = NULL;
+-		gether_disconnect(&ncm->port);
+-	}
++	if (ncm->netdev)
++		ncm_disconnect(ncm);
+ 
+ 	if (ncm->notify->enabled) {
+ 		usb_ep_disable(ncm->notify);

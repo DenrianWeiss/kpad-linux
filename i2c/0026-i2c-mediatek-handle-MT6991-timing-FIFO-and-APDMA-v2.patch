@@ -1,0 +1,347 @@
+From 35ce33828a63caed4eab5dee8721da0800c4e135 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:43:54 +0800
+Subject: [PATCH] i2c: mediatek: handle MT6991 timing, FIFO and APDMA v2
+
+Match the MT6991 compatible before its MT8188 fallback. Use the existing v3 address map with word MMIO, byte FIFO accesses for short messages and the v2 TX-address handshake for DMA. Preserve the current MT8188 path. Support standard, fast and fast-mode plus clocks on the base channel.
+---
+ drivers/i2c/busses/i2c-mt65xx.c | 181 +++++++++++++++++++++++++++++---
+ 1 file changed, 168 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/i2c/busses/i2c-mt65xx.c b/drivers/i2c/busses/i2c-mt65xx.c
+index 307925f..1c1d50f 100644
+--- a/drivers/i2c/busses/i2c-mt65xx.c
++++ b/drivers/i2c/busses/i2c-mt65xx.c
+@@ -63,6 +63,8 @@
+ #define I2C_DMA_CLR_FLAG		0x0000
+ #define I2C_DMA_WARM_RST		0x0001
+ #define I2C_DMA_HARD_RST		0x0002
++#define MT6991_DMA_INITIAL_TX_ADDR	0x1000
++#define MT6991_DMA_RESET_CON		BIT(3)
+ #define I2C_DMA_HANDSHAKE_RST		0x0004
+ 
+ #define MAX_SAMPLE_CNT_DIV		8
+@@ -269,6 +271,7 @@ struct mtk_i2c_compatible {
+ 	unsigned char dma_sync: 1;
+ 	unsigned char ltiming_adjust: 1;
+ 	unsigned char apdma_sync: 1;
++	unsigned char dma_v2: 1;
+ 	unsigned char max_dma_support;
+ };
+ 
+@@ -523,10 +526,23 @@ static const struct mtk_i2c_compatible mt8192_compat = {
+ 	.max_dma_support = 36,
+ };
+ 
++static const struct mtk_i2c_compatible mt6991_compat = {
++	.quirks = &mt8183_i2c_quirks,
++	.regs = mt_i2c_regs_v3,
++	.auto_restart = 1,
++	.aux_len_reg = 1,
++	.timing_adjust = 1,
++	.ltiming_adjust = 1,
++	.apdma_sync = 1,
++	.dma_v2 = 1,
++	.max_dma_support = 36,
++};
++
+ static const struct of_device_id mtk_i2c_of_match[] = {
+ 	{ .compatible = "mediatek,mt2712-i2c", .data = &mt2712_compat },
+ 	{ .compatible = "mediatek,mt6577-i2c", .data = &mt6577_compat },
+ 	{ .compatible = "mediatek,mt6589-i2c", .data = &mt6589_compat },
++	{ .compatible = "mediatek,mt6991-i2c", .data = &mt6991_compat },
+ 	{ .compatible = "mediatek,mt7622-i2c", .data = &mt7622_compat },
+ 	{ .compatible = "mediatek,mt7981-i2c", .data = &mt7981_compat },
+ 	{ .compatible = "mediatek,mt7986-i2c", .data = &mt7986_compat },
+@@ -542,13 +558,22 @@ MODULE_DEVICE_TABLE(of, mtk_i2c_of_match);
+ 
+ static u16 mtk_i2c_readw(struct mtk_i2c *i2c, enum I2C_REGS_OFFSET reg)
+ {
+-	return readw(i2c->base + i2c->dev_comp->regs[reg]);
++	void __iomem *addr = i2c->base + i2c->dev_comp->regs[reg];
++
++	if (i2c->dev_comp->dma_v2)
++		return readl(addr);
++	return readw(addr);
+ }
+ 
+ static void mtk_i2c_writew(struct mtk_i2c *i2c, u16 val,
+ 			   enum I2C_REGS_OFFSET reg)
+ {
+-	writew(val, i2c->base + i2c->dev_comp->regs[reg]);
++	void __iomem *addr = i2c->base + i2c->dev_comp->regs[reg];
++
++	if (i2c->dev_comp->dma_v2)
++		writel(val, addr);
++	else
++		writew(val, addr);
+ }
+ 
+ static void mtk_i2c_init_hw(struct mtk_i2c *i2c)
+@@ -573,6 +598,8 @@ static void mtk_i2c_init_hw(struct mtk_i2c *i2c)
+ 		udelay(10);
+ 		writel(I2C_DMA_CLR_FLAG, i2c->pdmabase + OFFSET_RST);
+ 		mtk_i2c_writew(i2c, I2C_CHN_CLR_FLAG, OFFSET_SOFTRESET);
++		if (i2c->dev_comp->dma_v2)
++			writel(MT6991_DMA_INITIAL_TX_ADDR, i2c->pdmabase + OFFSET_TX_MEM_ADDR);
+ 	} else {
+ 		writel(I2C_DMA_HARD_RST, i2c->pdmabase + OFFSET_RST);
+ 		udelay(50);
+@@ -870,6 +897,73 @@ static int mtk_i2c_calculate_speed(struct mtk_i2c *i2c, unsigned int clk_src,
+ 	return 0;
+ }
+ 
++/* The high and low counters each multiply a sample count by a step count. */
++static bool mt6991_i2c_factor(unsigned int ticks, u16 *sample, u16 *step)
++{
++	unsigned int n;
++
++	for (n = 1; n <= MAX_SAMPLE_CNT_DIV; n++) {
++		unsigned int m = ticks / n;
++
++		if (ticks % n || m < n || m > MAX_STEP_CNT_DIV)
++			continue;
++		*sample = n - 1;
++		*step = m - 1;
++		return true;
++	}
++	return false;
++}
++
++static int mt6991_i2c_set_speed(struct mtk_i2c *i2c, unsigned long parent)
++{
++	unsigned int target = i2c->speed_hz;
++	unsigned int div;
++
++	if (target != I2C_MAX_STANDARD_MODE_FREQ && target != I2C_MAX_FAST_MODE_FREQ &&
++	    target != I2C_MAX_FAST_MODE_PLUS_FREQ)
++		return -EINVAL;
++	parent /= i2c->clk_src_div;
++	if (!parent || parent > 400000000)
++		return -EINVAL;
++
++	for (div = 1; div <= MAX_CLOCK_DIV_5BITS; div++) {
++		unsigned int denom = (target / 100000) * 1000000;
++		unsigned int ext = denom ? (parent / div) * 5 / denom : 0;
++		unsigned int ticks, ideal, delta;
++
++		if (ext > 255)
++			continue;
++		target = (target / 100) * (97 + target / 100000);
++		ticks = DIV_ROUND_UP(parent, (unsigned long)div * target) + 1;
++		ideal = ticks * 45 / 100;
++		for (delta = 0; ideal + delta <= DIV_ROUND_UP(ticks, 2); delta++) {
++			int direction;
++
++			for (direction = 1; direction >= -1; direction -= 2) {
++				int high = (int)ideal + direction * (int)delta;
++				u16 hs, ht, ls, lt;
++				unsigned int ratio;
++
++				if (high < 2 || ticks - high < 2)
++					continue;
++				ratio = high * 1000 / ticks;
++				if ((direction < 0 && ratio < 410) ||
++				    (direction > 0 && ratio >= 490))
++					continue;
++				if (!mt6991_i2c_factor(high, &hs, &ht) ||
++				    !mt6991_i2c_factor(ticks - high, &ls, &lt))
++					continue;
++				i2c->ac_timing.htiming = hs << 8 | ht;
++				i2c->ac_timing.ltiming = ls << 6 | lt;
++				i2c->ac_timing.ext = ext << 8 | 1;
++				i2c->ac_timing.inter_clk_div = (div - 1) * 0x101;
++				return 0;
++			}
++		}
++	}
++	return -EINVAL;
++}
++
+ static void mtk_i2c_set_speed(struct mtk_i2c *i2c, unsigned int parent_clk)
+ {
+ 	unsigned int clk_src;
+@@ -1003,6 +1097,10 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
+ 	u16 dma_sync = 0;
+ 	u32 reg_4g_mode;
+ 	u32 reg_dma_reset;
++	bool copy_rx;
++	bool fifo = i2c->dev_comp->dma_v2 && msgs->len <= 16 &&
++		    (i2c->op != I2C_MASTER_WRRD || msgs[1].len <= 16);
++	int i;
+ 	u8 *dma_rd_buf = NULL;
+ 	u8 *dma_wr_buf = NULL;
+ 	dma_addr_t rpaddr = 0;
+@@ -1017,8 +1115,10 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
+ 	reinit_completion(&i2c->msg_complete);
+ 
+ 	if (i2c->dev_comp->apdma_sync &&
+-	    i2c->op != I2C_MASTER_WRRD && num > 1) {
+-		mtk_i2c_writew(i2c, 0x00, OFFSET_DEBUGCTRL);
++	    num > 1 && (i2c->dev_comp->dma_v2 ? i2c->op == I2C_MASTER_RD :
++					    i2c->op != I2C_MASTER_WRRD)) {
++		if (!i2c->dev_comp->dma_v2)
++			mtk_i2c_writew(i2c, 0x00, OFFSET_DEBUGCTRL);
+ 		writel(I2C_DMA_HANDSHAKE_RST | I2C_DMA_WARM_RST,
+ 		       i2c->pdmabase + OFFSET_RST);
+ 
+@@ -1034,8 +1134,23 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
+ 		writel(I2C_DMA_CLR_FLAG, i2c->pdmabase + OFFSET_RST);
+ 		mtk_i2c_writew(i2c, I2C_HANDSHAKE_RST, OFFSET_SOFTRESET);
+ 		mtk_i2c_writew(i2c, I2C_CHN_CLR_FLAG, OFFSET_SOFTRESET);
+-		mtk_i2c_writew(i2c, I2C_RELIABILITY | I2C_DMAACK_ENABLE,
+-			       OFFSET_DEBUGCTRL);
++		if (!i2c->dev_comp->dma_v2)
++			mtk_i2c_writew(i2c, I2C_RELIABILITY | I2C_DMAACK_ENABLE,
++				       OFFSET_DEBUGCTRL);
++	}
++
++	if (i2c->dev_comp->dma_v2) {
++		if (!mtk_i2c_readw(i2c, OFFSET_TIMING) ||
++		    (!fifo && readl(i2c->pdmabase + OFFSET_CON) == MT6991_DMA_RESET_CON)) {
++			mtk_i2c_init_hw(i2c);
++		} else if (!fifo && !readl(i2c->pdmabase + OFFSET_TX_MEM_ADDR)) {
++			writel(I2C_DMA_HANDSHAKE_RST, i2c->pdmabase + OFFSET_RST);
++			mtk_i2c_writew(i2c, I2C_HANDSHAKE_RST, OFFSET_SOFTRESET);
++			udelay(2);
++			writel(0, i2c->pdmabase + OFFSET_RST);
++			mtk_i2c_writew(i2c, 0, OFFSET_SOFTRESET);
++			writel(MT6991_DMA_INITIAL_TX_ADDR, i2c->pdmabase + OFFSET_TX_MEM_ADDR);
++		}
+ 	}
+ 
+ 	control_reg = mtk_i2c_readw(i2c, OFFSET_CONTROL) &
+@@ -1043,6 +1158,11 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
+ 	if ((i2c->speed_hz > I2C_MAX_FAST_MODE_PLUS_FREQ) || (left_num >= 1))
+ 		control_reg |= I2C_CONTROL_RS;
+ 
++	if (fifo)
++		control_reg &= ~I2C_CONTROL_DMA_EN;
++	else
++		control_reg |= I2C_CONTROL_DMA_EN;
++
+ 	if (i2c->op == I2C_MASTER_WRRD)
+ 		control_reg |= I2C_CONTROL_DIR_CHANGE | I2C_CONTROL_RS;
+ 
+@@ -1083,6 +1203,13 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
+ 			dma_sync |= I2C_DMA_DIR_CHANGE;
+ 	}
+ 
++	if (fifo) {
++		if (i2c->op != I2C_MASTER_RD)
++			for (i = 0; i < msgs->len; i++)
++				writeb(msgs->buf[i], i2c->base + i2c->dev_comp->regs[OFFSET_DATA_PORT]);
++		goto start;
++	}
++
+ 	/* Prepare buffer data to start transfer */
+ 	if (i2c->op == I2C_MASTER_RD) {
+ 		writel(I2C_DMA_INT_FLAG_NONE, i2c->pdmabase + OFFSET_INT_FLAG);
+@@ -1184,6 +1311,7 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
+ 	}
+ 
+ 	writel(I2C_DMA_START_EN, i2c->pdmabase + OFFSET_EN);
++start:
+ 
+ 	if (!i2c->auto_restart) {
+ 		start_reg = I2C_TRANSAC_START;
+@@ -1198,9 +1326,17 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
+ 					  i2c->adap.timeout);
+ 
+ 	/* Clear interrupt mask */
+-	mtk_i2c_writew(i2c, ~(restart_flag | I2C_HS_NACKERR | I2C_ACKERR |
++	mtk_i2c_writew(i2c, i2c->dev_comp->dma_v2 ? 0 : ~(restart_flag | I2C_HS_NACKERR | I2C_ACKERR |
+ 			    I2C_ARB_LOST | I2C_TRANSAC_COMP), OFFSET_INTR_MASK);
+ 
++	if (fifo)
++		goto check_status;
++
++	copy_rx = !i2c->dev_comp->dma_v2 ||
++		  (ret && !(i2c->irq_stat & (I2C_ACKERR | I2C_HS_NACKERR | I2C_ARB_LOST)));
++	if (i2c->dev_comp->dma_v2 && (!ret || (i2c->irq_stat & I2C_ARB_LOST)))
++		mtk_i2c_init_hw(i2c);
++
+ 	if (i2c->op == I2C_MASTER_WR) {
+ 		dma_unmap_single(i2c->dev, wpaddr,
+ 				 msgs->len, DMA_TO_DEVICE);
+@@ -1210,7 +1346,7 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
+ 		dma_unmap_single(i2c->dev, rpaddr,
+ 				 msgs->len, DMA_FROM_DEVICE);
+ 
+-		i2c_put_dma_safe_msg_buf(dma_rd_buf, msgs, true);
++		i2c_put_dma_safe_msg_buf(dma_rd_buf, msgs, copy_rx);
+ 	} else {
+ 		dma_unmap_single(i2c->dev, wpaddr, msgs->len,
+ 				 DMA_TO_DEVICE);
+@@ -1218,13 +1354,15 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
+ 				 DMA_FROM_DEVICE);
+ 
+ 		i2c_put_dma_safe_msg_buf(dma_wr_buf, msgs, true);
+-		i2c_put_dma_safe_msg_buf(dma_rd_buf, (msgs + 1), true);
++		i2c_put_dma_safe_msg_buf(dma_rd_buf, msgs + 1, copy_rx);
+ 	}
+ 
++check_status:
+ 	if (ret == 0) {
+ 		dev_dbg(i2c->dev, "addr: %x, transfer timeout\n", msgs->addr);
+ 		i2c_dump_register(i2c);
+-		mtk_i2c_init_hw(i2c);
++		if (fifo || !i2c->dev_comp->dma_v2)
++			mtk_i2c_init_hw(i2c);
+ 		return -ETIMEDOUT;
+ 	}
+ 
+@@ -1234,6 +1372,17 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
+ 		return -ENXIO;
+ 	}
+ 
++	if (i2c->dev_comp->dma_v2 && (i2c->irq_stat & I2C_ARB_LOST)) {
++		if (fifo)
++			mtk_i2c_init_hw(i2c);
++		return -EAGAIN;
++	}
++	if (fifo && i2c->op != I2C_MASTER_WR) {
++		struct i2c_msg *rx = i2c->op == I2C_MASTER_WRRD ? &msgs[1] : msgs;
++
++		for (i = 0; i < rx->len; i++)
++			rx->buf[i] = readb(i2c->base + i2c->dev_comp->regs[OFFSET_DATA_PORT]);
++	}
+ 	return 0;
+ }
+ 
+@@ -1293,7 +1442,6 @@ static int mtk_i2c_transfer(struct i2c_adapter *adap,
+ 			left_num--;
+ 		}
+ 
+-		/* always use DMA mode. */
+ 		ret = mtk_i2c_do_transfer(i2c, msgs, num, left_num);
+ 		if (ret < 0)
+ 			goto err_exit;
+@@ -1337,7 +1485,8 @@ static irqreturn_t mtk_i2c_irq(int irqno, void *dev_id)
+ 		mtk_i2c_writew(i2c, I2C_RS_MUL_CNFG | I2C_RS_MUL_TRIG |
+ 				    I2C_TRANSAC_START, OFFSET_START);
+ 	} else {
+-		if (i2c->irq_stat & (I2C_TRANSAC_COMP | restart_flag))
++		if ((i2c->irq_stat & (I2C_TRANSAC_COMP | restart_flag)) ||
++		    (i2c->dev_comp->dma_v2 && (i2c->irq_stat & I2C_ARB_LOST)))
+ 			complete(&i2c->msg_complete);
+ 	}
+ 
+@@ -1469,7 +1618,13 @@ static int mtk_i2c_probe(struct platform_device *pdev)
+ 
+ 	strscpy(i2c->adap.name, I2C_DRV_NAME, sizeof(i2c->adap.name));
+ 
+-	mtk_i2c_set_speed(i2c, clk_get_rate(i2c->clocks[speed_clk].clk));
++	if (i2c->dev_comp->dma_v2) {
++		ret = mt6991_i2c_set_speed(i2c, clk_get_rate(i2c->clocks[speed_clk].clk));
++		if (ret)
++			return dev_err_probe(i2c->dev, ret, "unsupported bus timing\n");
++	} else {
++		mtk_i2c_set_speed(i2c, clk_get_rate(i2c->clocks[speed_clk].clk));
++	}
+ 
+ 	if (i2c->dev_comp->max_dma_support > 32) {
+ 		ret = dma_set_mask(&pdev->dev,
+-- 
+2.50.1 (Apple Git-155)
+

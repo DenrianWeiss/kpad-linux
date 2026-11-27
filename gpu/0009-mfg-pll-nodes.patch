@@ -1,0 +1,36 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] arm64: dts: mediatek: add MT6991 GPU PLL controllers
+
+Describe the core and two stack PLL controllers. Keep them disabled
+until the platform can provide power during hardware access.
+
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -614,6 +614,27 @@
+ 			#mbox-cells = <1>;
+ 			status = "disabled";
+ 		};
++
++		mfgpll: clock-controller@4b810000 {
++			compatible = "mediatek,mt6991-mfgpll-pll-ctrl", "syscon";
++			reg = <0 0x4b810000 0 0x400>;
++			#clock-cells = <1>;
++			status = "disabled";
++		};
++
++		mfgpll_sc0: clock-controller@4b810400 {
++			compatible = "mediatek,mt6991-mfgpll-sc0-pll-ctrl", "syscon";
++			reg = <0 0x4b810400 0 0x400>;
++			#clock-cells = <1>;
++			status = "disabled";
++		};
++
++		mfgpll_sc1: clock-controller@4b810800 {
++			compatible = "mediatek,mt6991-mfgpll-sc1-pll-ctrl", "syscon";
++			reg = <0 0x4b810800 0 0x1000>;
++			#clock-cells = <1>;
++			status = "disabled";
++		};
+ 	};
+ 
+ 	timer {

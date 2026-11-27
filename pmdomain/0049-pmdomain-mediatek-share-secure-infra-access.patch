@@ -1,0 +1,135 @@
+From c75b818af671675daa7d5f0c09596db13d7b55e1 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 05:58:04 +0800
+Subject: [PATCH] pmdomain: mediatek: share secure infrastructure access across
+ HW voters
+
+The HWCCF SiP command controls a single infrastructure gate. Keep it open until the last overlapping power transition has completed. Serialize the fast firmware calls with the user count and retry a failed release before admitting a new transaction.
+---
+ drivers/pmdomain/mediatek/mtk-pm-domains.c | 61 +++++++++++++++++++---
+ 1 file changed, 55 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.c b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+index 63cc897..b13d58f 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.c
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+@@ -15,6 +15,7 @@
+ #include <linux/pm_domain.h>
+ #include <linux/regmap.h>
+ #include <linux/regulator/consumer.h>
++#include <linux/spinlock.h>
+ #include <linux/soc/mediatek/infracfg.h>
+ #include <linux/soc/mediatek/mtk_sip_svc.h>
+ 
+@@ -140,6 +141,54 @@ static int scpsys_sec_infra_power_on(bool on)
+ 	return res.a0;
+ }
+ 
++/* The secure command addresses one gate, regardless of the voting domain. */
++static DEFINE_RAW_SPINLOCK(scpsys_infra_lock);
++static unsigned int scpsys_infra_users;
++static bool scpsys_infra_release_pending;
++
++static int scpsys_infra_get(void)
++{
++	unsigned long flags;
++	int ret = 0;
++
++	raw_spin_lock_irqsave(&scpsys_infra_lock, flags);
++	if (!scpsys_infra_users) {
++		/* Complete a failed last release before starting another vote. */
++		if (scpsys_infra_release_pending) {
++			ret = scpsys_sec_infra_power_on(false);
++			if (ret)
++				goto unlock;
++			scpsys_infra_release_pending = false;
++		}
++
++		ret = scpsys_sec_infra_power_on(true);
++		if (ret)
++			goto unlock;
++	}
++	scpsys_infra_users++;
++unlock:
++	raw_spin_unlock_irqrestore(&scpsys_infra_lock, flags);
++	return ret;
++}
++
++static void scpsys_infra_put(struct device *dev)
++{
++	unsigned long flags;
++	int ret = 0;
++
++	raw_spin_lock_irqsave(&scpsys_infra_lock, flags);
++	if (WARN_ON_ONCE(!scpsys_infra_users))
++		goto unlock;
++	if (!--scpsys_infra_users) {
++		ret = scpsys_sec_infra_power_on(false);
++		scpsys_infra_release_pending = !!ret;
++	}
++unlock:
++	raw_spin_unlock_irqrestore(&scpsys_infra_lock, flags);
++	if (ret)
++		dev_err_ratelimited(dev, "Failed to release HW voter infrastructure: %d\n", ret);
++}
++
+ static int scpsys_sram_enable(struct scpsys_domain *pd)
+ {
+ 	u32 expected_ack, pdn_ack = pd->data->sram_pdn_ack_bits;
+@@ -324,7 +373,7 @@ static int scpsys_hwv_power_on(struct generic_pm_domain *genpd)
+ 	int ret;
+ 
+ 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_INFRA_PWR_CTL)) {
+-		ret = scpsys_sec_infra_power_on(true);
++		ret = scpsys_infra_get();
+ 		if (ret)
+ 			return ret;
+ 	}
+@@ -383,7 +432,7 @@ static int scpsys_hwv_power_on(struct generic_pm_domain *genpd)
+ 	clk_bulk_disable_unprepare(pd->num_subsys_clks, pd->subsys_clks);
+ 
+ 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_INFRA_PWR_CTL))
+-		scpsys_sec_infra_power_on(false);
++		scpsys_infra_put(scpsys->dev);
+ 
+ 	return 0;
+ 
+@@ -395,7 +444,7 @@ static int scpsys_hwv_power_on(struct generic_pm_domain *genpd)
+ 	scpsys_regulator_disable(pd->supply);
+ err_infra:
+ 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_INFRA_PWR_CTL))
+-		scpsys_sec_infra_power_on(false);
++		scpsys_infra_put(scpsys->dev);
+ 	return ret;
+ };
+ 
+@@ -407,7 +456,7 @@ static int scpsys_hwv_power_off_internal(struct scpsys_domain *pd)
+ 	int ret;
+ 
+ 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_INFRA_PWR_CTL)) {
+-		ret = scpsys_sec_infra_power_on(true);
++		ret = scpsys_infra_get();
+ 		if (ret)
+ 			return ret;
+ 	}
+@@ -457,7 +506,7 @@ static int scpsys_hwv_power_off_internal(struct scpsys_domain *pd)
+ 	scpsys_regulator_disable(pd->supply);
+ 
+ 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_INFRA_PWR_CTL))
+-		scpsys_sec_infra_power_on(false);
++		scpsys_infra_put(scpsys->dev);
+ 
+ 	return 0;
+ 
+@@ -465,7 +514,7 @@ static int scpsys_hwv_power_off_internal(struct scpsys_domain *pd)
+ 	clk_bulk_disable_unprepare(pd->num_subsys_clks, pd->subsys_clks);
+ err_infra:
+ 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_INFRA_PWR_CTL))
+-		scpsys_sec_infra_power_on(false);
++		scpsys_infra_put(scpsys->dev);
+ 	return ret;
+ };
+ 
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,93 @@
+Subject: [PATCH] clk: mediatek: translate MT6991 firmware overlay gate indices
+
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6991-ovl.h
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef CLK_MT6991_OVL_H
++#define CLK_MT6991_OVL_H
++
++#include <linux/of.h>
++
++/* Both banks use adjacent IDs for each physical gate and client alias. */
++static struct clk_hw *mt6991_fw_ovl_get(struct of_phandle_args *args, void *data)
++{
++	struct clk_hw_onecell_data *clks = data;
++	u32 id;
++
++	if (args->args_count != 1)
++		return ERR_PTR(-EINVAL);
++	id = args->args[0];
++	if (id >= 6 && id <= 27)
++		return clks->hws[MT6991_CLK_OVL0_MUTEX + (id - 6) / 2];
++	if (id == 124 || id == 125)
++		return clks->hws[MT6991_CLK_OVL0_SMI];
++	return ERR_PTR(-ENOENT);
++}
++
++static int mt6991_ovl_probe(struct platform_device *pdev)
++{
++	struct device *parent = pdev->dev.parent;
++
++	if (!of_device_is_compatible(parent->of_node, "mediatek,mt6991-ovlsys_config") &&
++	    !of_device_is_compatible(parent->of_node, "mediatek,mt6991-ovlsys1_config"))
++		return mtk_clk_pdev_probe(pdev);
++	if (!parent->pm_domain)
++		return dev_err_probe(&pdev->dev, -EPROBE_DEFER, "waiting for overlay power domain\n");
++	return mtk_clk_pdev_probe_with_get(pdev, mt6991_fw_ovl_get);
++}
++#endif
+--- a/drivers/clk/mediatek/clk-mt8196-ovl0.c
++++ b/drivers/clk/mediatek/clk-mt8196-ovl0.c
+@@ -15,6 +15,7 @@
+ 
+ #include "clk-gate.h"
+ #include "clk-mtk.h"
++#include "clk-mt6991-ovl.h"
+ 
+ static const struct mtk_gate_regs ovl0_cg_regs = {
+ 	.set_ofs = 0x104,
+@@ -151,6 +152,7 @@
+ };
+ 
+ static const struct mtk_clk_desc mt6991_ovl0_desc = {
++	.need_runtime_pm = true,
+ 	.clks = mt6991_ovl0_clks,
+ 	.num_clks = ARRAY_SIZE(mt6991_ovl0_clks),
+ };
+@@ -163,7 +165,7 @@
+ MODULE_DEVICE_TABLE(platform, clk_mt8196_ovl0_id_table);
+ 
+ static struct platform_driver clk_mt8196_ovl0_drv = {
+-	.probe = mtk_clk_pdev_probe,
++	.probe = mt6991_ovl_probe,
+ 	.remove = mtk_clk_pdev_remove,
+ 	.driver = {
+ 		.name = "clk-mt8196-ovl0",
+--- a/drivers/clk/mediatek/clk-mt8196-ovl1.c
++++ b/drivers/clk/mediatek/clk-mt8196-ovl1.c
+@@ -15,6 +15,7 @@
+ 
+ #include "clk-gate.h"
+ #include "clk-mtk.h"
++#include "clk-mt6991-ovl.h"
+ 
+ static const struct mtk_gate_regs ovl10_cg_regs = {
+ 	.set_ofs = 0x104,
+@@ -151,6 +152,7 @@
+ };
+ 
+ static const struct mtk_clk_desc mt6991_ovl1_desc = {
++	.need_runtime_pm = true,
+ 	.clks = mt6991_ovl1_clks,
+ 	.num_clks = ARRAY_SIZE(mt6991_ovl1_clks),
+ };
+@@ -163,7 +165,7 @@
+ MODULE_DEVICE_TABLE(platform, clk_mt8196_ovl1_id_table);
+ 
+ static struct platform_driver clk_mt8196_ovl1_drv = {
+-	.probe = mtk_clk_pdev_probe,
++	.probe = mt6991_ovl_probe,
+ 	.remove = mtk_clk_pdev_remove,
+ 	.driver = {
+ 		.name = "clk-mt8196-ovl1",

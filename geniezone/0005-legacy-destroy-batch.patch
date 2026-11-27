@@ -1,0 +1,22 @@
+Subject: [PATCH] virt: geniezone: handle missing destroy batch query on Turner
+
+Firmware returns -2 for the destroy batch capability. Use the batch size
+already initialized by the production driver on that reply. Propagate
+other errors and continue validating successful responses.
+
+--- a/arch/arm64/geniezone/vm.c
++++ b/arch/arm64/geniezone/vm.c
+@@ -255,6 +255,13 @@
+ 	int ret;
+ 
+ 	ret = gzvm_arch_enable_cap(cap, &res);
++	/* Turner firmware returns -2 for an unknown capability. */
++	if ((long)res.a0 == -2) {
++		cap->args[0] = GZVM_DRV_DESTROY_PAGING_BATCH_PAGES;
++		pr_info("gzvm: legacy VM destruction batch size %u pages\n",
++			GZVM_DRV_DESTROY_PAGING_BATCH_PAGES);
++		return 0;
++	}
+ 	if (ret)
+ 		return ret;
+ 	if (!is_power_of_2(res.a1) || res.a1 > U32_MAX)

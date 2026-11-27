@@ -1,0 +1,76 @@
+--- a/sound/soc/mediatek/mt6991/turner.c
++++ b/sound/soc/mediatek/mt6991/turner.c
+@@ -2,12 +2,16 @@
+ /* Xiaomi Turner speaker playback machine driver. */
+ #include <linux/module.h>
+ #include <linux/of.h>
++#include <linux/pinctrl/consumer.h>
+ #include <linux/platform_device.h>
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
+ 
+ struct turner_audio {
+ 	struct snd_soc_card card;
++	struct pinctrl *pins;
++	struct pinctrl_state *active;
++	struct pinctrl_state *idle;
+ 	struct snd_soc_dai_link links[2];
+ 	struct snd_soc_dai_link_component cpus[2];
+ 	struct snd_soc_dai_link_component platform;
+@@ -22,6 +26,29 @@
+ 	return 0;
+ }
+ 
++static int turner_i2s_startup(struct snd_pcm_substream *s)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(s);
++	struct turner_audio *audio = snd_soc_card_get_drvdata(rtd->card);
++	int ret;
++
++	ret = pinctrl_select_state(audio->pins, audio->active);
++	if (ret)
++		pinctrl_select_state(audio->pins, audio->idle);
++	return ret;
++}
++
++static void turner_i2s_shutdown(struct snd_pcm_substream *s)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(s);
++	struct turner_audio *audio = snd_soc_card_get_drvdata(rtd->card);
++	int ret;
++
++	ret = pinctrl_select_state(audio->pins, audio->idle);
++	if (ret)
++		dev_err(rtd->card->dev, "could not idle I2S4 pins: %d\n", ret);
++}
++
+ static int turner_hw_params(struct snd_pcm_substream *substream,
+ 			    struct snd_pcm_hw_params *params)
+ {
+@@ -32,6 +59,8 @@
+ }
+ 
+ static const struct snd_soc_ops turner_i2s_ops = {
++	.startup = turner_i2s_startup,
++	.shutdown = turner_i2s_shutdown,
+ 	.hw_params = turner_hw_params,
+ };
+ 
+@@ -106,6 +135,17 @@
+ 		audio->amps[i].dlc.of_node = be->codecs[i].of_node;
+ 		audio->amps[i].name_prefix = i ? "Amp2" : "Amp1";
+ 	}
++	audio->pins = devm_pinctrl_get(dev);
++	if (IS_ERR(audio->pins))
++		return dev_err_probe(dev, PTR_ERR(audio->pins), "getting I2S4 pins\n");
++	audio->idle = pinctrl_lookup_state(audio->pins, PINCTRL_STATE_DEFAULT);
++	if (IS_ERR(audio->idle))
++		return dev_err_probe(dev, PTR_ERR(audio->idle), "getting I2S4 idle state\n");
++	audio->active = pinctrl_lookup_state(audio->pins, "i2s4-active");
++	if (IS_ERR(audio->active))
++		return dev_err_probe(dev, PTR_ERR(audio->active), "getting I2S4 active state\n");
++
++	snd_soc_card_set_drvdata(&audio->card, audio);
+ 	audio->card.dev = dev;
+ 	audio->card.owner = THIS_MODULE;
+ 	audio->card.name = "Turner Speakers";

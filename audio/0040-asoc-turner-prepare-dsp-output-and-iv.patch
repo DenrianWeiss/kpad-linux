@@ -1,0 +1,321 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -46,11 +46,28 @@
+ 	u32 audio_size;
+ 	u32 pcm_bytes;
+ 	u32 pcm_format;
++	bool hw_prepared;
++	u8 pending_direction;
+ 	bool pcm_open;
+ 	bool pcm_owns_pair;
+ };
+ 
+-static bool mt6991_adsp_pcm_ack(const struct mt6991_adsp_ipi *msg, u16 command)
++enum playback_command {
++	PCM_PREPARE = 3,
++	PCM_PARAMS = 4,
++	PCM_FREE = 9,
++	MEMIF_PARAMS = 0x201,
++	MEMIF_FREE = 0x202,
++	MEMIF_PREPARE = 0x203,
++};
++
++static bool mt6991_adsp_has_descriptor(u16 cmd)
++{
++	return cmd == PCM_PARAMS || cmd == PCM_PREPARE ||
++	       cmd == MEMIF_PARAMS || cmd == MEMIF_PREPARE;
++}
++
++static bool mt6991_adsp_pcm_ack(const struct mt6991_adsp_ipi *msg, u16 command, u8 direction)
+ {
+ 	if (command == 0x15)
+ 		return msg->id == 9 && msg->len == 72 &&
+@@ -60,7 +77,7 @@
+ 			get_unaligned_le16(msg->payload + 6) == command &&
+ 			get_unaligned_le32(msg->payload + 8) == 5452;
+ 
+-	if (command == 4)
++	if (mt6991_adsp_has_descriptor(command))
+ 		return msg->id == 9 && msg->len == 24 &&
+ 			get_unaligned_le32(msg->payload) == 0x21208888 &&
+ 			msg->payload[4] == 1 && msg->payload[5] == 2 &&
+@@ -68,7 +85,8 @@
+ 			get_unaligned_le32(msg->payload + 8) == sizeof(__le64);
+ 
+ 	return command && msg->id == 9 && msg->len == 16 &&
+-		(command != 9 || get_unaligned_le32(msg->payload + 8) == 1) &&
++		((command != PCM_FREE && command != MEMIF_FREE) ||
++		 get_unaligned_le32(msg->payload + 8) == direction) &&
+ 		get_unaligned_le16(msg->payload) == 0x8888 &&
+ 		msg->payload[2] == (command == 0xadd1 ? 38 : 32) && msg->payload[3] == 0x21 &&
+ 		msg->payload[4] == 0 && msg->payload[5] == 2 &&
+@@ -80,7 +98,8 @@
+ 	struct mt6991_adsp_core *core = container_of(client, struct mt6991_adsp_core, client);
+ 	const struct mt6991_adsp_ipi *msg = data;
+ 
+-	if (!core->id && mt6991_adsp_pcm_ack(msg, READ_ONCE(core->pending_command)))
++	if (!core->id && mt6991_adsp_pcm_ack(msg, READ_ONCE(core->pending_command),
++					    READ_ONCE(core->pending_direction)))
+ 		complete(&core->pcm_reply);
+ 
+ 	if (msg->id == 4 && msg->len == sizeof(u32) &&
+@@ -388,6 +407,7 @@
+ 			return ret;
+ 		a->started &= ~BIT(i);
+ 	}
++	a->hw_prepared = false;
+ 	if (a->ipi_pool) {
+ 		iounmap(a->ipi_pool);
+ 		a->ipi_pool = NULL;
+@@ -563,7 +583,7 @@
+ /* Caller holds boot_lock. A failed transaction requires a firmware restart
+  * before reusing the same command number, since the ACK has no sequence ID.
+  */
+-static int mt6991_adsp_pcm_command(struct device *dev, u16 command)
++static int mt6991_adsp_pcm_command(struct device *dev, u16 command, u8 direction)
+ {
+ 	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
+ 	struct mbox_client client = { .dev = dev, .tx_block = true, .tx_tout = 200 };
+@@ -574,13 +594,14 @@
+ 	if (IS_ERR(tx))
+ 		return PTR_ERR(tx);
+ 	reinit_completion(&a->pcm_reply);
++	WRITE_ONCE(a->pending_direction, direction);
+ 	WRITE_ONCE(a->pending_command, command);
+-	if (command == 4) {
++	if (mt6991_adsp_has_descriptor(command)) {
+ 		__le64 address = cpu_to_le64(a->audio_base);
+ 
+ 		ret = mt6991_adsp_audio_send(tx, ADSP_AUDIO_PLAYBACK, command,
+ 					    &address, sizeof(address), true);
+-	} else if (command == 9) {
++	} else if (command == PCM_FREE || command == MEMIF_FREE) {
+ 		/* HWFREE carries the playback direction in param1. */
+ 		struct mt6991_adsp_tx msg = { .id = ADSP_AUDIO_IPI, .len = 16 };
+ 
+@@ -589,7 +610,7 @@
+ 		msg.payload[3] = 0x21;
+ 		msg.payload[5] = 1;
+ 		put_unaligned_le16(command, msg.payload + 6);
+-		put_unaligned_le32(1, msg.payload + 8);
++		put_unaligned_le32(direction, msg.payload + 8);
+ 		ret = mbox_send_message(tx, &msg);
+ 	} else {
+ 		ret = mt6991_adsp_audio_send(tx, ADSP_AUDIO_PLAYBACK, command, NULL, 0, true);
+@@ -761,7 +782,7 @@
+ 		ret = mt6991_adsp_send_music_config(dev);
+ 	if (ret)
+ 		return ret;
+-	return mt6991_adsp_pcm_command(dev, 1);
++	return mt6991_adsp_pcm_command(dev, 1, 1);
+ }
+ 
+ int mt6991_adsp_pcm_open(struct device *dev)
+@@ -796,24 +817,45 @@
+ }
+ EXPORT_SYMBOL_GPL(mt6991_adsp_pcm_open);
+ 
+-/* The firmware consumes the software ring in its own reserved DRAM pool.
+- * Keep the first page for scene mailboxes. No DMA engine is started here.
++enum turner_ring { APP_RING, OUTPUT_RING, IV_RING };
++
++/* Both hardware interfaces use the 48 kHz PCM32 stereo music profile.
++ * A 512-frame period occupies 4096 bytes. Each has four periods.
+  */
+-static int mt6991_adsp_setup_ring(struct device *dev, u32 format, u32 bytes)
+-{
+-	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
+-	u64 start = a->audio_base + SZ_4K;
++static int mt6991_adsp_ring_desc(struct device *dev, enum turner_ring ring,
++				u16 cmd, u32 format, u32 bytes, u32 period,
++				u32 periods, u32 start_threshold, u32 stop_threshold)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	u32 offset = SZ_4K, direction = ring == IV_RING ? 4 : 1;
+ 	u8 desc[96] = {};
+-	void __iomem *ring;
+-
+-	if (!bytes || a->audio_size < SZ_4K || bytes > a->audio_size - SZ_4K)
++	void __iomem *samples;
++	u64 start;
++
++	if (ring != APP_RING) {
++		offset += ALIGN(a->pcm_bytes, SZ_4K);
++		if (ring == IV_RING)
++			offset += SZ_16K;
++		format = 10; /* firmware ABI: S32_LE */
++		bytes = SZ_16K;
++		period = start_threshold = 512;
++		periods = 4;
++		stop_threshold = 2048;
++		desc[80] = 1;
++		desc[81] = ring == IV_RING ? 18 : 14;
++		desc[82] = ring == IV_RING ? 16 : 12;
++	}
++	if (!bytes || offset > a->audio_size || bytes > a->audio_size - offset)
+ 		return -ERANGE;
+-	ring = ioremap_wc(start, bytes);
+-	if (!ring)
+-		return -ENOMEM;
+-	memset_io(ring, 0, bytes);
+-	wmb();
+-	iounmap(ring);
++	start = a->audio_base + offset;
++	if (cmd == PCM_PARAMS || cmd == MEMIF_PARAMS) {
++		samples = ioremap_wc(start, bytes);
++		if (!samples)
++			return -ENOMEM;
++		memset_io(samples, 0, bytes);
++		wmb();
++		iounmap(samples);
++	}
+ 	put_unaligned_le64(start, desc);
+ 	put_unaligned_le64(start + bytes, desc + 8);
+ 	put_unaligned_le64(start, desc + 16);
+@@ -822,12 +864,74 @@
+ 	put_unaligned_le32(format, desc + 48);
+ 	put_unaligned_le32(48000, desc + 52);
+ 	put_unaligned_le32(2, desc + 56);
+-	put_unaligned_le32(1, desc + 60); /* playback */
+-	desc[83] = 1; /* DRAM */
++	put_unaligned_le32(direction, desc + 60);
++	put_unaligned_le32(start_threshold, desc + 64);
++	put_unaligned_le32(stop_threshold, desc + 68);
++	put_unaligned_le32(period, desc + 72);
++	put_unaligned_le32(periods, desc + 76);
++	desc[83] = 1;
+ 	memcpy_toio(a->playback_buffers, desc, sizeof(desc));
+ 	wmb();
+-	return mt6991_adsp_pcm_command(dev, 4);
+-}
++	return mt6991_adsp_pcm_command(dev, cmd, direction);
++}
++
++static int mt6991_adsp_setup_ring(struct device *dev, u32 format, u32 bytes)
++{
++	return mt6991_adsp_ring_desc(dev, APP_RING, PCM_PARAMS, format, bytes, 0, 0, 0, 0);
++}
++
++static int mt6991_adsp_free_memifs(struct device *dev)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	int ret;
++
++	if (!a->hw_prepared)
++		return 0;
++	ret = mt6991_adsp_pcm_command(dev, MEMIF_FREE, 4);
++	if (!ret)
++		ret = mt6991_adsp_pcm_command(dev, MEMIF_FREE, 1);
++	if (!ret)
++		a->hw_prepared = false;
++	return ret;
++}
++
++/* The I2S backend holds the AFE runtime-PM reference during prepare. */
++int mt6991_adsp_pcm_prepare(struct device *dev, u32 period, u32 periods,
++			    u32 start_threshold, u32 stop_threshold)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	static const u16 commands[] = { MEMIF_PARAMS, MEMIF_PREPARE };
++	int ret, i;
++	enum turner_ring ring;
++
++	guard(mutex)(&a->boot_lock);
++	if (!a->pair_ready || !a->pcm_open || !a->pcm_bytes)
++		return -EHOSTDOWN;
++	if (a->pcm_format != 10)
++		return -EOPNOTSUPP;
++	if (!a->hw_prepared) {
++		for (i = 0; i < ARRAY_SIZE(commands); i++) {
++			for (ring = OUTPUT_RING; ring <= IV_RING; ring++) {
++				ret = mt6991_adsp_ring_desc(dev, ring, commands[i], 0, 0, 0, 0, 0, 0);
++				if (ret)
++					goto halt;
++			}
++		}
++		a->hw_prepared = true;
++	}
++	ret = mt6991_adsp_ring_desc(dev, APP_RING, PCM_PREPARE, a->pcm_format,
++				   a->pcm_bytes, period, periods, start_threshold, stop_threshold);
++	if (!ret) {
++		dev_info_once(dev, "DSP acknowledged output, IV and playback prepare\n");
++		return 0;
++	}
++halt:
++	dev_err(dev, "DSP ring prepare failed: %d\n", ret);
++	if (mt6991_adsp_stop_pair(dev))
++		dev_err(dev, "failed to halt DSP after prepare error\n");
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt6991_adsp_pcm_prepare);
+ 
+ int mt6991_adsp_pcm_hw_params(struct device *dev, u32 format, u32 bytes)
+ {
+@@ -859,7 +963,11 @@
+ 	guard(mutex)(&a->boot_lock);
+ 	if (!a->pcm_bytes)
+ 		return 0;
+-	ret = a->pair_ready ? mt6991_adsp_pcm_command(dev, 9) : -EHOSTDOWN;
++	ret = a->pair_ready ? mt6991_adsp_free_memifs(dev) : -EHOSTDOWN;
++	if (!ret)
++		ret = mt6991_adsp_pcm_command(dev, PCM_FREE, 1);
++	if (ret)
++		dev_err(dev, "DSP ring release failed: %d\n", ret);
+ 	if (ret && mt6991_adsp_stop_pair(dev))
+ 		dev_err(dev, "failed to halt DSP after HWFREE error\n");
+ 	a->pcm_bytes = 0;
+@@ -875,7 +983,9 @@
+ 	guard(mutex)(&a->boot_lock);
+ 	if (!a->pcm_open)
+ 		return 0;
+-	ret = a->pair_ready ? mt6991_adsp_pcm_command(dev, 2) : -EHOSTDOWN;
++	ret = a->pair_ready ? mt6991_adsp_free_memifs(dev) : -EHOSTDOWN;
++	if (!ret)
++		ret = mt6991_adsp_pcm_command(dev, 2, 1);
+ 	if (a->pcm_owns_pair || ret)
+ 		stop = mt6991_adsp_stop_pair(dev);
+ 	a->pcm_open = false;
+@@ -1255,6 +1365,9 @@
+ 		return 0;
+ 	if (!core->pair_ready)
+ 		return -EBUSY;
++	ret = mt6991_adsp_free_memifs(dev);
++	if (ret)
++		return ret;
+ 	core->restore_playback = core->playback_buffers && !core->playback_error;
+ 	ret = mt6991_adsp_stop_pair(dev);
+ 	core->restart_after_sleep = !ret;
+--- a/include/linux/soc/mediatek/mt6991-adsp-ipi.h
++++ b/include/linux/soc/mediatek/mt6991-adsp-ipi.h
+@@ -30,6 +30,8 @@
+ struct device *mt6991_adsp_link_playback(struct device *consumer);
+ int mt6991_adsp_pcm_open(struct device *dev);
+ int mt6991_adsp_pcm_hw_params(struct device *dev, u32 format, u32 bytes);
++int mt6991_adsp_pcm_prepare(struct device *dev, u32 period, u32 periods,
++			    u32 start_threshold, u32 stop_threshold);
+ int mt6991_adsp_pcm_hw_free(struct device *dev);
+ int mt6991_adsp_pcm_close(struct device *dev);
+ 
+--- a/sound/soc/mediatek/mt6991/turner.c
++++ b/sound/soc/mediatek/mt6991/turner.c
+@@ -105,8 +105,20 @@
+ 				      params_rate(params) * 128, SND_SOC_CLOCK_OUT);
+ }
+ 
++static int turner_i2s_prepare(struct snd_pcm_substream *s)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(s);
++	struct turner_audio *audio = snd_soc_card_get_drvdata(rtd->card);
++	struct snd_pcm_runtime *rt = s->runtime;
++
++	return mt6991_adsp_pcm_prepare(audio->dsp, rt->period_size, rt->periods,
++				       min_t(unsigned long, rt->start_threshold, U32_MAX),
++				       min_t(unsigned long, rt->stop_threshold, U32_MAX));
++}
++
+ static const struct snd_soc_ops turner_i2s_ops = {
+ 	.startup = turner_i2s_startup,
++	.prepare = turner_i2s_prepare,
+ 	.shutdown = turner_i2s_shutdown,
+ 	.hw_params = turner_hw_params,
+ };

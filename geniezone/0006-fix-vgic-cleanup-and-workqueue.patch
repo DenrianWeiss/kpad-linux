@@ -1,0 +1,43 @@
+Subject: [PATCH] virt: geniezone: release vGIC request pages and set IRQ workqueue affinity
+
+Match free_pages_exact sizes to the allocations used for virtual device
+requests. Select the per-CPU workqueue behavior required by Linux 7.3.
+
+--- a/drivers/virt/geniezone/gzvm_vm.c
++++ b/drivers/virt/geniezone/gzvm_vm.c
+@@ -209,8 +209,10 @@
+ 		void __user *attr_addr = u64_to_user_ptr(gzvm_dev->attr_addr);
+ 
+ 		/* Size of device specific data should not be over a page. */
+-		if (attr_size > PAGE_SIZE)
+-			return -EINVAL;
++		if (attr_size > PAGE_SIZE) {
++			ret = -EINVAL;
++			goto err_free_dev;
++		}
+ 
+ 		dev_data = alloc_pages_exact(attr_size, GFP_KERNEL);
+ 		if (!dev_data) {
+@@ -228,9 +230,9 @@
+ 	ret = gzvm_arch_create_device(gzvm->vm_id, gzvm_dev);
+ err_free_dev_data:
+ 	if (dev_data)
+-		free_pages_exact(dev_data, 0);
++		free_pages_exact(dev_data, gzvm_dev->attr_size);
+ err_free_dev:
+-	free_pages_exact(gzvm_dev, 0);
++	free_pages_exact(gzvm_dev, PAGE_SIZE);
+ 	return ret;
+ }
+ 
+--- a/drivers/virt/geniezone/gzvm_irqfd.c
++++ b/drivers/virt/geniezone/gzvm_irqfd.c
+@@ -371,7 +371,7 @@
+  */
+ int gzvm_drv_irqfd_init(void)
+ {
+-	irqfd_cleanup_wq = alloc_workqueue("gzvm-irqfd-cleanup", 0, 0);
++	irqfd_cleanup_wq = alloc_workqueue("gzvm-irqfd-cleanup", WQ_PERCPU, 0);
+ 	if (!irqfd_cleanup_wq)
+ 		return -ENOMEM;
+ 

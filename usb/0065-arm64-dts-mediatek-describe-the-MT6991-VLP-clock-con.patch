@@ -1,0 +1,30 @@
+From 86673bd2c356694754431e7cf761491eb9ebe579 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 07:10:53 +0800
+Subject: [PATCH 65/65] arm64: dts: mediatek: describe the MT6991 VLP clock
+ controller
+
+---
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index c112d13..7f62809 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -373,6 +373,12 @@ spm_bus_prot: syscon@1c00d000 {
+ 			reg = <0 0x1c00d000 0 0x1000>;
+ 		};
+ 
++		vlpckgen: clock-controller@1c016000 {
++			compatible = "mediatek,mt6991-vlpckgen", "syscon";
++			reg = <0 0x1c016000 0 0x1000>;
++			#clock-cells = <1>;
++		};
++
+ 		mm_hwv: syscon@31b00000 {
+ 			compatible = "mediatek,mt6991-mm-hwv", "syscon", "simple-mfd";
+ 			reg = <0 0x31b00000 0 0x6000>;
+-- 
+2.50.1 (Apple Git-155)
+

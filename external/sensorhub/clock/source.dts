@@ -1,0 +1,12 @@
+/dts-v1/;
+/plugin/;
+&{/} {
+ turner_vlp_scp: turner-scp-clock {
+  compatible = "xiaomi,turner-scp-clock";
+  #clock-cells = <1>;
+  mediatek,vlp = <&vlp_cksys_clk>;
+ };
+};
+&scp_dvfs {
+ clocks = <&turner_vlp_scp 0>, <&clk26m>;
+};

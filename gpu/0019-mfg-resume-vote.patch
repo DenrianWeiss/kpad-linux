@@ -1,0 +1,65 @@
+Subject: [RFC PATCH] pmdomain: mediatek: unwind rejected MT6991 resume performance vote
+
+Return firmware rejection of a saved nonzero level before starting the
+consumer. If firmware also refuses power-off, retain the domain and
+retry the deferred vote without taking duplicate clock references.
+
+diff --git a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+index 0eac3c0..e513691 100644
+--- a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
++++ b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+@@ -275,6 +275,7 @@ struct mtk_mfg {
+ 	u16 ghpm_en_reg;
+ 	u32 ipi_magic;
+ 	bool shared_ready;
++	bool resume_power_held; /* Firmware rejected rollback of a resume vote. */
+ 	unsigned int num_gpu_opps;
+ 	unsigned int num_stack_opps;
+ 	struct dev_pm_opp_data *gpu_opps;
+@@ -804,6 +805,9 @@ static int mtk_mfg_power_on(struct generic_pm_domain *pd)
+ 	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
+ 	int ret;
+ 
++	if (mfg->resume_power_held)
++		goto restore_vote;
++
+ 	ret = regulator_bulk_enable(mfg->variant->num_regulators,
+ 				    mfg->gpu_regs);
+ 	if (ret)
+@@ -837,14 +841,34 @@ static int mtk_mfg_power_on(struct generic_pm_domain *pd)
+ 	if (ret)
+ 		goto err_eb_off;
+ 
++restore_vote:
+ 	/* Don't try to set a OPP in probe before OPPs have been read from EB */
+ 	if (mfg->gpu_opps) {
+ 		/* The aforementioned deferred setting of pmdomain's state */
+ 		ret = mtk_mfg_set_opp_level(mfg, pd->performance_state);
+-		if (ret)
+-			dev_warn(&mfg->pdev->dev, "Failed to set oppidx in %s\n", __func__);
++		if (ret) {
++			dev_warn(&mfg->pdev->dev, "Failed to restore performance level %u: %pe\n",
++				 pd->performance_state, ERR_PTR(ret));
++			if (mfg->variant->use_dual_commit && pd->performance_state &&
++			    ret == -EPROTO) {
++				int err = mtk_mfg_power_control(mfg, false);
++
++				if (!err) {
++					mfg->resume_power_held = false;
++					goto err_eb_off;
++				}
++				/* The domain still owns its clocks and power reference
++				 * after a confirmed refusal. Retry just the vote.
++				 */
++				if (err == -EPROTO) {
++					mfg->resume_power_held = true;
++					return ret;
++				}
++			}
++		}
+ 	}
+ 
++	mfg->resume_power_held = false;
+ 	return 0;
+ 
+ err_eb_off:

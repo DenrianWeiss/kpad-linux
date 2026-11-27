@@ -1,0 +1,124 @@
+From 8eb88c7d581c6755619bd19385638025b5144831 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 09:41:09 +0800
+Subject: [PATCH 85/87] dt-bindings: mediatek: describe the MT6991 display
+ mutex and its clocks
+
+---
+ .../bindings/arm/mediatek/mediatek,mmsys.yaml |  9 ++++-
+ .../bindings/soc/mediatek/mediatek,mutex.yaml | 35 +++++++++++++++++--
+ .../dt-bindings/clock/mediatek,mt6991-clock.h |  5 +++
+ 3 files changed, 45 insertions(+), 4 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml b/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
+index b86b213c..fd3d56fb 100644
+--- a/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
++++ b/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
+@@ -27,7 +27,10 @@ properties:
+               - mediatek,mt6779-mmsys
+               - mediatek,mt6795-mmsys
+               - mediatek,mt6797-mmsys
++              - mediatek,mt6991-mmsys0
+               - mediatek,mt6991-mmsys1
++              - mediatek,mt6991-ovlsys0
++              - mediatek,mt6991-ovlsys1
+               - mediatek,mt8167-mmsys
+               - mediatek,mt8173-mmsys
+               - mediatek,mt8183-mmsys
+@@ -135,7 +138,11 @@ if:
+   properties:
+     compatible:
+       contains:
+-        const: mediatek,mt6991-mmsys1
++        enum:
++          - mediatek,mt6991-mmsys0
++          - mediatek,mt6991-mmsys1
++          - mediatek,mt6991-ovlsys0
++          - mediatek,mt6991-ovlsys1
+ then:
+   required:
+     - mediatek,hardware-voter
+diff --git a/Documentation/devicetree/bindings/soc/mediatek/mediatek,mutex.yaml b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mutex.yaml
+index 1ba086ad..85464bf9 100644
+--- a/Documentation/devicetree/bindings/soc/mediatek/mediatek,mutex.yaml
++++ b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mutex.yaml
+@@ -30,6 +30,7 @@ properties:
+       - mediatek,mt2701-disp-mutex
+       - mediatek,mt2712-disp-mutex
+       - mediatek,mt6795-disp-mutex
++      - mediatek,mt6991-disp-mutex
+       - mediatek,mt8167-disp-mutex
+       - mediatek,mt8173-disp-mutex
+       - mediatek,mt8183-disp-mutex
+@@ -43,7 +44,8 @@ properties:
+       - mediatek,mt8365-disp-mutex
+ 
+   reg:
+-    maxItems: 1
++    minItems: 1
++    maxItems: 4
+ 
+   interrupts:
+     maxItems: 1
+@@ -54,8 +56,8 @@ properties:
+       Documentation/devicetree/bindings/power/power-domain.yaml for details.
+ 
+   clocks:
+-    items:
+-      - description: MUTEX Clock
++    minItems: 1
++    maxItems: 4
+ 
+   mediatek,gce-events:
+     description:
+@@ -77,6 +79,33 @@ properties:
+       a client defined in the header include/dt-bindings/gce/<chip>-gce.h.
+ 
+ allOf:
++  - if:
++      properties:
++        compatible:
++          const: mediatek,mt6991-disp-mutex
++    then:
++      properties:
++        reg:
++          items:
++            - description: Display system 0
++            - description: Display system 1
++            - description: Overlay system 0
++            - description: Overlay system 1
++        clocks:
++          items:
++            - description: Display system 0 mutex clock
++            - description: Display system 1 mutex clock
++            - description: Overlay system 0 mutex clock
++            - description: Overlay system 1 mutex clock
++      required:
++        - clocks
++    else:
++      properties:
++        reg:
++          maxItems: 1
++        clocks:
++          maxItems: 1
++
+   - if:
+       properties:
+         compatible:
+diff --git a/include/dt-bindings/clock/mediatek,mt6991-clock.h b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+index 836744d6..64f3b693 100644
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -59,4 +59,9 @@
+ #define MT6991_CLK_MM1_DSI0_DIGITAL        2
+ #define MT6991_CLK_MM1_DSI1_DIGITAL        3
+ 
++#define MT6991_CLK_MM1_MUTEX               4
++#define MT6991_CLK_MM0_MUTEX               0
++#define MT6991_CLK_OVL0_MUTEX              0
++#define MT6991_CLK_OVL1_MUTEX              0
++
+ #endif
+-- 
+2.50.1 (Apple Git-155)
+

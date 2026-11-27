@@ -1,0 +1,201 @@
+Subject: [PATCH] clk: mediatek: support MT6991 firmware clock IDs on the display I2C path
+
+--- a/drivers/clk/mediatek/clk-mtk.h
++++ b/drivers/clk/mediatek/clk-mtk.h
+@@ -266,6 +266,8 @@
+ int mtk_clk_pdev_probe_with_get(struct platform_device *pdev,
+ 				struct clk_hw *(*get)(struct of_phandle_args *, void *));
+ void mtk_clk_pdev_remove(struct platform_device *pdev);
++int mtk_clk_simple_probe_with_get(struct platform_device *pdev,
++				  struct clk_hw *(*get)(struct of_phandle_args *, void *));
+ int mtk_clk_simple_probe(struct platform_device *pdev);
+ void mtk_clk_simple_remove(struct platform_device *pdev);
+ struct regmap *mtk_clk_get_hwv_regmap(struct device_node *node);
+--- a/drivers/clk/mediatek/clk-mtk.c
++++ b/drivers/clk/mediatek/clk-mtk.c
+@@ -672,6 +672,13 @@
+ }
+ EXPORT_SYMBOL_GPL(mtk_clk_pdev_probe);
+ 
++int mtk_clk_simple_probe_with_get(struct platform_device *pdev,
++				  struct clk_hw *(*get)(struct of_phandle_args *, void *))
++{
++	return __mtk_clk_simple_probe(pdev, pdev->dev.of_node, get);
++}
++EXPORT_SYMBOL_GPL(mtk_clk_simple_probe_with_get);
++
+ int mtk_clk_simple_probe(struct platform_device *pdev)
+ {
+ 	struct device_node *node = pdev->dev.of_node;
+@@ -701,6 +708,9 @@
+ 	struct regmap *regmap_hwv;
+ 
+ 	hwv_node = of_parse_phandle(node, "mediatek,hardware-voter", 0);
++	if (!hwv_node && (of_device_is_compatible(node, "mediatek,mt6991-cksys") ||
++			  of_device_is_compatible(node, "mediatek,mt6991-pericfg_ao")))
++		hwv_node = of_parse_phandle(node, "hw-voter-regmap", 0);
+ 	if (!hwv_node && of_device_is_compatible(node, "mediatek,mt6991-mmsys1"))
+ 		hwv_node = of_parse_phandle(node, "mm-hw-ccf-regmap", 0);
+ 	if (!hwv_node)
+--- a/drivers/clk/mediatek/clk-mt8196-imp_iic_wrap.c
++++ b/drivers/clk/mediatek/clk-mt8196-imp_iic_wrap.c
+@@ -95,7 +95,27 @@
+ 	.num_clks = ARRAY_SIZE(impw_clks),
+ };
+ 
++static struct clk_hw *mt6991_fw_get(struct of_phandle_args *spec, void *data)
++{
++	struct clk_hw_onecell_data *clks = data;
++
++	if (spec->args_count != 1)
++		return ERR_PTR(-EINVAL);
++	/* Each gate is followed by its I2C client alias. */
++	if (spec->args[0] / 2 >= clks->num)
++		return ERR_PTR(-ENOENT);
++	return clks->hws[spec->args[0] / 2];
++}
++
++static int mt6991_fw_probe(struct platform_device *pdev)
++{
++	if (of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-imp_iic_wrap_w"))
++		return mtk_clk_simple_probe_with_get(pdev, mt6991_fw_get);
++	return mtk_clk_simple_probe(pdev);
++}
++
+ static const struct of_device_id of_match_clk_mt8196_imp_iic_wrap[] = {
++	{ .compatible = "mediatek,mt6991-imp_iic_wrap_w", .data = &impw_mcd },
+ 	{ .compatible = "mediatek,mt8196-imp-iic-wrap-c", .data = &impc_mcd },
+ 	{ .compatible = "mediatek,mt8196-imp-iic-wrap-e", .data = &impe_mcd },
+ 	{ .compatible = "mediatek,mt8196-imp-iic-wrap-n", .data = &impn_mcd },
+@@ -105,7 +125,7 @@
+ MODULE_DEVICE_TABLE(of, of_match_clk_mt8196_imp_iic_wrap);
+ 
+ static struct platform_driver clk_mt8196_imp_iic_wrap_drv = {
+-	.probe = mtk_clk_simple_probe,
++	.probe = mt6991_fw_probe,
+ 	.remove = mtk_clk_simple_remove,
+ 	.driver = {
+ 		.name = "clk-mt8196-imp_iic_wrap",
+--- a/drivers/clk/mediatek/clk-mt8196-peri_ao.c
++++ b/drivers/clk/mediatek/clk-mt8196-peri_ao.c
+@@ -135,7 +135,37 @@
+ 	.num_clks = ARRAY_SIZE(peri_ao_clks),
+ };
+ 
++static struct clk_hw *mt6991_fw_get(struct of_phandle_args *spec, void *data)
++{
++	struct clk_hw_onecell_data *clks = data;
++
++	if (spec->args_count != 1)
++		return ERR_PTR(-EINVAL);
++	switch (spec->args[0]) {
++	case 0:
++	case 1:
++		return clks->hws[MT6991_CLK_PERI_UART0_BCLK];
++	case 36:
++	case 37:
++		return clks->hws[MT6991_CLK_PERI_SPI6_BCLK];
++	case 40:
++	case 41:
++	case 42:
++		return clks->hws[MT6991_CLK_PERI_AP_DMA_X32W_BCLK];
++	default:
++		return ERR_PTR(-ENOENT);
++	}
++}
++
++static int mt6991_fw_probe(struct platform_device *pdev)
++{
++	if (of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-pericfg_ao"))
++		return mtk_clk_simple_probe_with_get(pdev, mt6991_fw_get);
++	return mtk_clk_simple_probe(pdev);
++}
++
+ static const struct of_device_id of_match_clk_mt8196_peri_ao[] = {
++	{ .compatible = "mediatek,mt6991-pericfg_ao", .data = &mt6991_peri_desc },
+ 	{ .compatible = "mediatek,mt6991-pericfg-ao", .data = &mt6991_peri_desc },
+ 	{ .compatible = "mediatek,mt8196-pericfg-ao", .data = &peri_ao_mcd },
+ 	{ /* sentinel */ }
+@@ -143,7 +173,7 @@
+ MODULE_DEVICE_TABLE(of, of_match_clk_mt8196_peri_ao);
+ 
+ static struct platform_driver clk_mt8196_peri_ao_drv = {
+-	.probe = mtk_clk_simple_probe,
++	.probe = mt6991_fw_probe,
+ 	.remove = mtk_clk_simple_remove,
+ 	.driver = {
+ 		.name = "clk-mt8196-peri-ao",
+--- a/drivers/clk/mediatek/clk-mt8196-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+@@ -1053,7 +1053,62 @@
+ 	.num_composite_clks = ARRAY_SIZE(top_aud_divs)
+ };
+ 
++static struct clk_hw *mt6991_fw_get(struct of_phandle_args *spec, void *data)
++{
++	struct clk_hw_onecell_data *clks = data;
++
++	if (spec->args_count != 1)
++		return ERR_PTR(-EINVAL);
++	switch (spec->args[0]) {
++	case 3:
++	case 156:
++		return clks->hws[MT6991_CLK_TOP_P_AXI];
++	case 4:
++	case 157:
++		return clks->hws[MT6991_CLK_TOP_PEXTP0_AXI];
++	case 7:
++	case 159:
++		return clks->hws[MT6991_CLK_TOP_PEXTP0_MEM_SUB];
++	case 21:
++		return clks->hws[MT6991_CLK_TOP_MFG_EB];
++	case 22:
++	case 161:
++		return clks->hws[MT6991_CLK_TOP_UART];
++	case 29:
++	case 168:
++		return clks->hws[MT6991_CLK_TOP_SPI6_BCLK];
++	case 34:
++		return clks->hws[MT6991_CLK_TOP_USB_TOP_1P];
++	case 35:
++		return clks->hws[MT6991_CLK_TOP_USB_XHCI_1P];
++	case 36:
++		return clks->hws[MT6991_CLK_TOP_USB_FMCNT_P1];
++	case 37:
++	case 172:
++		return clks->hws[MT6991_CLK_TOP_I2C_P];
++	case 38:
++	case 173:
++		return clks->hws[MT6991_CLK_TOP_I2C_EAST];
++	case 39:
++	case 174:
++		return clks->hws[MT6991_CLK_TOP_I2C_WEST];
++	case 51:
++	case 182:
++		return clks->hws[MT6991_CLK_TOP_TL];
++	default:
++		return ERR_PTR(-ENOENT);
++	}
++}
++
++static int mt6991_fw_probe(struct platform_device *pdev)
++{
++	if (of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-cksys"))
++		return mtk_clk_simple_probe_with_get(pdev, mt6991_fw_get);
++	return mtk_clk_simple_probe(pdev);
++}
++
+ static const struct of_device_id of_match_clk_mt8196_ck[] = {
++	{ .compatible = "mediatek,mt6991-cksys", .data = &mt6991_topck_desc },
+ 	{ .compatible = "mediatek,mt6991-topckgen", .data = &mt6991_topck_desc },
+ 	{ .compatible = "mediatek,mt8196-topckgen", .data = &topck_desc },
+ 	{ /* sentinel */ }
+@@ -1061,7 +1116,7 @@
+ MODULE_DEVICE_TABLE(of, of_match_clk_mt8196_ck);
+ 
+ static struct platform_driver clk_mt8196_topck_drv = {
+-	.probe = mtk_clk_simple_probe,
++	.probe = mt6991_fw_probe,
+ 	.remove = mtk_clk_simple_remove,
+ 	.driver = {
+ 		.name = "clk-mt8196-topck",

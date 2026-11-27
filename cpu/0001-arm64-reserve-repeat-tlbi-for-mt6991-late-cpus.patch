@@ -1,0 +1,41 @@
+Subject: [PATCH] arm64: enable repeat TLBI sync for late MT6991 Cortex-X CPUs
+
+--- a/arch/arm64/kernel/cpu_errata.c
++++ b/arch/arm64/kernel/cpu_errata.c
+@@ -5,6 +5,7 @@
+  * Copyright (C) 2014 ARM Ltd.
+  */
+ 
++#include <linux/of.h>
+ #include <linux/arm-smccc.h>
+ #include <linux/types.h>
+ #include <linux/cpu.h>
+@@ -320,6 +321,19 @@
+ }
+ 
+ #ifdef CONFIG_ARM64_WORKAROUND_REPEAT_TLBI_SYNC
++/*
++ * Some firmware boots MT6991 with only the Cortex-A725 cluster online.
++ * Its Cortex-X CPUs require the repeat-TLBI sequence, which alternatives
++ * must select before those CPUs can join the system.
++ */
++static bool has_repeat_tlbi_sync(const struct arm64_cpu_capabilities *cap,
++				 int scope)
++{
++	return of_machine_is_compatible("mediatek,mt6991") ||
++	       of_machine_is_compatible("xiaomi,turner") ||
++	       cpucap_multi_entry_cap_matches(cap, scope);
++}
++
+ static const struct arm64_cpu_capabilities arm64_repeat_tlbi_list[] = {
+ #ifdef CONFIG_QCOM_FALKOR_ERRATUM_1009
+ 	{
+@@ -762,7 +776,7 @@
+ 		.desc = "Broken broadcast TLBI completion",
+ 		.capability = ARM64_WORKAROUND_REPEAT_TLBI_SYNC,
+ 		.type = ARM64_CPUCAP_LOCAL_CPU_ERRATUM,
+-		.matches = cpucap_multi_entry_cap_matches,
++		.matches = has_repeat_tlbi_sync,
+ 		.match_list = arm64_repeat_tlbi_list,
+ 	},
+ #endif

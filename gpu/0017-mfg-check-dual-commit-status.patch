@@ -1,0 +1,51 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] pmdomain: mediatek: check nonzero GPUFreq dual commit status
+
+The MT6991 firmware client checks the response word for nonzero after
+a successful dual-commit transport. Keep genpd from recording the new
+performance level when firmware reports a positive status. Other
+commands retain their existing signed-error convention.
+
+---
+diff --git a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+--- a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
++++ b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+@@ -473,17 +473,17 @@
+ /**
+  * mtk_mfg_send_ipi - synchronously send an IPI message on the gpufreq channel
+  * @mfg: pointer to this driver instance's private &struct mtk_mfg
+- * @msg: pointer to a message to send; will have magic filled and response assigned
++ * @msg: message to send; the channel token is filled in before transmission
+  *
+- * Send an IPI message on the gpufreq channel, and wait for a response. Once a
+- * response is received, assign a pointer to the response buffer (valid until
+- * next response is received) to @msg.
++ * Send an IPI message on the gpufreq channel, and wait for a response. Check the
++ * status returned by the firmware before completing the request.
+  *
+  * Returns 0 on success, negative errno on failure.
+  */
+ static int mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
+ {
+ 	struct device *dev = &mfg->pdev->dev;
++	const struct mtk_mfg_ipi_msg *reply;
+ 	unsigned long wait;
+ 	int ret;
+ 
+@@ -499,10 +499,12 @@
+ 	if (!wait)
+ 		return -ETIMEDOUT;
+ 
+-	msg = mfg->gf_mbox->rx_data;
+-
+-	if (msg->u.return_value < 0) {
+-		dev_err(dev, "IPI return: %d\n", msg->u.return_value);
++	reply = mfg->gf_mbox->rx_data;
++
++	if (reply->u.return_value < 0 ||
++	    (msg->cmd == CMD_DUAL_COMMIT && reply->u.return_value)) {
++		dev_err(dev, "GPUFreq command %u returned %d\n",
++			msg->cmd, reply->u.return_value);
+ 		return -EPROTO;
+ 	}
+ 

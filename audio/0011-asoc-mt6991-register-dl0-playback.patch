@@ -1,0 +1,302 @@
+--- a/sound/soc/mediatek/Kconfig
++++ b/sound/soc/mediatek/Kconfig
+@@ -396,6 +396,7 @@
+ config SND_SOC_MT6991_TURNER
+ 	tristate "Xiaomi Turner speakers"
+ 	depends on ARCH_MEDIATEK && OF
++	select SND_SOC_MEDIATEK
+ 	help
+ 	  Connect the MT6991 audio front end to the two Turner speaker codecs.
+ 
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -1,7 +1,10 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* MediaTek MT6991 audio front end */
+ #include <linux/arm-smccc.h>
++#include <linux/bitfield.h>
+ #include <linux/clk.h>
++#include <linux/dma-mapping.h>
++#include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/mfd/syscon.h>
+ #include <linux/module.h>
+@@ -9,9 +12,12 @@
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
++#include <sound/pcm_params.h>
+ #include <sound/soc.h>
+ 
+ #include "../common/mtk-base-afe.h"
++#include "../common/mtk-afe-fe-dai.h"
++#include "../common/mtk-afe-platform-driver.h"
+ 
+ #define MT6991_AUDIO_PWR_CON	0xe4c
+ #define MT6991_AUDIO_PWR_ACK	GENMASK(31, 30)
+@@ -23,6 +29,12 @@
+ };
+ 
+ struct mt6991_afe {
++	/* The shared PCM allocation and pointer callbacks expect this first. */
++	struct mtk_base_afe common;
++	struct mtk_base_afe_memif dl0;
++	spinlock_t irq_lock;
++	int irq;
++	bool dram_held;
+ 	struct clk_bulk_data bus[NUM_BUS_CLKS];
+ 	struct clk *clksq;
+ 	void __iomem *base;
+@@ -122,6 +134,203 @@
+ 	return 0;
+ }
+ 
++#define DL0_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
++#define IRQ_MCU_EN	0x100
++#define IRQ_MCU_STATUS	0x120
++#define IRQ0_CFG0	0x140
++#define IRQ0_CFG1	0x144
++#define DL0_RATE_48K	0xa
++
++static const struct mtk_base_memif_data dl0_data = {
++	.name = "DL0",
++	.reg_ofs_base = 0x4444, .reg_ofs_base_msb = 0x4440,
++	.reg_ofs_cur = 0x444c, .reg_ofs_cur_msb = 0x4448,
++	.reg_ofs_end = 0x4454, .reg_ofs_end_msb = 0x4450,
++};
++
++static const struct snd_pcm_hardware dl0_hw = {
++	.info = SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_MMAP_VALID,
++	.formats = DL0_FORMATS,
++	.period_bytes_min = 96, .period_bytes_max = 192 * 1024,
++	.periods_min = 2, .periods_max = 256, .buffer_bytes_max = 256 * 1024,
++};
++
++static void mt6991_irq0_ack(struct regmap *map)
++{
++	unsigned int cfg;
++
++	regmap_read(map, IRQ0_CFG1, &cfg);
++	regmap_write(map, IRQ0_CFG1, cfg ^ GENMASK(31, 30));
++}
++
++static irqreturn_t mt6991_dl0_irq(int irq, void *data)
++{
++	struct mt6991_afe *afe = data;
++	struct regmap *map = afe->common.regmap;
++	struct snd_pcm_substream *substream;
++	unsigned long flags;
++	unsigned int status, enable;
++
++	spin_lock_irqsave(&afe->irq_lock, flags);
++	regmap_read(map, IRQ_MCU_EN, &enable);
++	regmap_read(map, IRQ_MCU_STATUS, &status);
++	if (!(enable & status & BIT(0))) {
++		spin_unlock_irqrestore(&afe->irq_lock, flags);
++		return IRQ_NONE;
++	}
++	mt6991_irq0_ack(map);
++	substream = afe->dl0.substream;
++	spin_unlock_irqrestore(&afe->irq_lock, flags);
++	if (substream)
++		snd_pcm_period_elapsed(substream);
++	return IRQ_HANDLED;
++}
++
++static int mt6991_dl0_startup(struct snd_pcm_substream *s, struct snd_soc_dai *dai)
++{
++	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
++	int ret;
++
++	ret = snd_soc_set_runtime_hwparams(s, &dl0_hw);
++	if (ret < 0)
++		return ret;
++	ret = snd_pcm_hw_constraint_step(s->runtime, 0, SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 16);
++	if (ret)
++		return ret;
++	ret = snd_pcm_hw_constraint_integer(s->runtime, SNDRV_PCM_HW_PARAM_PERIODS);
++	if (ret < 0)
++		return ret;
++	return request_irq(afe->irq, mt6991_dl0_irq, 0, "mt6991-dl0", afe);
++}
++
++static void mt6991_dl0_shutdown(struct snd_pcm_substream *s, struct snd_soc_dai *dai)
++{
++	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
++
++	free_irq(afe->irq, afe);
++}
++
++static int mt6991_dl0_params(struct snd_pcm_substream *s, struct snd_pcm_hw_params *p,
++			     struct snd_soc_dai *dai)
++{
++	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
++	unsigned int format;
++	int ret;
++
++	switch (params_format(p)) {
++	case SNDRV_PCM_FORMAT_S16_LE: format = 0; break;
++	case SNDRV_PCM_FORMAT_S24_LE: format = 1; break;
++	case SNDRV_PCM_FORMAT_S32_LE: format = 2; break;
++	default: return -EINVAL;
++	}
++	if (params_rate(p) != 48000 || params_channels(p) != 2)
++		return -EINVAL;
++
++	ret = mtk_memif_set_addr(&afe->common, 0, s->runtime->dma_area,
++				 s->runtime->dma_addr, params_buffer_bytes(p));
++	if (!ret)
++		ret = regmap_update_bits(afe->common.regmap, AFE_DL0_CON0,
++					 GENMASK(12, 8) | BIT(4) | GENMASK(2, 0),
++					 FIELD_PREP(GENMASK(12, 8), DL0_RATE_48K) | format);
++	if (ret)
++		return ret;
++	if (!afe->dram_held) {
++		ret = mt6991_audio_smc(dai->dev, MTK_AUDIO_SMC_OP_DRAM_REQUEST);
++		if (ret)
++			return ret;
++		afe->dram_held = true;
++	}
++	return 0;
++}
++
++static int mt6991_dl0_free(struct snd_pcm_substream *s, struct snd_soc_dai *dai)
++{
++	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
++	int ret = 0;
++
++	if (afe->dram_held) {
++		ret = mt6991_audio_smc(dai->dev, MTK_AUDIO_SMC_OP_DRAM_RELEASE);
++		if (!ret)
++			afe->dram_held = false;
++	}
++	return ret;
++}
++
++static int mt6991_dl0_trigger(struct snd_pcm_substream *s, int cmd, struct snd_soc_dai *dai)
++{
++	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
++	struct regmap *map = afe->common.regmap;
++	unsigned long flags;
++
++	spin_lock_irqsave(&afe->irq_lock, flags);
++	switch (cmd) {
++	case SNDRV_PCM_TRIGGER_START:
++	case SNDRV_PCM_TRIGGER_RESUME:
++		afe->dl0.substream = s;
++		regmap_update_bits(map, IRQ0_CFG1, GENMASK(23, 0), s->runtime->period_size);
++		regmap_update_bits(map, IRQ0_CFG0, GENMASK(8, 4) | BIT(0),
++				   FIELD_PREP(GENMASK(8, 4), DL0_RATE_48K) | BIT(0));
++		regmap_set_bits(map, IRQ_MCU_EN, BIT(0));
++		regmap_set_bits(map, AFE_DL0_CON0, BIT(28));
++		break;
++	case SNDRV_PCM_TRIGGER_STOP:
++	case SNDRV_PCM_TRIGGER_SUSPEND:
++		regmap_clear_bits(map, AFE_DL0_CON0, BIT(28));
++		regmap_clear_bits(map, IRQ0_CFG0, BIT(0));
++		regmap_clear_bits(map, IRQ_MCU_EN, BIT(0));
++		mt6991_irq0_ack(map);
++		afe->dl0.substream = NULL;
++		break;
++	default:
++		spin_unlock_irqrestore(&afe->irq_lock, flags);
++		return -EINVAL;
++	}
++	spin_unlock_irqrestore(&afe->irq_lock, flags);
++	return 0;
++}
++
++static const struct snd_soc_dai_ops dl0_ops = {
++	.startup = mt6991_dl0_startup, .shutdown = mt6991_dl0_shutdown,
++	.hw_params = mt6991_dl0_params, .hw_free = mt6991_dl0_free,
++	.trigger = mt6991_dl0_trigger,
++};
++
++static struct snd_soc_dai_driver dl0_dai = {
++	.name = "DL0",
++	.playback = {
++		.stream_name = "DL0", .channels_min = 2, .channels_max = 2,
++		.rates = SNDRV_PCM_RATE_48000, .formats = DL0_FORMATS,
++	},
++	.ops = &dl0_ops,
++};
++
++static int mt6991_dl0_sync_stop(struct snd_soc_component *component,
++				struct snd_pcm_substream *s)
++{
++	struct mt6991_afe *afe = snd_soc_component_get_drvdata(component);
++
++	synchronize_irq(afe->irq);
++	return 0;
++}
++
++static const struct snd_soc_component_driver dl0_component = {
++	.name = "mt6991-afe",
++	.pointer = mtk_afe_pcm_pointer,
++	.pcm_new = mtk_afe_pcm_new,
++	.sync_stop = mt6991_dl0_sync_stop,
++};
++
++/* Accesses require a runtime PM reference, including diagnostic reads. */
++static bool mt6991_dl0_precious_reg(struct device *dev, unsigned int reg)
++{
++	return true;
++}
++
++static const struct regmap_config dl0_regmap = {
++	.precious_reg = mt6991_dl0_precious_reg,
++	.reg_bits = 32, .val_bits = 32, .reg_stride = 4, .max_register = AFE_DL0_CON0,
++};
++
+ static int mt6991_afe_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -157,6 +366,21 @@
+ 	if (IS_ERR(afe->spm))
+ 		return dev_err_probe(dev, PTR_ERR(afe->spm), "getting AUDIO power status\n");
+ 
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(34));
++	if (ret)
++		return dev_err_probe(dev, ret, "setting AFE DMA mask\n");
++	afe->irq = platform_get_irq(pdev, 0);
++	if (afe->irq < 0)
++		return afe->irq;
++	afe->common.regmap = devm_regmap_init_mmio(dev, afe->base, &dl0_regmap);
++	if (IS_ERR(afe->common.regmap))
++		return dev_err_probe(dev, PTR_ERR(afe->common.regmap), "mapping AFE registers\n");
++	afe->common.dev = dev;
++	afe->common.memif = &afe->dl0;
++	afe->common.memif_size = 1;
++	afe->common.mtk_afe_hardware = &dl0_hw;
++	afe->dl0.data = &dl0_data;
++	spin_lock_init(&afe->irq_lock);
+ 	platform_set_drvdata(pdev, afe);
+ 	pm_runtime_enable(dev);
+ 	ret = pm_runtime_resume_and_get(dev);
+@@ -169,7 +393,17 @@
+ 	ret = pm_runtime_put_sync_suspend(dev);
+ 	if (ret < 0)
+ 		dev_warn(dev, "AFE remains active after probe: %d\n", ret);
+-	return 0;
++
++	ret = snd_soc_register_component(dev, &dl0_component, &dl0_dai, 1);
++	if (ret) {
++		pm_runtime_disable(dev);
++		if (!pm_runtime_status_suspended(dev)) {
++			if (mt6991_afe_runtime_suspend(dev))
++				clk_bulk_disable_unprepare(NUM_BUS_CLKS, afe->bus);
++			pm_runtime_set_suspended(dev);
++		}
++	}
++	return ret;
+ }
+ 
+ static void mt6991_afe_remove(struct platform_device *pdev)
+@@ -177,6 +411,7 @@
+ 	struct device *dev = &pdev->dev;
+ 	struct mt6991_afe *afe = dev_get_drvdata(dev);
+ 
++	snd_soc_unregister_component(dev);
+ 	pm_runtime_disable(dev);
+ 	if (!pm_runtime_status_suspended(dev)) {
+ 		if (mt6991_afe_runtime_suspend(dev)) {

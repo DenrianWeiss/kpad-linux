@@ -1,0 +1,109 @@
+Subject: [RFC PATCH] phy: mediatek: tolerate the vendor MT6991 xsphy layout
+
+The vendor device tree gives the xsphy parent the port window that its first child also claims, so devm_ioremap_resource() fails with -EBUSY and no port registers. Map the parent window non-exclusively and fall back to hardware defaults when the USB2 trims are unavailable (the trim provider is a vendor-only nvmem node).
+
+--- a/drivers/phy/mediatek/phy-mtk-xsphy.c
++++ b/drivers/phy/mediatek/phy-mtk-xsphy.c
+@@ -207,19 +207,27 @@
+ 		return 0;
+ 
+ 	ret = nvmem_cell_read_variable_le_u32(dev, "hsrx-term", &inst->hsrx_term);
+-	if (ret)
+-		return dev_err_probe(dev, ret, "failed to read HS RX termination trim\n");
++	if (ret) {
++		dev_warn(dev, "no HS RX termination trim (%d), using default\n", ret);
++		return 0;
++	}
+ 	ret = nvmem_cell_read_variable_le_u32(dev, "hstx-impn", &inst->hstx_impn);
+-	if (ret)
+-		return dev_err_probe(dev, ret, "failed to read HS TX NMOS trim\n");
++	if (ret) {
++		dev_warn(dev, "no HS TX NMOS trim (%d), using default\n", ret);
++		return 0;
++	}
+ 	ret = nvmem_cell_read_variable_le_u32(dev, "hstx-impp", &inst->hstx_impp);
+-	if (ret)
+-		return dev_err_probe(dev, ret, "failed to read HS TX PMOS trim\n");
++	if (ret) {
++		dev_warn(dev, "no HS TX PMOS trim (%d), using default\n", ret);
++		return 0;
++	}
+ 
+ 	if (!FIELD_FIT(P2_HSRX_TERM_CAL, inst->hsrx_term) ||
+ 	    !FIELD_FIT(P2_HSTX_IMPN, inst->hstx_impn) ||
+-	    !FIELD_FIT(P2_HSTX_IMPP, inst->hstx_impp))
+-		return dev_err_probe(dev, -ERANGE, "invalid USB2 trim value\n");
++	    !FIELD_FIT(P2_HSTX_IMPP, inst->hstx_impp)) {
++		dev_warn(dev, "invalid USB2 trim value, using default\n");
++		return 0;
++	}
+ 
+ 	return 0;
+ }
+@@ -242,6 +250,13 @@
+ 				     inst->hstx_impp);
+ 
+ 	mtk_phy_set_bits(pbase + XSP_USBPHYACR6, P2A6_RG_OTG_VBUSCMP_EN);
++
++	/*
++	 * Force the U2 PLL on, as the vendor PHY does: the IPPC only reports
++	 * SSUSB_SYSPLL_STABLE after this bit is set, and mtu3 refuses to bring
++	 * the controller up without it.
++	 */
++	mtk_phy_set_bits(pbase + XSP_USBPHYACR0, BIT(15));
+ 
+ 	mtk_phy_update_bits(pbase + XSP_U2PHYDTM1,
+ 			    P2D_RG_VBUSVALID | P2D_RG_AVALID | P2D_RG_SESSEND,
+@@ -539,6 +554,28 @@
+ 		return ERR_PTR(-EINVAL);
+ 	}
+ 
++	/*
++	 * The vendor device tree points its consumers at the port child node
++	 * even though the provider is registered on the controller node. With
++	 * the overlay rewriting those phandles to the controller, args[0]
++	 * carries the vendor port marker (3 for a USB2 port); pick the only
++	 * port of this instance in that case.
++	 */
++	if (phy_np == xsphy->dev->of_node) {
++		if (!xsphy->nphys)
++			return ERR_PTR(-EINVAL);
++		inst = xsphy->phys[0];
++		inst->type = args->args[0] == 3 ? PHY_TYPE_USB2 : args->args[0];
++		if (!(inst->type == PHY_TYPE_USB2 || inst->type == PHY_TYPE_USB3 ||
++		      inst->type == PHY_TYPE_PCIE || inst->type == PHY_TYPE_SGMII)) {
++			dev_err(dev, "unsupported vendor phy type: %d\n", args->args[0]);
++			return ERR_PTR(-EINVAL);
++		}
++		phy_parse_property(xsphy, inst);
++		phy_type_set(inst);
++		return inst->phy;
++	}
++
+ 	for (index = 0; index < xsphy->nphys; index++)
+ 		if (phy_np == xsphy->phys[index]->phy->dev.of_node) {
+ 			inst = xsphy->phys[index];
+@@ -591,6 +628,7 @@
+ 	size_t nphys;
+ 	int port;
+ 
++	dev_info(dev, "probe start, children=%d\n", of_get_child_count(np));
+ 	nphys = of_get_child_count(np);
+ 	xsphy = devm_kzalloc(dev, struct_size(xsphy, phys, nphys), GFP_KERNEL);
+ 	if (!xsphy)
+@@ -603,8 +641,13 @@
+ 	glb_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+ 	/* optional, may not exist if no u3 phys */
+ 	if (glb_res) {
+-		/* get banks shared by multiple u3 phys */
+-		xsphy->glb_base = devm_ioremap_resource(dev, glb_res);
++		/*
++		 * The vendor device tree describes the port window as the first
++		 * resource of the parent as well, so claim it non-exclusively and
++		 * let the port children map their own views.
++		 */
++		xsphy->glb_base = devm_ioremap(dev, glb_res->start,
++					       resource_size(glb_res));
+ 		if (IS_ERR(xsphy->glb_base)) {
+ 			dev_err(dev, "failed to remap glb regs\n");
+ 			return PTR_ERR(xsphy->glb_base);

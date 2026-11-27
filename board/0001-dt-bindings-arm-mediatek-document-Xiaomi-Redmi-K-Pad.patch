@@ -1,0 +1,26 @@
+From defd576848c763e07c0d984422805c5a06f4901f Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 01:12:58 +0800
+Subject: [PATCH 1/2] dt-bindings: arm: mediatek: document Xiaomi Redmi K Pad
+
+---
+ Documentation/devicetree/bindings/arm/mediatek.yaml | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/arm/mediatek.yaml b/Documentation/devicetree/bindings/arm/mediatek.yaml
+index cd4040a..0c9f9f5 100644
+--- a/Documentation/devicetree/bindings/arm/mediatek.yaml
++++ b/Documentation/devicetree/bindings/arm/mediatek.yaml
+@@ -72,6 +72,9 @@ properties:
+               - archermind,mt6797-x20-dev
+               - mediatek,mt6797-evb
+           - const: mediatek,mt6797
++      - items:
++          - const: xiaomi,turner
++          - const: mediatek,mt6991
+       - items:
+           - enum:
+               - bananapi,bpi-r64
+-- 
+2.50.1 (Apple Git-155)
+

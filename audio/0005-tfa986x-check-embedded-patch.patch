@@ -1,0 +1,75 @@
+--- a/sound/soc/codecs/tfa986x.c
++++ b/sound/soc/codecs/tfa986x.c
+@@ -124,12 +124,37 @@
+ 	return stereo->enter.count ? 0 : -EINVAL;
+ }
+ 
++/* Turner embeds a PA1 file with a revision check and no DSP write blocks. */
++static int tfa_check_patch(const struct firmware *fw, u32 desc, u16 revision)
++{
++	const u8 *file = tfa_item(fw, desc, 8);
++	const u8 *header, *check;
++	u32 size;
++
++	if (!file)
++		return -EINVAL;
++	size = get_unaligned_le32(file + 4);
++	if (size < 42 || size > fw->size - (file + 8 - fw->data))
++		return -EINVAL;
++	header = file + 8;
++	if (memcmp(header, "PA1_00", 6) || get_unaligned_le16(header + 6) != size ||
++	    (crc32_le(~0U, header + 12, size - 12) ^ ~0U) != get_unaligned_le32(header + 8))
++		return -EINVAL;
++
++	check = header + 36;
++	if (size != 42 || check[1] != 0xff || check[2] != 0xff ||
++	    check[3] || check[4] || check[5] != 0x0b)
++		return -EOPNOTSUPP;
++	return (check[5] << 8 | check[0]) == revision ? 0 : -ENODEV;
++}
++
+ static int tfa_parse_stereo(struct device *dev, const struct firmware *fw,
+-			    unsigned int address, struct tfa_stereo *stereo)
++			    unsigned int address, u16 revision, struct tfa_stereo *stereo)
+ {
+ 	const u8 *p;
+ 	u32 desc, ref;
+ 	unsigned int i, j, ndev;
++	bool patch_seen = false;
+ 	int ret;
+ 
+ 	if (fw->size < 46 || memcmp(fw->data, "PM3_01", 6) ||
+@@ -164,9 +189,14 @@
+ 			case TFA_PROFILE:
+ 				ret = tfa_parse_profile(dev, fw, ref, stereo);
+ 				break;
++			case TFA_PATCH:
++				if (patch_seen)
++					return -EINVAL;
++				patch_seen = true;
++				ret = tfa_check_patch(fw, ref, revision);
++				break;
+ 			case TFA_INTERFACE:
+ 			case TFA_DEVICE_ID:
+-			case TFA_PATCH:
+ 				/* Separate from the register field lists. */
+ 				continue;
+ 			default:
+@@ -176,7 +206,7 @@
+ 				return ret;
+ 		}
+ 	}
+-	return stereo->device.count && stereo->enter.count ? 0 : -ENOENT;
++	return patch_seen && stereo->device.count && stereo->enter.count ? 0 : -ENOENT;
+ }
+ 
+ struct tfa986x {
+@@ -285,7 +315,7 @@
+ 	ret = request_firmware(&fw, TFA986X_CONTAINER, dev);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "loading speaker container\n");
+-	ret = tfa_parse_stereo(dev, fw, client->addr, &tfa->stereo);
++	ret = tfa_parse_stereo(dev, fw, client->addr, revision, &tfa->stereo);
+ 	release_firmware(fw);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "reading stereo register settings\n");

@@ -1,0 +1,307 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -37,12 +37,28 @@
+ 	bool restore_playback;
+ 	void __iomem *playback_buffers;
+ 	int playback_error;
+-};
++	struct completion pcm_reply;
++	u16 pending_command;
++	bool pcm_open;
++	bool pcm_owns_pair;
++};
++
++static bool mt6991_adsp_pcm_ack(const struct mt6991_adsp_ipi *msg, u16 command)
++{
++	return command && msg->id == 9 && msg->len == 16 &&
++		get_unaligned_le16(msg->payload) == 0x8888 &&
++		msg->payload[2] == 32 && msg->payload[3] == 0x21 &&
++		msg->payload[4] == 0 && msg->payload[5] == 2 &&
++		get_unaligned_le16(msg->payload + 6) == command;
++}
+ 
+ static void mt6991_adsp_receive(struct mbox_client *client, void *data)
+ {
+ 	struct mt6991_adsp_core *core = container_of(client, struct mt6991_adsp_core, client);
+ 	const struct mt6991_adsp_ipi *msg = data;
++
++	if (!core->id && mt6991_adsp_pcm_ack(msg, READ_ONCE(core->pending_command)))
++		complete(&core->pcm_reply);
+ 
+ 	if (msg->id == 4 && msg->len == sizeof(u32) &&
+ 	    get_unaligned_le32(msg->payload) == core->id)
+@@ -425,9 +441,9 @@
+ #define ADSP_AUDIO_PLAYBACK	32
+ #define ADSP_MSG_BUFFER_SIZE	SZ_1K
+ 
+-/* Stock kernel -> DSP message, bypassing audio-layer ACK during task init. */
++/* Stock kernel -> DSP message, the ACK policy is part of each command. */
+ static int mt6991_adsp_audio_send(struct mbox_chan *tx, u8 scene, u16 command,
+-				  const __le64 *desc, u32 bytes)
++				  const __le64 *desc, u32 bytes, bool need_ack)
+ {
+ 	struct mt6991_adsp_tx msg = { .id = ADSP_AUDIO_IPI, .len = 16 + bytes };
+ 
+@@ -437,6 +453,7 @@
+ 	msg.payload[2] = scene;
+ 	msg.payload[3] = 0x21;
+ 	msg.payload[4] = !!bytes;
++	msg.payload[5] = need_ack;
+ 	put_unaligned_le16(command, msg.payload + 6);
+ 	put_unaligned_le32(bytes, msg.payload + 8);
+ 	if (bytes)
+@@ -480,9 +497,9 @@
+ 	wmb();
+ 	desc[0] = cpu_to_le64(audio->address);
+ 	desc[1] = cpu_to_le64(audio->size);
+-	ret = mt6991_adsp_audio_send(tx, ADSP_AUDIO_CONTROLLER, 8, desc, 16);
++	ret = mt6991_adsp_audio_send(tx, ADSP_AUDIO_CONTROLLER, 8, desc, 16, false);
+ 	if (ret >= 0)
+-		ret = mt6991_adsp_audio_send(tx, ADSP_AUDIO_PLAYBACK, 0x19, NULL, 0);
++		ret = mt6991_adsp_audio_send(tx, ADSP_AUDIO_PLAYBACK, 0x19, NULL, 0, false);
+ 	for (i = 0; ret >= 0 && i < 2; i++) {
+ 		unsigned int offset = i * ADSP_MSG_BUFFER_SIZE;
+ 		unsigned long host = (unsigned long)(a->playback_buffers + offset);
+@@ -492,7 +509,7 @@
+ 		desc[1] = cpu_to_le64(host);
+ 		desc[2] = cpu_to_le64(ADSP_MSG_BUFFER_SIZE);
+ 		desc[3] = cpu_to_le64(host);
+-		ret = mt6991_adsp_audio_send(tx, ADSP_AUDIO_PLAYBACK, 5 + i, desc, sizeof(desc));
++		ret = mt6991_adsp_audio_send(tx, ADSP_AUDIO_PLAYBACK, 5 + i, desc, sizeof(desc), false);
+ 	}
+ 	mbox_free_channel(tx);
+ 	/* A timeout can follow delivery; keep both buffers until both DSPs stop. */
+@@ -514,6 +531,79 @@
+ }
+ static DEVICE_ATTR_WO(playback_mailboxes);
+ 
++/* Caller holds boot_lock. A failed transaction requires a firmware restart
++ * before reusing the same command number, since the ACK has no sequence ID.
++ */
++static int mt6991_adsp_pcm_command(struct device *dev, u16 command)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	struct mbox_client client = { .dev = dev, .tx_block = true, .tx_tout = 200 };
++	struct mbox_chan *tx;
++	int ret;
++
++	tx = mbox_request_channel(&client, 0);
++	if (IS_ERR(tx))
++		return PTR_ERR(tx);
++	reinit_completion(&a->pcm_reply);
++	WRITE_ONCE(a->pending_command, command);
++	ret = mt6991_adsp_audio_send(tx, ADSP_AUDIO_PLAYBACK, command, NULL, 0, true);
++	if (ret >= 0)
++		ret = wait_for_completion_timeout(&a->pcm_reply, msecs_to_jiffies(500)) ?
++			0 : -ETIMEDOUT;
++	WRITE_ONCE(a->pending_command, 0);
++	mbox_free_channel(tx);
++	return ret;
++}
++
++int mt6991_adsp_pcm_open(struct device *dev)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	bool owns_pair;
++	int ret;
++
++	guard(mutex)(&a->boot_lock);
++	if (a->pcm_open)
++		return -EBUSY;
++	if (a->pair_powered && !a->pair_ready) {
++		ret = mt6991_adsp_stop_pair(dev);
++		if (ret)
++			return ret;
++	}
++	owns_pair = !a->pair_ready;
++	ret = mt6991_adsp_start_pair(dev);
++	if (ret)
++		return ret;
++	ret = mt6991_adsp_playback_mailboxes(dev);
++	if (!ret)
++		ret = mt6991_adsp_pcm_command(dev, 1);
++	if (ret) {
++		if (mt6991_adsp_stop_pair(dev))
++			dev_err(dev, "failed to halt DSP after playback open error\n");
++		return ret;
++	}
++	a->pcm_owns_pair = owns_pair;
++	a->pcm_open = true;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(mt6991_adsp_pcm_open);
++
++int mt6991_adsp_pcm_close(struct device *dev)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	int ret, stop = 0;
++
++	guard(mutex)(&a->boot_lock);
++	if (!a->pcm_open)
++		return 0;
++	ret = a->pair_ready ? mt6991_adsp_pcm_command(dev, 2) : -EHOSTDOWN;
++	if (a->pcm_owns_pair || ret)
++		stop = mt6991_adsp_stop_pair(dev);
++	a->pcm_open = false;
++	a->pcm_owns_pair = false;
++	return ret ?: stop;
++}
++EXPORT_SYMBOL_GPL(mt6991_adsp_pcm_close);
++
+ static ssize_t firmware_state_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+ 	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
+@@ -531,9 +621,9 @@
+ 
+ 	guard(mutex)(&core->boot_lock);
+ 	if (sysfs_streq(buf, "start"))
+-		ret = mt6991_adsp_start_pair(dev);
++		ret = core->pcm_open && !core->pair_ready ? -EBUSY : mt6991_adsp_start_pair(dev);
+ 	else if (sysfs_streq(buf, "stop"))
+-		ret = mt6991_adsp_stop_pair(dev);
++		ret = core->pcm_open ? -EBUSY : mt6991_adsp_stop_pair(dev);
+ 	else
+ 		return -EINVAL;
+ 	return ret < 0 ? ret : count;
+@@ -760,6 +850,36 @@
+ 
+ static struct platform_driver mt6991_adsp_core_driver;
+ 
++struct device *mt6991_adsp_link_playback(struct device *consumer)
++{
++	struct device_node *np __free(device_node) =
++		of_find_compatible_node(NULL, NULL, "mediatek,mt6991-adsp_core_0");
++	struct platform_device *pdev;
++	struct device *dev, *result = ERR_PTR(-EPROBE_DEFER);
++
++	if (!np || !of_device_is_available(np))
++		return ERR_PTR(-ENODEV);
++	pdev = of_find_device_by_node(np);
++	if (!pdev)
++		return result;
++	dev = &pdev->dev;
++	device_lock(dev);
++	if (dev->driver == &mt6991_adsp_core_driver.driver && device_is_bound(dev)) {
++		struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++
++		if (!a->peer)
++			result = ERR_PTR(-ENODEV);
++		else if (device_link_add(consumer, dev, DL_FLAG_AUTOREMOVE_CONSUMER))
++			result = dev;
++		else
++			result = ERR_PTR(-EINVAL);
++	}
++	device_unlock(dev);
++	put_device(dev);
++	return result;
++}
++EXPORT_SYMBOL_GPL(mt6991_adsp_link_playback);
++
+ static int mt6991_adsp_link_peer(struct device *dev, struct mt6991_adsp_core *core)
+ {
+ 	struct device_node *peer __free(device_node) =
+@@ -812,6 +932,7 @@
+ 	mutex_init(&core->boot_lock);
+ 	init_completion(&core->ready);
+ 	init_completion(&core->timestamp_reply);
++	init_completion(&core->pcm_reply);
+ 	init_completion(&core->logger_request);
+ 	if (!core->id) {
+ 		ret = mt6991_adsp_link_peer(dev, core);
+@@ -871,6 +992,8 @@
+ 	ret = mt6991_adsp_start_pair(dev);
+ 	if (!ret && core->restore_playback) {
+ 		ret = mt6991_adsp_playback_mailboxes(dev);
++		if (!ret && core->pcm_open)
++			ret = mt6991_adsp_pcm_command(dev, 1);
+ 		if (ret && mt6991_adsp_stop_pair(dev))
+ 			dev_err(dev, "failed to stop DSP after playback restore error\n");
+ 	}
+--- a/include/linux/soc/mediatek/mt6991-adsp-ipi.h
++++ b/include/linux/soc/mediatek/mt6991-adsp-ipi.h
+@@ -26,4 +26,9 @@
+ int mt6991_adsp_clear_pair(struct mbox_chan *a, struct mbox_chan *b);
+ int mt6991_adsp_set_running(struct mbox_chan *chan, unsigned int id, bool run);
+ 
++struct device;
++struct device *mt6991_adsp_link_playback(struct device *consumer);
++int mt6991_adsp_pcm_open(struct device *dev);
++int mt6991_adsp_pcm_close(struct device *dev);
++
+ #endif
+--- a/sound/soc/mediatek/Kconfig
++++ b/sound/soc/mediatek/Kconfig
+@@ -395,7 +395,7 @@
+ 
+ config SND_SOC_MT6991_TURNER
+ 	tristate "Xiaomi Turner speakers"
+-	depends on ARCH_MEDIATEK && OF
++	depends on ARCH_MEDIATEK && OF && MT6991_ADSP_CORE
+ 	select SND_SOC_MEDIATEK
+ 	help
+ 	  Connect the MT6991 audio front end to the two Turner speaker codecs.
+--- a/sound/soc/mediatek/mt6991/turner.c
++++ b/sound/soc/mediatek/mt6991/turner.c
+@@ -4,11 +4,13 @@
+ #include <linux/of.h>
+ #include <linux/pinctrl/consumer.h>
+ #include <linux/platform_device.h>
++#include <linux/soc/mediatek/mt6991-adsp-ipi.h>
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
+ 
+ struct turner_audio {
+ 	struct snd_soc_card card;
++	struct device *dsp;
+ 	struct pinctrl *pins;
+ 	struct pinctrl_state *active;
+ 	struct pinctrl_state *idle;
+@@ -18,6 +20,29 @@
+ 	struct snd_soc_codec_conf amps[2];
+ };
+ 
++static int turner_playback_startup(struct snd_pcm_substream *s)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(s);
++	struct turner_audio *audio = snd_soc_card_get_drvdata(rtd->card);
++
++	return mt6991_adsp_pcm_open(audio->dsp);
++}
++
++static void turner_playback_shutdown(struct snd_pcm_substream *s)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(s);
++	struct turner_audio *audio = snd_soc_card_get_drvdata(rtd->card);
++	int ret = mt6991_adsp_pcm_close(audio->dsp);
++
++	if (ret)
++		dev_err(audio->dsp, "playback close failed: %d\n", ret);
++}
++
++static const struct snd_soc_ops turner_playback_ops = {
++	.startup = turner_playback_startup,
++	.shutdown = turner_playback_shutdown,
++};
++
+ static int turner_be_fixup(struct snd_soc_pcm_runtime *rtd,
+ 			   struct snd_pcm_hw_params *params)
+ {
+@@ -86,6 +111,10 @@
+ 	if (!audio)
+ 		return -ENOMEM;
+ 
++	audio->dsp = mt6991_adsp_link_playback(dev);
++	if (IS_ERR(audio->dsp))
++		return dev_err_probe(dev, PTR_ERR(audio->dsp), "linking playback DSP\n");
++
+ 	audio->platform.of_node = of_parse_phandle(dev->of_node, "mediatek,platform", 0);
+ 	if (!audio->platform.of_node)
+ 		return dev_err_probe(dev, -EINVAL, "missing AFE phandle\n");
+@@ -98,6 +127,7 @@
+ 	fe->name = "Playback_1";
+ 	fe->stream_name = "Speaker Playback";
+ 	fe->dynamic = 1;
++	fe->ops = &turner_playback_ops;
+ 	fe->codecs = &snd_soc_dummy_dlc;
+ 	fe->num_codecs = 1;
+ 	audio->cpus[0].dai_name = "DL0";

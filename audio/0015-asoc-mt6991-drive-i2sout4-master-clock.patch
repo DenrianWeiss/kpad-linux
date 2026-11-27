@@ -1,0 +1,107 @@
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -49,6 +49,10 @@
+ 	ADSP, INTBUS, AUDIO_H, HOPPING, F26M, NUM_BUS_CLKS,
+ };
+ 
++enum mt6991_mclk_clock {
++	APLL2_PARENT, AUD2_MUX, MCLK_MUX, MCLK_DIV, NUM_MCLK_CLKS,
++};
++
+ struct mt6991_afe {
+ 	/* The shared PCM allocation and pointer callbacks expect this first. */
+ 	struct mtk_base_afe common;
+@@ -57,6 +61,8 @@
+ 	int irq;
+ 	bool dram_held;
+ 	struct clk_bulk_data bus[NUM_BUS_CLKS];
++	struct clk_bulk_data mclk[NUM_MCLK_CLKS];
++	bool mclk_enabled;
+ 	struct clk *clksq;
+ 	void __iomem *base;
+ 	struct regmap *spm;
+@@ -356,8 +362,70 @@
+ 				  FIELD_PREP(OUT_CLK_SOURCE, 1) |
+ 				  FIELD_PREP(OUT_RELATCH_RATE, 10));
+ }
++
++/* The stock OUT4 DAI uses the I2SIN0 master-clock divider on Turner. */
++static int mt6991_i2sout4_sysclk(struct snd_soc_dai *dai, int id,
++				 unsigned int freq, int dir)
++{
++	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
++	struct clk *pll = afe->mclk[APLL2_PARENT].clk;
++	struct clk *aud = afe->mclk[AUD2_MUX].clk;
++	struct clk *div = afe->mclk[MCLK_DIV].clk;
++	unsigned long rate;
++	int ret;
+ 
++	if (id || dir != SND_SOC_CLOCK_OUT || freq != 48000 * 128)
++		return -EINVAL;
++
++	/* Allow for PLL frequency-word rounding when deriving the /32 rate. */
++	rate = DIV_ROUND_UP(clk_get_rate(pll), 32);
++	if (rate < freq - 1 || rate > freq + 1)
++		return -ERANGE;
++	if (afe->mclk_enabled)
++		return clk_get_rate(div) == rate ? 0 : -EBUSY;
++
++	ret = clk_set_parent(aud, pll);
++	if (ret)
++		return ret;
++	ret = clk_set_parent(afe->mclk[MCLK_MUX].clk, aud);
++	if (ret)
++		return ret;
++	ret = clk_set_rate(div, rate);
++	if (ret)
++		return ret;
++	return clk_get_rate(div) == rate ? 0 : -ERANGE;
++}
++
++static int mt6991_i2sout4_prepare(struct snd_pcm_substream *s,
++				  struct snd_soc_dai *dai)
++{
++	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
++	int ret;
++
++	if (afe->mclk_enabled)
++		return 0;
++	ret = clk_prepare_enable(afe->mclk[MCLK_DIV].clk);
++	if (!ret)
++		afe->mclk_enabled = true;
++	return ret;
++}
++
++static int mt6991_i2sout4_free(struct snd_pcm_substream *s,
++			       struct snd_soc_dai *dai)
++{
++	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
++
++	if (afe->mclk_enabled) {
++		clk_disable_unprepare(afe->mclk[MCLK_DIV].clk);
++		afe->mclk_enabled = false;
++	}
++	return 0;
++}
++
+ static const struct snd_soc_dai_ops i2sout4_ops = {
++	.set_sysclk = mt6991_i2sout4_sysclk,
++	.prepare = mt6991_i2sout4_prepare,
++	.hw_free = mt6991_i2sout4_free,
+ 	.hw_params = mt6991_i2sout4_params,
+ };
+ 
+@@ -445,6 +513,13 @@
+ 	ret = devm_clk_bulk_get(dev, NUM_BUS_CLKS, afe->bus);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "getting AFE bus clocks\n");
++	afe->mclk[APLL2_PARENT].id = "ck_apll2_ck";
++	afe->mclk[AUD2_MUX].id = "ck_mux_aud_2";
++	afe->mclk[MCLK_MUX].id = "ck_i2sin0_m_sel";
++	afe->mclk[MCLK_DIV].id = "ck_apll12_div_i2sin0";
++	ret = devm_clk_bulk_get(dev, NUM_MCLK_CLKS, afe->mclk);
++	if (ret)
++		return dev_err_probe(dev, ret, "getting I2S4 master clocks\n");
+ 	afe->clksq = devm_clk_get(dev, "vlp_clk26m_clk");
+ 	if (IS_ERR(afe->clksq))
+ 		return dev_err_probe(dev, PTR_ERR(afe->clksq), "getting VLP clock parent\n");

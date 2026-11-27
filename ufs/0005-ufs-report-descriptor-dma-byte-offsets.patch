@@ -1,0 +1,23 @@
+--- a/drivers/ufs/core/ufshcd.c
++++ b/drivers/ufs/core/ufshcd.c
+@@ -2959,8 +2959,6 @@
+ {
+ 	const int i = scsi_cmd_to_rq(cmd)->tag;
+ 	struct utp_transfer_req_desc *utrdlp = hba->utrdl_base_addr;
+-	u16 response_offset = le16_to_cpu(utrdlp[i].response_upiu_offset);
+-	u16 prdt_offset = le16_to_cpu(utrdlp[i].prd_table_offset);
+ 	struct ufshcd_lrb *lrb = scsi_cmd_priv(cmd);
+ 	u8 *command_upiu, *response_upiu, *prd_table;
+ 	dma_addr_t cmd_desc_element_addr;
+@@ -2994,9 +2992,9 @@
+ 	lrb->ucd_req_ptr = (struct utp_upiu_req *)command_upiu;
+ 	lrb->ucd_req_dma_addr = cmd_desc_element_addr;
+ 	lrb->ucd_rsp_ptr = (struct utp_upiu_rsp *)response_upiu;
+-	lrb->ucd_rsp_dma_addr = cmd_desc_element_addr + response_offset;
++	lrb->ucd_rsp_dma_addr = cmd_desc_element_addr + (response_upiu - command_upiu);
+ 	lrb->ucd_prdt_ptr = (struct ufshcd_sg_entry *)prd_table;
+-	lrb->ucd_prdt_dma_addr = cmd_desc_element_addr + prdt_offset;
++	lrb->ucd_prdt_dma_addr = cmd_desc_element_addr + (prd_table - command_upiu);
+ }
+ 
+ static void __ufshcd_setup_cmd(struct ufs_hba *hba, struct scsi_cmnd *cmd,

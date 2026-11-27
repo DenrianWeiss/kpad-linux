@@ -1,0 +1,27 @@
+From 85dfb7f6fdc23b5e41847c098d072f70dd19cdd8 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:16:19 +0800
+Subject: [PATCH 16/17] dt-bindings: nvmem: describe Turner USB2 calibration
+ handoff
+
+The loader can supply three unpacked HS trim fields in a reserved page. Both USB2 PHYs on Turner use the same per-chip values.
+---
+ Documentation/devicetree/bindings/nvmem/rmem.yaml | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/nvmem/rmem.yaml b/Documentation/devicetree/bindings/nvmem/rmem.yaml
+index 3e80a4b..480e06b 100644
+--- a/Documentation/devicetree/bindings/nvmem/rmem.yaml
++++ b/Documentation/devicetree/bindings/nvmem/rmem.yaml
+@@ -22,6 +22,8 @@ properties:
+           # Single 4 KiB page supplied by the Turner Linux boot handoff.
+           # Bytes 0x31c..0x323 hold two little-endian PCIe0 PHY trim words.
+           - xiaomi,turner-pcie-calibration
++          # Three unsigned bytes: USB2 HS RX termination, TX NMOS, TX PMOS.
++          - xiaomi,turner-usb2-calibration
+       - const: nvmem-rmem
+ 
+   reg:
+-- 
+2.50.1 (Apple Git-155)
+

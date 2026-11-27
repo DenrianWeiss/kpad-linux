@@ -1,0 +1,79 @@
+--- a/drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/gl_cfg80211.c
++++ b/drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/gl_cfg80211.c
+@@ -8664,21 +8664,27 @@
+ 	struct NETDEV_PRIVATE_GLUE_INFO *prNetDevPrivate = NULL;
+ 	u_int8_t fgIsP2pNetDevice = FALSE;
+ 	uint32_t *pu4PacketFilter = NULL;
+-
+-	if ((wiphy == NULL) || (wdev == NULL) || (upd == NULL)) {
++	uint32_t filter = 0;
++
++	if ((wiphy == NULL) || (wdev == NULL) || (wdev->netdev == NULL) || (upd == NULL)) {
+ 		DBGLOG(INIT, TRACE, "Invalidate params\n");
+ 		return;
+ 	}
+ 	WIPHY_PRIV(wiphy, prGlueInfo);
+ 
+-	if (!wlanIsDriverReady(prGlueInfo, WLAN_DRV_READY_CHECK_WLAN_ON |
++#if CFG_ENABLE_WIFI_DIRECT && CFG_ENABLE_WIFI_DIRECT_CFG_80211
++	fgIsP2pNetDevice = mtk_IsP2PNetDevice(prGlueInfo, wdev->netdev);
++#endif
++	/* The station filter belongs to the persistent netdev. cfg80211 can
++	 * register it while the calibration power cycle is still in progress.
++	 * Only the P2P path below needs the live adapter and its worker.
++	 */
++	if (fgIsP2pNetDevice &&
++	    !wlanIsDriverReady(prGlueInfo, WLAN_DRV_READY_CHECK_WLAN_ON |
+ 		WLAN_DRV_READY_CHECK_HIF_SUSPEND)) {
+ 		DBGLOG(REQ, WARN, "driver is not ready\n");
+ 		return;
+ 	}
+-#if CFG_ENABLE_WIFI_DIRECT && CFG_ENABLE_WIFI_DIRECT_CFG_80211
+-	fgIsP2pNetDevice = mtk_IsP2PNetDevice(prGlueInfo, wdev->netdev);
+-#endif
+ 	/* prepare private netdev */
+ 	prNetDevPrivate = (struct NETDEV_PRIVATE_GLUE_INFO *)
+ 		netdev_priv(wdev->netdev);
+@@ -8705,8 +8711,6 @@
+ 				pu4PacketFilter =
+ 					&prGlueInfo->prP2PDevInfo
+ 					->u4OsMgmtFrameFilter;
+-				/* Reset filters*/
+-				*pu4PacketFilter = 0;
+ 			} else {
+ 				if (mtk_Netdev_To_RoleIdx(prGlueInfo,
+ 					wdev->netdev, &ucRoleIdx) < 0) {
+@@ -8733,25 +8737,25 @@
+ 				}
+ 				pu4PacketFilter = &prP2pRoleFsmInfo
+ 					->u4P2pPacketFilter;
+-				*pu4PacketFilter =
+-					PARAM_PACKET_FILTER_SUPPORTED;
++				filter = PARAM_PACKET_FILTER_SUPPORTED;
+ 			}
+ 		} else {
+ 			pu4PacketFilter = &prNetDevPrivate->u4OsMgmtFrameFilter;
+-			*pu4PacketFilter = 0;
+ 		}
+ 		if (upd->interface_stypes & MASK_MAC_FRAME_PROBE_REQ)
+-			*pu4PacketFilter |= PARAM_PACKET_FILTER_PROBE_REQ;
++			filter |= PARAM_PACKET_FILTER_PROBE_REQ;
+ 
+ 		if (upd->interface_stypes & MASK_MAC_FRAME_ACTION)
+-			*pu4PacketFilter |= PARAM_PACKET_FILTER_ACTION_FRAME;
++			filter |= PARAM_PACKET_FILTER_ACTION_FRAME;
+ #if CFG_SUPPORT_SOFTAP_WPA3
+ 		if (upd->interface_stypes & MASK_MAC_FRAME_AUTH)
+-			*pu4PacketFilter |= PARAM_PACKET_FILTER_AUTH;
++			filter |= PARAM_PACKET_FILTER_AUTH;
+ 
+ 		if (upd->interface_stypes & MASK_MAC_FRAME_ASSOC_REQ)
+-			*pu4PacketFilter |= PARAM_PACKET_FILTER_ASSOC_REQ;
+-#endif
++			filter |= PARAM_PACKET_FILTER_ASSOC_REQ;
++#endif
++
++		WRITE_ONCE(*pu4PacketFilter, filter);
+ 
+ 		if (fgIsP2pNetDevice) {
+ 			set_bit(GLUE_FLAG_FRAME_FILTER_BIT,

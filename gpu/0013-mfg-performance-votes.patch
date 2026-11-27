@@ -1,0 +1,130 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] pmdomain: mediatek: translate MT6991 performance votes to GPUFreq indices
+
+GPUFreq orders its working tables from fastest to slowest, whereas genpd
+aggregates the highest performance level and treats zero as no vote.
+Expose the paired part of the core and stack tables using ascending
+nonzero levels. Use the normal dual-commit command from MT6991 firmware
+when selecting an operating point.
+
+---
+diff --git a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+--- a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
++++ b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+@@ -291,6 +291,7 @@
+ 	unsigned int num_regulators;
+ 	/** @turbo_below: opp indices below this value are considered turbo */
+ 	unsigned int turbo_below;
++	bool use_dual_commit;
+ 	int (*init)(struct mtk_mfg *mfg);
+ };
+ 
+@@ -547,15 +548,26 @@
+ 	return mtk_mfg_send_ipi(mfg, &msg);
+ }
+ 
+-static int mtk_mfg_set_oppidx(struct mtk_mfg *mfg, unsigned int opp_idx)
++static int mtk_mfg_set_opp_level(struct mtk_mfg *mfg, unsigned int level)
+ {
+ 	struct mtk_mfg_ipi_msg msg = {};
++	unsigned int opp_idx = level;
+ 	int ret;
++
++	if (mfg->variant->use_dual_commit) {
++		unsigned int count = min(mfg->num_gpu_opps, mfg->num_stack_opps);
++
++		if (!count || level > count)
++			return -EINVAL;
++
++		/* Genpd level zero releases the vote. Index zero is fastest. */
++		opp_idx = count - max(level, 1U);
++	}
+ 
+ 	if (opp_idx >= mfg->num_gpu_opps)
+ 		return -EINVAL;
+ 
+-	msg.cmd = CMD_FIX_DUAL_TARGET_OPPIDX;
++	msg.cmd = mfg->variant->use_dual_commit ? CMD_DUAL_COMMIT : CMD_FIX_DUAL_TARGET_OPPIDX;
+ 	msg.u.dual_commit.gpu_oppidx = opp_idx;
+ 	msg.u.dual_commit.stack_oppidx = opp_idx;
+ 
+@@ -573,7 +585,7 @@
+ {
+ 	struct device *dev = &mfg->pdev->dev;
+ 	struct mtk_mfg_opp_entry e = {};
+-	unsigned int i;
++	unsigned int i, paired;
+ 
+ 	mfg->num_gpu_opps = readl(mfg->shared_mem + GF_REG_GPU_OPP_NUM);
+ 	mfg->num_stack_opps = readl(mfg->shared_mem + GF_REG_STK_OPP_NUM);
+@@ -589,6 +601,8 @@
+ 			mfg->num_stack_opps, MAX_OPP_NUM);
+ 		return -EINVAL;
+ 	}
++
++	paired = mfg->variant->use_dual_commit ? min(mfg->num_gpu_opps, mfg->num_stack_opps) : 0;
+ 
+ 	mfg->gpu_opps = devm_kcalloc(dev, mfg->num_gpu_opps,
+ 				     sizeof(struct dev_pm_opp_data), GFP_KERNEL);
+@@ -612,7 +626,7 @@
+ 		}
+ 		mfg->gpu_opps[i].freq = e.freq_khz * HZ_PER_KHZ;
+ 		mfg->gpu_opps[i].u_volt = e.voltage_core * 10;
+-		mfg->gpu_opps[i].level = i;
++		mfg->gpu_opps[i].level = i < paired ? paired - i : i;
+ 		if (i < mfg->variant->turbo_below)
+ 			mfg->gpu_opps[i].turbo = true;
+ 	}
+@@ -627,7 +641,7 @@
+ 		}
+ 		mfg->stack_opps[i].freq = e.freq_khz * HZ_PER_KHZ;
+ 		mfg->stack_opps[i].u_volt = e.voltage_core * 10;
+-		mfg->stack_opps[i].level = i;
++		mfg->stack_opps[i].level = i < paired ? paired - i : i;
+ 		if (i < mfg->variant->turbo_below)
+ 			mfg->stack_opps[i].turbo = true;
+ 	}
+@@ -686,6 +700,7 @@
+ }
+ 
+ static const struct mtk_mfg_variant mtk_mfg_mt6991_variant = {
++	.use_dual_commit = true,
+ 	.clk_names = mtk_mfg_mt8196_clk_names,
+ 	.num_clks = ARRAY_SIZE(mtk_mfg_mt8196_clk_names),
+ 	/* GPUFreq firmware controls the GPU and stack supplies. */
+@@ -717,9 +732,16 @@
+ 	struct dev_pm_opp_data *go = mfg->gpu_opps;
+ 	struct dev_pm_opp_data *prev_o = NULL;
+ 	struct dev_pm_opp_data *o;
++	unsigned int count = mfg->num_gpu_opps;
+ 	int i, ret;
+ 
+-	for (i = mfg->num_gpu_opps - 1; i >= 0; i--) {
++	if (mfg->variant->use_dual_commit) {
++		count = min(count, mfg->num_stack_opps);
++		if (!count)
++			return -EINVAL;
++	}
++
++	for (i = count - 1; i >= 0; i--) {
+ 		/*
+ 		 * Adding the lower of the two OPPs avoids gaps of indices in
+ 		 * situations where the GPU OPPs are duplicated a couple of
+@@ -771,7 +793,7 @@
+ 	if (mfg->pd.status != GENPD_STATE_ON)
+ 		return 0;
+ 
+-	return mtk_mfg_set_oppidx(mfg, state);
++	return mtk_mfg_set_opp_level(mfg, state);
+ }
+ 
+ static int mtk_mfg_power_on(struct generic_pm_domain *pd)
+@@ -815,7 +837,7 @@
+ 	/* Don't try to set a OPP in probe before OPPs have been read from EB */
+ 	if (mfg->gpu_opps) {
+ 		/* The aforementioned deferred setting of pmdomain's state */
+-		ret = mtk_mfg_set_oppidx(mfg, pd->performance_state);
++		ret = mtk_mfg_set_opp_level(mfg, pd->performance_state);
+ 		if (ret)
+ 			dev_warn(&mfg->pdev->dev, "Failed to set oppidx in %s\n", __func__);
+ 	}

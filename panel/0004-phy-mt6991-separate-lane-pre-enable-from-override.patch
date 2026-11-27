@@ -1,0 +1,49 @@
+Subject: [PATCH] phy: mediatek: mt6991: set lane pre-enable before releasing software control
+
+--- a/drivers/phy/mediatek/phy-mtk-mipi-dsi-mt6991.c
++++ b/drivers/phy/mediatek/phy-mtk-mipi-dsi-mt6991.c
+@@ -126,16 +126,25 @@
+ 	writel(0x3fff0100, base + TX_LANE_CON);
+ }
+ 
+-static void mt6991_set_sw_control(struct mtk_mipi_tx *tx, bool enable)
++static void mt6991_set_lane_control(struct mtk_mipi_tx *tx, bool drive)
+ {
+ 	unsigned int i;
+ 
++	/* Set both pre-output enables before giving the pins to the host.
++	 * When parking the lanes, keep the software output drivers disabled.
++	 */
+ 	for (i = 0; i < ARRAY_SIZE(banks); i++) {
+-		mtk_phy_update_bits(tx->regs + banks[i] + 0x60, BIT(0), enable);
+-		mtk_phy_update_bits(tx->regs + banks[i] + 0x80, BIT(0), enable);
++		void __iomem *lane = tx->regs + banks[i];
++
++		mtk_phy_update_bits(lane + 0x60, BIT(0), drive);
++		mtk_phy_update_bits(lane + 0x80, BIT(0), drive);
++		writel(0, lane + 0x64);
++		writel(0, lane + 0x84);
++		writel(0, lane + 0x68);
++		writel(0, lane + 0x6c);
+ 	}
+ 	for (i = 0; i < ARRAY_SIZE(sw_ctl); i++)
+-		writel(enable ? 0x101 : 0, tx->regs + sw_ctl[i]);
++		writel(drive ? 0 : 0x101, tx->regs + sw_ctl[i]);
+ }
+ 
+ static void mt6991_enable_signal(struct phy *phy)
+@@ -152,12 +161,12 @@
+ 	/* Set the default D-PHY clock lane and retain inherited polarity. */
+ 	mtk_phy_set_bits(tx->regs + 0x320, BIT(0));
+ 	mtk_phy_update_bits(tx->regs + TX_LANE_SEL, GENMASK(10, 8) | GENMASK(6, 4), 5 << 8);
+-	mt6991_set_sw_control(tx, false);
++	mt6991_set_lane_control(tx, true);
+ }
+ 
+ static void mt6991_disable_signal(struct phy *phy)
+ {
+-	mt6991_set_sw_control(phy_get_drvdata(phy), true);
++	mt6991_set_lane_control(phy_get_drvdata(phy), false);
+ }
+ 
+ static const struct clk_ops mt6991_pll_ops = {

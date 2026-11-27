@@ -1,0 +1,133 @@
+From b2760dd685575872cf8c433a283b2d4bb3a1c410 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:30:28 +0800
+Subject: [PATCH] arm64: dts: mediatek: describe the Turner PCIe0 host and pins
+
+Wire the existing MT8196-compatible host to its six MAC clock gates, resets, PHY, interrupt and power domain. Keep it disabled until endpoint power and host handoff are available. Describe the Turner reset, active and low-power pin configurations.
+---
+ .../dts/mediatek/mt6991-xiaomi-turner.dts     | 43 +++++++++++++++++++
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi      | 42 ++++++++++++++++++
+ 2 files changed, 85 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+index c1f2e85..50325f2 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
++++ b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+@@ -35,11 +35,54 @@ memory@80000000 {
+ 	};
+ };
+ 
++&pcie0 {
++	max-link-speed = <4>;
++	pinctrl-names = "init", "default", "sleep", "idle";
++	pinctrl-0 = <&pcie0_reset_pins>;
++	pinctrl-1 = <&pcie0_default_pins>;
++	pinctrl-2 = <&pcie0_reset_pins>;
++	pinctrl-3 = <&pcie0_pd_pins>;
++};
++
+ &pciephy0 {
+ 	mediatek,short-reach;
+ };
+ 
+ &pio {
++	pcie0_reset_pins: pcie0-reset-pins {
++		pins-perst {
++			pinmux = <PINMUX_GPIO241__FUNC_GPIO241>;
++			output-low;
++		};
++
++		pins-clkreq {
++			pinmux = <PINMUX_GPIO243__FUNC_GPIO243>;
++			bias-pull-up;
++			input-enable;
++		};
++	};
++
++	pcie0_default_pins: pcie0-default-pins {
++		pins {
++			pinmux = <PINMUX_GPIO241__FUNC_PCIE_PERSTN>,
++				 <PINMUX_GPIO243__FUNC_PCIE_CLKREQN>;
++			bias-pull-up;
++		};
++	};
++
++	pcie0_pd_pins: pcie0-power-down-pins {
++		pins-perst {
++			pinmux = <PINMUX_GPIO241__FUNC_GPIO241>;
++			output-low;
++		};
++
++		pins-clkreq {
++			pinmux = <PINMUX_GPIO243__FUNC_GPIO243>;
++			bias-pull-down;
++			input-enable;
++		};
++	};
++
+ 	spi6_pins: spi6-pins {
+ 		pins {
+ 			pinmux = <PINMUX_GPIO81__FUNC_SPI6_B_CLK>,
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index 7b96691..930abba 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -2,6 +2,7 @@
+ #include <dt-bindings/clock/mediatek,mt6991-clock.h>
+ #include <dt-bindings/clock/mediatek,mt8196-clock.h>
+ #include <dt-bindings/power/mediatek,mt6991-power.h>
++#include <dt-bindings/reset/mediatek,mt8196-resets.h>
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
+ 
+ / {
+@@ -236,6 +237,47 @@ pciephy0: phy@16900000 {
+ 			status = "disabled";
+ 		};
+ 
++		pcie0: pcie@16910000 {
++			compatible = "mediatek,mt6991-pcie", "mediatek,mt8196-pcie";
++			device_type = "pci";
++			reg = <0 0x16910000 0 0x4000>;
++			reg-names = "pcie-mac";
++			#address-cells = <3>;
++			#size-cells = <2>;
++			bus-range = <0 255>;
++			ranges = <0x82000000 0 0x50000000 0 0x50000000 0 0x08000000>;
++			linux,pci-domain = <0>;
++			interrupts = <GIC_SPI 337 IRQ_TYPE_LEVEL_HIGH>;
++			#interrupt-cells = <1>;
++			interrupt-map-mask = <0 0 0 7>;
++			interrupt-map = <0 0 0 1 &pcie0_intc 0>,
++					<0 0 0 2 &pcie0_intc 1>,
++					<0 0 0 3 &pcie0_intc 2>,
++					<0 0 0 4 &pcie0_intc 3>;
++			clocks = <&pextp0cfg CLK_PEXT_PEXTP_MAC_P0_PL_P>,
++				 <&pextp0cfg CLK_PEXT_PEXTP_MAC_P0_TL>,
++				 <&pextp0cfg CLK_PEXT_PEXTP_MAC_P0_AHB_APB>,
++				 <&pextp0cfg CLK_PEXT_PEXTP_VLP_AO_P0_LP>,
++				 <&pextp0cfg CLK_PEXT_PEXTP_MAC_P0_REF>,
++				 <&pextp0cfg CLK_PEXT_PEXTP_MAC_P0_AXI_250>;
++			clock-names = "pl_250m", "tl_26m", "bus", "low_power",
++				      "peri_26m", "peri_mem";
++			resets = <&pextp0cfg MT8196_PEXTP0_RST0_PCIE0_PHY>,
++				 <&pextp0cfg MT8196_PEXTP0_RST0_PCIE0_MAC>;
++			reset-names = "phy", "mac";
++			phys = <&pciephy0>;
++			phy-names = "pcie-phy";
++			power-domains = <&spm MT6991_POWER_DOMAIN_PEXTP_MAC0>;
++			num-lanes = <1>;
++			status = "disabled";
++
++			pcie0_intc: interrupt-controller {
++				#address-cells = <0>;
++				#interrupt-cells = <1>;
++				interrupt-controller;
++			};
++		};
++
+ 		pextp0cfg: clock-controller@169b0000 {
+ 			compatible = "mediatek,mt6991-pextp0cfg-ao",
+ 				     "mediatek,mt8196-pextp0cfg-ao", "syscon";
+-- 
+2.50.1 (Apple Git-155)
+

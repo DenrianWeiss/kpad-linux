@@ -1,0 +1,131 @@
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -22,6 +22,13 @@
+ #define MT6991_AUDIO_PWR_CON	0xe4c
+ #define MT6991_AUDIO_PWR_ACK	GENMASK(31, 30)
+ 
++#define AUDIO_ENGEN_CON0	0x14
++#define AUDIO_APLL2_ON		BIT(3)
++#define AFE_APLL2_TUNER_CFG	0x38
++#define APLL2_TUNER_EN		BIT(0)
++#define APLL2_TUNER_MASK	0xfff7
++#define APLL2_TUNER_SETUP	0x0374
++
+ #define ETDM_OUT4_CON0		0x1580
+ #define ETDM_OUT4_CON1		0x1584
+ #define ETDM_OUT4_CON2		0x1588
+@@ -50,7 +57,8 @@
+ };
+ 
+ enum mt6991_mclk_clock {
+-	APLL2_PARENT, AUD2_MUX, MCLK_MUX, MCLK_DIV, NUM_MCLK_CLKS,
++	APLL2_PARENT, AUD2_MUX, MCLK_MUX, MCLK_DIV, ENG2_MUX,
++	APLL2_D4, NUM_MCLK_CLKS,
+ };
+ 
+ struct mt6991_afe {
+@@ -62,6 +70,7 @@
+ 	bool dram_held;
+ 	struct clk_bulk_data bus[NUM_BUS_CLKS];
+ 	struct clk_bulk_data mclk[NUM_MCLK_CLKS];
++	struct clk_bulk_data apll2_gates[2];
+ 	bool mclk_enabled;
+ 	struct clk *clksq;
+ 	void __iomem *base;
+@@ -400,13 +409,50 @@
+ 				  struct snd_soc_dai *dai)
+ {
+ 	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
++	struct clk *engine = afe->mclk[ENG2_MUX].clk;
++	struct regmap *map = afe->common.regmap;
+ 	int ret;
+ 
+ 	if (afe->mclk_enabled)
+ 		return 0;
++
++	ret = clk_set_parent(engine, afe->mclk[APLL2_D4].clk);
++	if (ret)
++		return ret;
++	ret = clk_set_parent(afe->bus[AUDIO_H].clk, afe->mclk[APLL2_PARENT].clk);
++	if (ret)
++		goto idle_engine;
++	ret = clk_bulk_prepare_enable(ARRAY_SIZE(afe->apll2_gates), afe->apll2_gates);
++	if (ret)
++		goto idle_audio;
++
++	ret = regmap_update_bits(map, AFE_APLL2_TUNER_CFG,
++				 APLL2_TUNER_MASK, APLL2_TUNER_SETUP);
++	if (ret)
++		goto disable_gates;
++	ret = regmap_set_bits(map, AFE_APLL2_TUNER_CFG, APLL2_TUNER_EN);
++	if (ret)
++		goto disable_gates;
++	ret = regmap_set_bits(map, AUDIO_ENGEN_CON0, AUDIO_APLL2_ON);
++	if (ret)
++		goto disable_tuner;
+ 	ret = clk_prepare_enable(afe->mclk[MCLK_DIV].clk);
+-	if (!ret)
+-		afe->mclk_enabled = true;
++	if (ret)
++		goto disable_engine;
++
++	afe->mclk_enabled = true;
++	return 0;
++
++disable_engine:
++	regmap_clear_bits(map, AUDIO_ENGEN_CON0, AUDIO_APLL2_ON);
++disable_tuner:
++	regmap_clear_bits(map, AFE_APLL2_TUNER_CFG, APLL2_TUNER_EN);
++disable_gates:
++	clk_bulk_disable_unprepare(ARRAY_SIZE(afe->apll2_gates), afe->apll2_gates);
++idle_audio:
++	clk_set_parent(afe->bus[AUDIO_H].clk, afe->clksq);
++idle_engine:
++	clk_set_parent(engine, afe->clksq);
+ 	return ret;
+ }
+ 
+@@ -414,12 +460,24 @@
+ 			       struct snd_soc_dai *dai)
+ {
+ 	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
++	struct regmap *map = afe->common.regmap;
++	int ret, err;
+ 
+-	if (afe->mclk_enabled) {
+-		clk_disable_unprepare(afe->mclk[MCLK_DIV].clk);
+-		afe->mclk_enabled = false;
+-	}
+-	return 0;
++	if (!afe->mclk_enabled)
++		return 0;
++
++	clk_disable_unprepare(afe->mclk[MCLK_DIV].clk);
++	ret = regmap_clear_bits(map, AUDIO_ENGEN_CON0, AUDIO_APLL2_ON);
++	err = regmap_clear_bits(map, AFE_APLL2_TUNER_CFG, APLL2_TUNER_EN);
++	if (!ret)
++		ret = err;
++	clk_bulk_disable_unprepare(ARRAY_SIZE(afe->apll2_gates), afe->apll2_gates);
++	err = clk_set_parent(afe->bus[AUDIO_H].clk, afe->clksq);
++	if (!ret)
++		ret = err;
++	err = clk_set_parent(afe->mclk[ENG2_MUX].clk, afe->clksq);
++	afe->mclk_enabled = false;
++	return ret ? ret : err;
+ }
+ 
+ static const struct snd_soc_dai_ops i2sout4_ops = {
+@@ -517,6 +575,13 @@
+ 	afe->mclk[AUD2_MUX].id = "ck_mux_aud_2";
+ 	afe->mclk[MCLK_MUX].id = "ck_i2sin0_m_sel";
+ 	afe->mclk[MCLK_DIV].id = "ck_apll12_div_i2sin0";
++	afe->mclk[ENG2_MUX].id = "vlp_mux_aud_eng2";
++	afe->mclk[APLL2_D4].id = "ck_apll2_d4";
++	afe->apll2_gates[0].id = "aud_apll2_clk";
++	afe->apll2_gates[1].id = "aud_apll_tuner2_clk";
++	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(afe->apll2_gates), afe->apll2_gates);
++	if (ret)
++		return dev_err_probe(dev, ret, "getting APLL2 engine clocks\n");
+ 	ret = devm_clk_bulk_get(dev, NUM_MCLK_CLKS, afe->mclk);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "getting I2S4 master clocks\n");

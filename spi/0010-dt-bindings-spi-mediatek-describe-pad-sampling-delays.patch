@@ -1,0 +1,51 @@
+From c0d92f021a12346fc14c3f5d3418a55fc1d20b04 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 02:28:20 +0800
+Subject: [PATCH] dt-bindings: spi: mediatek: describe MT6991 pad sampling
+ delays
+
+---
+ .../bindings/spi/mediatek,spi-mt65xx.yaml     | 20 +++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/spi/mediatek,spi-mt65xx.yaml b/Documentation/devicetree/bindings/spi/mediatek,spi-mt65xx.yaml
+index 3bf3eb1..78e2693 100644
+--- a/Documentation/devicetree/bindings/spi/mediatek,spi-mt65xx.yaml
++++ b/Documentation/devicetree/bindings/spi/mediatek,spi-mt65xx.yaml
+@@ -11,6 +11,15 @@ maintainers:
+ 
+ allOf:
+   - $ref: /schemas/spi/spi-controller.yaml#
++  - if:
++      properties:
++        compatible:
++          not:
++            contains:
++              const: mediatek,mt6991-spi
++    then:
++      properties:
++        mediatek,tickdly: false
+ 
+ properties:
+   compatible:
+@@ -78,6 +87,17 @@ properties:
+       - const: spi-clk
+       - const: hclk
+ 
++  mediatek,tickdly:
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    minItems: 1
++    maxItems: 4
++    items:
++      minimum: 0
++      maximum: 127
++    description:
++      Receive sampling delay in controller ticks, indexed by physical pad
++      group. If supplied, include an entry for each selected pad group.
++
+   mediatek,pad-select:
+     $ref: /schemas/types.yaml#/definitions/uint32-array
+     minItems: 1
+-- 
+2.50.1 (Apple Git-155)
+

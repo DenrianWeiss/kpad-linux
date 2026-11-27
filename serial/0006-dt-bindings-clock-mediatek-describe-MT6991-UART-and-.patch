@@ -1,0 +1,82 @@
+From aba4499c6020420f3a0ca030d0cda7006f3bfdaf Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 01:40:04 +0800
+Subject: [PATCH 6/8] dt-bindings: clock: mediatek: describe MT6991 UART and
+ SPI clock blocks
+
+---
+ .../bindings/clock/mediatek,mt8196-clock.yaml |  1 +
+ .../clock/mediatek,mt8196-sys-clock.yaml      |  2 ++
+ .../devicetree/bindings/mfd/syscon.yaml       |  1 +
+ .../dt-bindings/clock/mediatek,mt6991-clock.h | 22 +++++++++++++++++++
+ 4 files changed, 26 insertions(+)
+ create mode 100644 include/dt-bindings/clock/mediatek,mt6991-clock.h
+
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
+index bfdbd2e..87a3aae 100644
+--- a/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
+@@ -24,6 +24,7 @@ properties:
+   compatible:
+     items:
+       - enum:
++          - mediatek,mt6991-pericfg-ao
+           - mediatek,mt8196-imp-iic-wrap-c
+           - mediatek,mt8196-imp-iic-wrap-e
+           - mediatek,mt8196-imp-iic-wrap-n
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt8196-sys-clock.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt8196-sys-clock.yaml
+index 660ab64..5b1d1e1 100644
+--- a/Documentation/devicetree/bindings/clock/mediatek,mt8196-sys-clock.yaml
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt8196-sys-clock.yaml
+@@ -27,6 +27,8 @@ properties:
+   compatible:
+     items:
+       - enum:
++          - mediatek,mt6991-apmixedsys
++          - mediatek,mt6991-topckgen
+           - mediatek,mt8196-apmixedsys
+           - mediatek,mt8196-armpll-b-pll-ctrl
+           - mediatek,mt8196-armpll-bl-pll-ctrl
+diff --git a/Documentation/devicetree/bindings/mfd/syscon.yaml b/Documentation/devicetree/bindings/mfd/syscon.yaml
+index 945a168..05dce02 100644
+--- a/Documentation/devicetree/bindings/mfd/syscon.yaml
++++ b/Documentation/devicetree/bindings/mfd/syscon.yaml
+@@ -85,6 +85,7 @@ properties:
+               - mediatek,mt2701-pctl-a-syscfg
+               - mediatek,mt2712-pctl-a-syscfg
+               - mediatek,mt6397-pctl-pmic-syscfg
++              - mediatek,mt6991-hwv
+               - mediatek,mt7981-topmisc
+               - mediatek,mt7988-topmisc
+               - mediatek,mt8135-pctl-a-syscfg
+diff --git a/include/dt-bindings/clock/mediatek,mt6991-clock.h b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+new file mode 100644
+index 0000000..35cb2a4
+--- /dev/null
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -0,0 +1,22 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++#ifndef _DT_BINDINGS_CLK_MEDIATEK_MT6991_H
++#define _DT_BINDINGS_CLK_MEDIATEK_MT6991_H
++
++#define MT6991_CLK_APMIXED_MAINPLL            0
++#define MT6991_CLK_APMIXED_UNIVPLL            1
++
++#define MT6991_CLK_TOP_MAINPLL_D4_D4      0
++#define MT6991_CLK_TOP_MAINPLL_D6_D2      1
++#define MT6991_CLK_TOP_UNIVPLL_D4_D4      2
++#define MT6991_CLK_TOP_UNIVPLL_D5_D4      3
++#define MT6991_CLK_TOP_UNIVPLL_D6_D2      4
++#define MT6991_CLK_TOP_UNIVPLL_D6_D4      5
++#define MT6991_CLK_TOP_UNIVPLL_D6_D8      6
++#define MT6991_CLK_TOP_UNIVPLL_192M       7
++#define MT6991_CLK_TOP_UART               8
++#define MT6991_CLK_TOP_SPI6_BCLK          9
++
++#define MT6991_CLK_PERI_UART0_BCLK         0
++#define MT6991_CLK_PERI_SPI6_BCLK          1
++
++#endif
+-- 
+2.50.1 (Apple Git-155)
+

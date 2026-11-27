@@ -1,0 +1,44 @@
+From e6d9fac06fe218e274b9fcf70a65f991d7631eb4 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 05:59:42 +0800
+Subject: [PATCH] arm64: dts: mediatek: describe the MT6991 SPM hardware voter
+
+---
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index 930abba..ad7836a 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -191,8 +191,26 @@ clock-controller@10000800 {
+ 		};
+ 
+ 		hwv: syscon@14500000 {
+-			compatible = "mediatek,mt6991-hwv", "syscon";
++			compatible = "mediatek,mt6991-hwv", "syscon", "simple-mfd";
+ 			reg = <0 0x14500000 0 0x3000>;
++
++			spm_hwv: power-controller {
++				compatible = "mediatek,mt6991-hwv-scp-power-controller";
++				#address-cells = <1>;
++				#size-cells = <0>;
++				#power-domain-cells = <1>;
++				status = "disabled";
++
++				power-domain@0 {
++					reg = <MT6991_POWER_DOMAIN_MM_PROC_DORMANT>;
++					#power-domain-cells = <0>;
++				};
++
++				power-domain@1 {
++					reg = <MT6991_POWER_DOMAIN_SSR>;
++					#power-domain-cells = <0>;
++				};
++			};
+ 		};
+ 
+ 		uart0: serial@16000000 {
+-- 
+2.50.1 (Apple Git-155)
+

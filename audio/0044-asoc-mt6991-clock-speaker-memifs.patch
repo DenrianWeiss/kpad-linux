@@ -1,0 +1,37 @@
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -89,6 +89,7 @@
+ 	struct clk_bulk_data mclk[NUM_MCLK_CLKS];
+ 	struct clk_bulk_data apll2_gates[2];
+ 	bool mclk_enabled;
++	bool engine_acquired;
+ 	struct clk *clksq;
+ 	void __iomem *base;
+ 	struct regmap *spm;
+@@ -606,6 +607,13 @@
+ 	if (ret)
+ 		goto disable_input;
+ 
++	/* The APLL alone does not clock either speaker MEMIF. */
++	ret = regmap_update_bits_check(map, AUDIO_ENGEN_CON0, BIT(0), BIT(0),
++				       &afe->engine_acquired);
++	if (ret) {
++		regmap_clear_bits(map, ETDM_OUT4_CON0, ETDM_ENABLE);
++		goto disable_input;
++	}
+ 	afe->mclk_enabled = true;
+ 	return 0;
+ 
+@@ -646,6 +654,12 @@
+ 	if (!afe->mclk_enabled)
+ 		return ret;
+ 
++	if (afe->engine_acquired) {
++		err = regmap_clear_bits(map, AUDIO_ENGEN_CON0, BIT(0));
++		if (!ret)
++			ret = err;
++		afe->engine_acquired = false;
++	}
+ 	err = regmap_clear_bits(map, ETDM_OUT4_CON0, ETDM_ENABLE);
+ 	if (!ret)
+ 		ret = err;

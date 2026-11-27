@@ -1,0 +1,29 @@
+From 353c6257652582dacd6fb602b63d225713fae3b6 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:48:35 +0800
+Subject: [PATCH] dt-bindings: pinctrl: mediatek: allow GPIO output control on
+ MT8196
+
+Allow the output driver to be disconnected while preserving the output latch and input buffer configuration. This is needed for input-only connectivity pin states on the compatible MT6991 controller.
+---
+ .../devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml  | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml b/Documentation/devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml
+index cb7d4e4..33a3093 100644
+--- a/Documentation/devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml
++++ b/Documentation/devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml
+@@ -162,6 +162,10 @@ patternProperties:
+ 
+           bias-disable: true
+ 
++          output-enable: true
++
++          output-disable: true
++
+           output-high: true
+ 
+           output-low: true
+-- 
+2.50.1 (Apple Git-155)
+

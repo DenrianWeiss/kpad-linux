@@ -1,0 +1,116 @@
+From a38919dd5f52888ae0dfb4892b4d389fd3197502 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:25:05 +0800
+Subject: [PATCH] arm64: dts: mediatek: wire MT6991 PCIe0 PHY to the power
+ controller
+
+Model the five peripheral domains including the MAC parents of the PHY domains. Describe the two PCIe PHY register banks, clock gates and Turner short-reach board routing. Leave the controller and PHY disabled until the board consumers can take ownership.
+---
+ .../dts/mediatek/mt6991-xiaomi-turner.dts     |  4 ++
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi      | 62 +++++++++++++++++++
+ 2 files changed, 66 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+index ecd83f3..c1f2e85 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
++++ b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+@@ -35,6 +35,10 @@ memory@80000000 {
+ 	};
+ };
+ 
++&pciephy0 {
++	mediatek,short-reach;
++};
++
+ &pio {
+ 	spi6_pins: spi6-pins {
+ 		pins {
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index 0805875..7b96691 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -1,5 +1,7 @@
+ // SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+ #include <dt-bindings/clock/mediatek,mt6991-clock.h>
++#include <dt-bindings/clock/mediatek,mt8196-clock.h>
++#include <dt-bindings/power/mediatek,mt6991-power.h>
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
+ 
+ / {
+@@ -221,6 +223,19 @@ pericfg: clock-controller@16640000 {
+ 			#clock-cells = <1>;
+ 		};
+ 
++		pciephy0: phy@16900000 {
++			compatible = "mediatek,mt6991-pcie-phy";
++			reg = <0 0x16900000 0 0x10000>, <0 0x16920000 0 0x10000>;
++			reg-names = "sif", "ckm";
++			clocks = <&pextp0cfg CLK_PEXT_PEXTP_PHY_P0_PEXTP_REF>,
++				 <&pextp0cfg CLK_PEXT_PEXTP_PHY_P0_MCU_BUS>;
++			clock-names = "ref", "mcu";
++			num-lanes = <1>;
++			power-domains = <&spm MT6991_POWER_DOMAIN_PEXTP_PHY0>;
++			#phy-cells = <0>;
++			status = "disabled";
++		};
++
+ 		pextp0cfg: clock-controller@169b0000 {
+ 			compatible = "mediatek,mt6991-pextp0cfg-ao",
+ 				     "mediatek,mt8196-pextp0cfg-ao", "syscon";
+@@ -228,6 +243,53 @@ pextp0cfg: clock-controller@169b0000 {
+ 			#clock-cells = <1>;
+ 			#reset-cells = <1>;
+ 		};
++		syscon@1c004000 {
++			compatible = "mediatek,mt6991-scpsys", "syscon", "simple-mfd";
++			reg = <0 0x1c004000 0 0x1000>;
++
++			spm: power-controller {
++				compatible = "mediatek,mt6991-power-controller";
++				access-controllers = <&spm_bus_prot>;
++				#address-cells = <1>;
++				#size-cells = <0>;
++				#power-domain-cells = <1>;
++				status = "disabled";
++
++				power-domain@2 {
++					reg = <MT6991_POWER_DOMAIN_SSUSB_P0>;
++					#address-cells = <1>;
++					#size-cells = <0>;
++					#power-domain-cells = <1>;
++
++					power-domain@3 {
++						reg = <MT6991_POWER_DOMAIN_SSUSB_DP_PHY_P0>;
++						#power-domain-cells = <0>;
++					};
++				};
++
++				power-domain@4 {
++					reg = <MT6991_POWER_DOMAIN_SSUSB_P1>;
++					#power-domain-cells = <0>;
++				};
++
++				power-domain@7 {
++					reg = <MT6991_POWER_DOMAIN_PEXTP_MAC0>;
++					#address-cells = <1>;
++					#size-cells = <0>;
++					#power-domain-cells = <1>;
++
++					power-domain@a {
++						reg = <MT6991_POWER_DOMAIN_PEXTP_PHY0>;
++						#power-domain-cells = <0>;
++					};
++				};
++			};
++		};
++
++		spm_bus_prot: syscon@1c00d000 {
++			compatible = "mediatek,mt6991-spm-bus-protection", "syscon";
++			reg = <0 0x1c00d000 0 0x1000>;
++		};
+ 	};
+ 
+ 	timer {
+-- 
+2.50.1 (Apple Git-155)
+

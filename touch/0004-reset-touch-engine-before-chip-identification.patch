@@ -1,0 +1,48 @@
+Subject: [PATCH] Input: nt36536e: reset the engine before probing the trim ID
+
+--- a/drivers/input/touchscreen/nt36536e/nt36536-fw.c
++++ b/drivers/input/touchscreen/nt36536e/nt36536-fw.c
+@@ -91,7 +91,7 @@
+ 	return ret;
+ }
+ 
+-static int identify(struct nvt_bus *bus, u32 *event)
++static int read_trim_id(struct nvt_bus *bus, u32 *event)
+ {
+ 	u8 id[6] = {}, topology;
+ 	int ret;
+@@ -104,11 +104,33 @@
+ 	if (ret)
+ 		return ret;
+ 	if ((id[0] != 0x14 && id[0] != 0x15) ||
+-	    id[3] != 0x23 || id[4] != 0x65 || id[5] != 0x03)
++	    id[3] != 0x23 || id[4] != 0x65 || id[5] != 0x03) {
++		dev_notice(&bus->spi->dev, "unexpected trim ID %*ph\n", 6, id);
+ 		return -ENODEV;
++	}
+ 	ret = read_bytes(bus, TOPOLOGY, &topology, 1);
+ 	if (!ret)
+ 		*event = topology & 1 ? 0x130900 : 0x133300;
++	return ret;
++}
++
++static int identify(struct nvt_bus *bus, u32 *event)
++{
++	int ret, attempt;
++
++	/* The digitizer shares the panel reset pin. Use the stock SPI
++	 * engineering reset once, before entering the trim-ID probe loop.
++	 */
++	ret = write_value(bus, 0x7fff80, 0x5a, 1);
++	if (ret)
++		return ret;
++	usleep_range(11000, 12000);
++	for (attempt = 0; attempt < 5; attempt++) {
++		ret = read_trim_id(bus, event);
++		if (ret != -ENODEV)
++			return ret;
++		msleep(10);
++	}
+ 	return ret;
+ }
+ 

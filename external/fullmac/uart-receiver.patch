@@ -1,0 +1,40 @@
+--- a/drivers/misc/mediatek/connectivity/bt/linux_v2/uart_daemon/uart_launcher.c
++++ b/drivers/misc/mediatek/connectivity/bt/linux_v2/uart_daemon/uart_launcher.c
+@@ -113,7 +113,7 @@
+     cfmakeraw(&ti);
+ 
+     BPRINT_I("ti.c_cflag = 0x%08x", ti.c_cflag);
+-    ti.c_cflag |= CLOCAL;
++    ti.c_cflag |= CLOCAL | CREAD;
+     BPRINT_I("CLOCAL = 0x%x", CLOCAL);
+     BPRINT_I("(ori)ti.c_iflag = 0x%08x", ti.c_iflag);
+     BPRINT_I("(ori)ti.c_cflag = 0x%08x", ti.c_cflag);
+@@ -134,7 +134,7 @@
+     /* MTK Software FC */
+     case UART_MTK_SW_FC:
+         ti.c_iflag |= CRTSCTS;
+-        ti.c_cflag &= ~(NOFLSH);
++        ti.c_cflag &= ~CRTSCTS;
+         break;
+     /* default disable flow control */
+     default:
+--- a/drivers/misc/mediatek/connectivity/bt/linux_v2/uart/btmtktty.c
++++ b/drivers/misc/mediatek/connectivity/bt/linux_v2/uart/btmtktty.c
+@@ -932,7 +932,7 @@
+ 	/* MTK Software FC */
+ 	case UART_MTK_SW_FC:
+ 		new_termios.c_iflag |= CRTSCTS;
+-		new_termios.c_cflag &= ~(NOFLSH);
++		new_termios.c_cflag &= ~CRTSCTS;
+ 		break;
+ 	/* default disable flow control */
+ 	default:
+@@ -1316,7 +1316,7 @@
+ 	/* MTK Software FC */
+ 	case UART_MTK_SW_FC:
+ 		new_termios.c_iflag |= CRTSCTS;
+-		new_termios.c_cflag &= ~(NOFLSH);
++		new_termios.c_cflag &= ~CRTSCTS;
+ 		break;
+ 	/* default disable flow control */
+ 	default:

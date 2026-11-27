@@ -1,0 +1,74 @@
+From 6554014e372d61f9aa9c3b587fa7e2f44dc7c1b3 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 06:11:10 +0800
+Subject: [PATCH] clk: mediatek: register the four MT6991 MMSYS1 DSI gates
+
+---
+ drivers/clk/mediatek/clk-mt8196-disp1.c | 14 ++++++++++++++
+ drivers/soc/mediatek/mtk-mmsys.c        |  5 +++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-disp1.c b/drivers/clk/mediatek/clk-mt8196-disp1.c
+index 3bbec79..ab70da6 100644
+--- a/drivers/clk/mediatek/clk-mt8196-disp1.c
++++ b/drivers/clk/mediatek/clk-mt8196-disp1.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2025 Collabora Ltd.
+  *                    Laura Nao <laura.nao@collabora.com>
+  */
++#include <dt-bindings/clock/mediatek,mt6991-clock.h>
+ #include <dt-bindings/clock/mediatek,mt8196-clock.h>
+ 
+ #include <linux/clk-provider.h>
+@@ -145,12 +146,25 @@ static const struct mtk_gate mm1_clks[] = {
+ 	GATE_HWV_MM11(CLK_MM1_F26M, "mm1_f26m_ck", "clk26m", 28),
+ };
+ 
++static const struct mtk_gate mt6991_dsi_clks[] = {
++	GATE_HWV_MM10(MT6991_CLK_MM1_DSI0_ENGINE, "mm1_dsi0_engine", "disp", 22),
++	GATE_HWV_MM10(MT6991_CLK_MM1_DSI1_ENGINE, "mm1_dsi1_engine", "disp", 23),
++	GATE_HWV_MM11(MT6991_CLK_MM1_DSI0_DIGITAL, "mm1_dsi0_digital", "clk26m", 13),
++	GATE_HWV_MM11(MT6991_CLK_MM1_DSI1_DIGITAL, "mm1_dsi1_digital", "clk26m", 14),
++};
++
++static const struct mtk_clk_desc mt6991_mm1_desc = {
++	.clks = mt6991_dsi_clks,
++	.num_clks = ARRAY_SIZE(mt6991_dsi_clks),
++};
++
+ static const struct mtk_clk_desc mm1_mcd = {
+ 	.clks = mm1_clks,
+ 	.num_clks = ARRAY_SIZE(mm1_clks),
+ };
+ 
+ static const struct platform_device_id clk_mt8196_disp1_id_table[] = {
++	{ .name = "clk-mt6991-disp1", .driver_data = (kernel_ulong_t)&mt6991_mm1_desc },
+ 	{ .name = "clk-mt8196-disp1", .driver_data = (kernel_ulong_t)&mm1_mcd },
+ 	{ /* sentinel */ }
+ };
+diff --git a/drivers/soc/mediatek/mtk-mmsys.c b/drivers/soc/mediatek/mtk-mmsys.c
+index 2f3e077..231a4a0 100644
+--- a/drivers/soc/mediatek/mtk-mmsys.c
++++ b/drivers/soc/mediatek/mtk-mmsys.c
+@@ -53,6 +53,10 @@ static const struct mtk_mmsys_driver_data mt6797_mmsys_driver_data = {
+ 	.clk_driver = "clk-mt6797-mm",
+ };
+ 
++static const struct mtk_mmsys_driver_data mt6991_mmsys1_driver_data = {
++	.clk_driver = "clk-mt6991-disp1",
++};
++
+ static const struct mtk_mmsys_driver_data mt8167_mmsys_driver_data = {
+ 	.clk_driver = "clk-mt8167-mm",
+ 	.routes = mt8167_mmsys_routing_table,
+@@ -463,6 +467,7 @@ static const struct of_device_id of_match_mtk_mmsys[] = {
+ 	{ .compatible = "mediatek,mt6779-mmsys", .data = &mt6779_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt6795-mmsys", .data = &mt6795_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt6797-mmsys", .data = &mt6797_mmsys_driver_data },
++	{ .compatible = "mediatek,mt6991-mmsys1", .data = &mt6991_mmsys1_driver_data },
+ 	{ .compatible = "mediatek,mt8167-mmsys", .data = &mt8167_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt8173-mmsys", .data = &mt8173_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt8183-mmsys", .data = &mt8183_mmsys_driver_data },
+-- 
+2.50.1 (Apple Git-155)
+

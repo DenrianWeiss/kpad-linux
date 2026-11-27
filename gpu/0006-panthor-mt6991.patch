@@ -1,0 +1,25 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] drm/panthor: configure L2 address hashing on MediaTek MT6991
+
+The MT6991 GPU uses the same three ASN hash values as MT8196. Match
+its compatible explicitly so it receives the required L2 programming.
+
+--- a/drivers/gpu/drm/panthor/panthor_drv.c
++++ b/drivers/gpu/drm/panthor/panthor_drv.c
+@@ -1876,13 +1876,14 @@
+ 
+ ATTRIBUTE_GROUPS(panthor);
+ 
+-static const struct panthor_soc_data soc_data_mediatek_mt8196 = {
++static const struct panthor_soc_data soc_data_mediatek_asn_hash = {
+ 	.asn_hash_enable = true,
+ 	.asn_hash = { 0xb, 0xe, 0x0, },
+ };
+ 
+ static const struct of_device_id dt_match[] = {
+-	{ .compatible = "mediatek,mt8196-mali", .data = &soc_data_mediatek_mt8196, },
++	{ .compatible = "mediatek,mt6991-mali", .data = &soc_data_mediatek_asn_hash, },
++	{ .compatible = "mediatek,mt8196-mali", .data = &soc_data_mediatek_asn_hash, },
+ 	{ .compatible = "rockchip,rk3588-mali" },
+ 	{ .compatible = "arm,mali-valhall-csf" },
+ 	{}

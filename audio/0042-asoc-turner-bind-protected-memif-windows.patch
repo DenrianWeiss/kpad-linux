@@ -1,0 +1,243 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -819,6 +819,28 @@
+ 
+ enum turner_ring { APP_RING, OUTPUT_RING, IV_RING };
+ 
++static u32 mt6991_memif_offset(struct mt6991_adsp_core *a, enum turner_ring ring)
++{
++	return SZ_4K + ALIGN(a->pcm_bytes, SZ_4K) + (ring == IV_RING ? SZ_16K : 0);
++}
++
++int mt6991_adsp_memif_windows(struct device *dev, phys_addr_t *output, phys_addr_t *iv)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	u32 last;
++
++	guard(mutex)(&a->boot_lock);
++	if (!a->pcm_open || !a->pair_ready || !a->pcm_bytes)
++		return -EHOSTDOWN;
++	last = mt6991_memif_offset(a, IV_RING);
++	if (last > a->audio_size || SZ_16K > a->audio_size - last)
++		return -ERANGE;
++	*output = a->audio_base + mt6991_memif_offset(a, OUTPUT_RING);
++	*iv = a->audio_base + last;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(mt6991_adsp_memif_windows);
++
+ /* Both hardware interfaces use the 48 kHz PCM32 stereo music profile.
+  * A 512-frame period occupies 4096 bytes. Each has four periods.
+  */
+@@ -833,9 +855,7 @@
+ 	u64 start;
+ 
+ 	if (ring != APP_RING) {
+-		offset += ALIGN(a->pcm_bytes, SZ_4K);
+-		if (ring == IV_RING)
+-			offset += SZ_16K;
++		offset = mt6991_memif_offset(a, ring);
+ 		format = 10; /* firmware ABI: S32_LE */
+ 		bytes = SZ_16K;
+ 		period = start_threshold = 512;
+--- a/include/linux/soc/mediatek/mt6991-adsp-ipi.h
++++ b/include/linux/soc/mediatek/mt6991-adsp-ipi.h
+@@ -30,6 +30,7 @@
+ struct device *mt6991_adsp_link_playback(struct device *consumer);
+ int mt6991_adsp_pcm_open(struct device *dev);
+ int mt6991_adsp_pcm_hw_params(struct device *dev, u32 format, u32 bytes);
++int mt6991_adsp_memif_windows(struct device *dev, phys_addr_t *output, phys_addr_t *iv);
+ int mt6991_adsp_pcm_prepare(struct device *dev, u32 period, u32 periods,
+ 			    u32 start_threshold, u32 stop_threshold);
+ int mt6991_adsp_pcm_hw_free(struct device *dev);
+--- /dev/null
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.h
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __MT6991_AFE_H
++#define __MT6991_AFE_H
++
++#include <linux/types.h>
++
++struct snd_soc_dai;
++int mt6991_afe_set_speaker_windows(struct snd_soc_dai *dai, phys_addr_t output, phys_addr_t iv);
++
++#endif
+--- a/sound/soc/mediatek/mt6991/turner.c
++++ b/sound/soc/mediatek/mt6991/turner.c
+@@ -7,6 +7,8 @@
+ #include <linux/soc/mediatek/mt6991-adsp-ipi.h>
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
++
++#include "mt6991-afe.h"
+ 
+ struct turner_audio {
+ 	struct snd_soc_card card;
+@@ -110,6 +112,15 @@
+ 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(s);
+ 	struct turner_audio *audio = snd_soc_card_get_drvdata(rtd->card);
+ 	struct snd_pcm_runtime *rt = s->runtime;
++	phys_addr_t output, iv;
++	int ret;
++
++	ret = mt6991_adsp_memif_windows(audio->dsp, &output, &iv);
++	if (ret)
++		return ret;
++	ret = mt6991_afe_set_speaker_windows(snd_soc_rtd_to_cpu(rtd, 0), output, iv);
++	if (ret)
++		return ret;
+ 
+ 	return mt6991_adsp_pcm_prepare(audio->dsp, rt->period_size, rt->periods,
+ 				       min_t(unsigned long, rt->start_threshold, U32_MAX),
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -4,6 +4,7 @@
+ #include <linux/bitfield.h>
+ #include <linux/clk.h>
+ #include <linux/dma-mapping.h>
++#include <linux/dma-direct.h>
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/mfd/syscon.h>
+@@ -15,6 +16,7 @@
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
+ 
++#include "mt6991-afe.h"
+ #include "../common/mtk-base-afe.h"
+ #include "../common/mtk-afe-fe-dai.h"
+ #include "../common/mtk-afe-platform-driver.h"
+@@ -82,6 +84,7 @@
+ 	spinlock_t irq_lock;
+ 	int irq;
+ 	bool dram_held;
++	bool speaker_windows_set;
+ 	struct clk_bulk_data bus[NUM_BUS_CLKS];
+ 	struct clk_bulk_data mclk[NUM_MCLK_CLKS];
+ 	struct clk_bulk_data apll2_gates[2];
+@@ -380,6 +383,94 @@
+ 	{ AUD_TOP_CFG_VLP_RG, I2S4_NEG_LATCH, 0 },
+ };
+ 
++#define DL_24CH_BASE_MSB	0x4620
++#define VUL3_BASE_MSB		0x4df0
++#define VUL3_CON0		0x4e10
++
++/* BASE and END are inclusive, with a separate high word per address.
++ * CUR and CON0 remain owned by the engine and are never written here.
++ */
++static int mt6991_write_window(struct regmap *map, unsigned int reg,
++			       dma_addr_t base, dma_addr_t end)
++{
++	unsigned int regs[] = { reg, reg + 4, reg + 16, reg + 20 };
++	u32 words[] = { upper_32_bits(base), lower_32_bits(base),
++			upper_32_bits(end), lower_32_bits(end) };
++	unsigned int value;
++	int i, ret;
++
++	for (i = 0; i < ARRAY_SIZE(regs); i++) {
++		ret = regmap_write(map, regs[i], words[i]);
++		if (ret)
++			return ret;
++		ret = regmap_read(map, regs[i], &value);
++		if (ret)
++			return ret;
++		if (value != words[i])
++			return -EIO;
++	}
++	return 0;
++}
++
++static int mt6991_window_idle(struct regmap *map, unsigned int reg, u32 enable)
++{
++	u32 value;
++	int ret = regmap_read(map, reg, &value);
++
++	return ret ?: ((value & enable) ? -EBUSY : 0);
++}
++
++static int mt6991_speaker_windows_idle(struct regmap *map)
++{
++	int ret = mt6991_window_idle(map, DL_24CH_BASE_MSB + 32, BIT(31));
++
++	return ret ?: mt6991_window_idle(map, VUL3_CON0, BIT(28));
++}
++
++static int mt6991_clear_windows(struct mt6991_afe *afe)
++{
++	struct regmap *map = afe->common.regmap;
++	int ret, err;
++
++	if (!afe->speaker_windows_set)
++		return 0;
++	ret = mt6991_speaker_windows_idle(map);
++	if (ret)
++		return ret;
++	/* The low nibble of END always reads as 0xf on this SoC. */
++	ret = mt6991_write_window(map, DL_24CH_BASE_MSB, 0, 15);
++	err = mt6991_write_window(map, VUL3_BASE_MSB, 0, 15);
++	if (!ret && !err)
++		afe->speaker_windows_set = false;
++	return ret ?: err;
++}
++
++int mt6991_afe_set_speaker_windows(struct snd_soc_dai *dai, phys_addr_t output, phys_addr_t iv)
++{
++	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
++	struct regmap *map = afe->common.regmap;
++	struct device *dev = afe->common.dev;
++	int ret;
++
++	/* The stock AFE and DSP use the same direct bus addresses. */
++	if (device_iommu_mapped(dev) || !output || !IS_ALIGNED(output, SZ_4K) ||
++	    output > DMA_BIT_MASK(34) - 2 * SZ_16K + 1 || iv != output + SZ_16K ||
++	    phys_to_dma(dev, output) != output ||
++	    phys_to_dma(dev, iv + SZ_16K - 1) != iv + SZ_16K - 1)
++		return -ERANGE;
++	ret = mt6991_speaker_windows_idle(map);
++	if (ret)
++		return ret;
++	afe->speaker_windows_set = true;
++	ret = mt6991_write_window(map, VUL3_BASE_MSB, iv, iv + SZ_16K - 1);
++	if (!ret)
++		ret = mt6991_write_window(map, DL_24CH_BASE_MSB, output, output + SZ_16K - 1);
++	if (ret && mt6991_clear_windows(afe))
++		dev_err(dev, "failed to clear partial speaker DMA windows\n");
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt6991_afe_set_speaker_windows);
++
+ /* Stock Turner crossbar: I2SIN4 feeds VUL3; DL_24CH feeds I2SOUT4.
+  * Include the direct DL0 bits in the output mask to exclude a bypass.
+  * Each caller holds the AFE runtime PM reference.
+@@ -546,7 +637,10 @@
+ 	struct regmap *map = afe->common.regmap;
+ 	int ret, err;
+ 
+-	ret = mt6991_speaker_routes(map, false);
++	ret = mt6991_clear_windows(afe);
++	err = mt6991_speaker_routes(map, false);
++	if (!ret)
++		ret = err;
+ 	if (ret)
+ 		dev_err(dai->dev, "speaker route cleanup failed: %d\n", ret);
+ 	else
+@@ -645,7 +739,7 @@
+ 
+ static const struct regmap_config dl0_regmap = {
+ 	.precious_reg = mt6991_dl0_precious_reg,
+-	.reg_bits = 32, .val_bits = 32, .reg_stride = 4, .max_register = AFE_DL0_CON0,
++	.reg_bits = 32, .val_bits = 32, .reg_stride = 4, .max_register = VUL3_CON0,
+ };
+ 
+ static int mt6991_afe_probe(struct platform_device *pdev)
+@@ -687,7 +781,7 @@
+ 
+ 	/* The first page is also mapped by the audiosys clock provider. */
+ 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+-	if (!res || resource_size(res) < AFE_DL0_CON0 + sizeof(u32))
++	if (!res || resource_size(res) < VUL3_CON0 + sizeof(u32))
+ 		return -EINVAL;
+ 	afe->base = devm_ioremap(dev, res->start, resource_size(res));
+ 	if (!afe->base)

@@ -1,0 +1,148 @@
+From a80185d36f797770591ca09107eca56231f1c4d4 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 01:12:58 +0800
+Subject: [PATCH 2/2] arm64: dts: mediatek: add MT6991 architectural devices
+ and Redmi K Pad
+
+---
+ arch/arm64/boot/dts/mediatek/Makefile         |  1 +
+ .../dts/mediatek/mt6991-xiaomi-turner.dts     | 16 ++++
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi      | 91 +++++++++++++++++++
+ 3 files changed, 108 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+ create mode 100644 arch/arm64/boot/dts/mediatek/mt6991.dtsi
+
+diff --git a/arch/arm64/boot/dts/mediatek/Makefile b/arch/arm64/boot/dts/mediatek/Makefile
+index a86fb31..3ab8dbb 100644
+--- a/arch/arm64/boot/dts/mediatek/Makefile
++++ b/arch/arm64/boot/dts/mediatek/Makefile
+@@ -6,6 +6,7 @@ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6795-evb.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6795-sony-xperia-m5.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6797-evb.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt6797-x20-dev.dtb
++dtb-$(CONFIG_ARCH_MEDIATEK) += mt6991-xiaomi-turner.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt7622-rfb1.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt7622-bananapi-bpi-r64.dtb
+ dtb-$(CONFIG_ARCH_MEDIATEK) += mt7981b-cudy-wr3000-v1.dtb
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+new file mode 100644
+index 0000000..88a8b45
+--- /dev/null
++++ b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+@@ -0,0 +1,16 @@
++// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
++/dts-v1/;
++
++#include "mt6991.dtsi"
++
++/ {
++	model = "Xiaomi Redmi K Pad";
++	compatible = "xiaomi,turner", "mediatek,mt6991";
++	chassis-type = "tablet";
++
++	/* Boot firmware must supply the final DRAM banks and carveouts. */
++	memory@80000000 {
++		device_type = "memory";
++		reg = <0 0x80000000 0 0>;
++	};
++};
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+new file mode 100644
+index 0000000..70b3e15
+--- /dev/null
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -0,0 +1,91 @@
++// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
++#include <dt-bindings/interrupt-controller/arm-gic.h>
++
++/ {
++	#address-cells = <2>;
++	#size-cells = <2>;
++	interrupt-parent = <&gic>;
++
++	cpus {
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		cpu@0 {
++			compatible = "arm,cortex-a720";
++			device_type = "cpu";
++			reg = <0x0>;
++			enable-method = "psci";
++		};
++
++		cpu@100 {
++			compatible = "arm,cortex-a720";
++			device_type = "cpu";
++			reg = <0x100>;
++			enable-method = "psci";
++		};
++
++		cpu@200 {
++			compatible = "arm,cortex-a720";
++			device_type = "cpu";
++			reg = <0x200>;
++			enable-method = "psci";
++		};
++
++		cpu@300 {
++			compatible = "arm,cortex-a720";
++			device_type = "cpu";
++			reg = <0x300>;
++			enable-method = "psci";
++		};
++
++		cpu@400 {
++			compatible = "arm,cortex-x4";
++			device_type = "cpu";
++			reg = <0x400>;
++			enable-method = "psci";
++		};
++
++		cpu@500 {
++			compatible = "arm,cortex-x4";
++			device_type = "cpu";
++			reg = <0x500>;
++			enable-method = "psci";
++		};
++
++		cpu@600 {
++			compatible = "arm,cortex-x4";
++			device_type = "cpu";
++			reg = <0x600>;
++			enable-method = "psci";
++		};
++
++		cpu@700 {
++			compatible = "arm,cortex-x925";
++			device_type = "cpu";
++			reg = <0x700>;
++			enable-method = "psci";
++		};
++	};
++
++	gic: interrupt-controller@c400000 {
++		compatible = "arm,gic-v3";
++		reg = <0 0x0c400000 0 0x40000>,
++		      <0 0x0c440000 0 0x200000>;
++		#interrupt-cells = <3>;
++		interrupt-controller;
++		interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH>;
++	};
++
++	psci {
++		compatible = "arm,psci-1.0";
++		method = "smc";
++	};
++
++	timer {
++		compatible = "arm,armv8-timer";
++		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_PPI 14 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_PPI 11 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_PPI 10 IRQ_TYPE_LEVEL_HIGH>;
++	};
++};
+-- 
+2.50.1 (Apple Git-155)
+

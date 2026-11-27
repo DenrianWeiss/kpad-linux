@@ -1,0 +1,234 @@
+From 4019393b57460a873ef18af4b51eb67b0854fecf Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 09:41:09 +0800
+Subject: [PATCH 86/87] clk: mediatek: register MT6991 display and overlay
+ mutex gates
+
+---
+ drivers/clk/mediatek/clk-mt8196-disp0.c | 11 ++++++++++
+ drivers/clk/mediatek/clk-mt8196-disp1.c |  7 +++---
+ drivers/clk/mediatek/clk-mt8196-ovl0.c  | 11 ++++++++++
+ drivers/clk/mediatek/clk-mt8196-ovl1.c  | 11 ++++++++++
+ drivers/soc/mediatek/mtk-mmsys.c        | 29 ++++++++++++++++++++-----
+ drivers/soc/mediatek/mtk-mmsys.h        |  4 ++--
+ 6 files changed, 63 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-disp0.c b/drivers/clk/mediatek/clk-mt8196-disp0.c
+index 9474aad2..7d50f34e 100644
+--- a/drivers/clk/mediatek/clk-mt8196-disp0.c
++++ b/drivers/clk/mediatek/clk-mt8196-disp0.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2025 Collabora Ltd.
+  *                    Laura Nao <laura.nao@collabora.com>
+  */
++#include <dt-bindings/clock/mediatek,mt6991-clock.h>
+ #include <dt-bindings/clock/mediatek,mt8196-clock.h>
+ 
+ #include <linux/clk-provider.h>
+@@ -150,7 +151,17 @@ static const struct mtk_clk_desc mm_mcd = {
+ 	.num_clks = ARRAY_SIZE(mm_clks),
+ };
+ 
++static const struct mtk_gate mt6991_disp0_clks[] = {
++	GATE_HWV_MM0(MT6991_CLK_MM0_MUTEX, "mm_disp_mutex0", "disp", 1),
++};
++
++static const struct mtk_clk_desc mt6991_disp0_desc = {
++	.clks = mt6991_disp0_clks,
++	.num_clks = ARRAY_SIZE(mt6991_disp0_clks),
++};
++
+ static const struct platform_device_id clk_mt8196_disp0_id_table[] = {
++	{ .name = "clk-mt6991-disp0", .driver_data = (kernel_ulong_t)&mt6991_disp0_desc },
+ 	{ .name = "clk-mt8196-disp0", .driver_data = (kernel_ulong_t)&mm_mcd },
+ 	{ /* sentinel */ }
+ };
+diff --git a/drivers/clk/mediatek/clk-mt8196-disp1.c b/drivers/clk/mediatek/clk-mt8196-disp1.c
+index ab70da6b..738c2447 100644
+--- a/drivers/clk/mediatek/clk-mt8196-disp1.c
++++ b/drivers/clk/mediatek/clk-mt8196-disp1.c
+@@ -146,7 +146,8 @@ static const struct mtk_gate mm1_clks[] = {
+ 	GATE_HWV_MM11(CLK_MM1_F26M, "mm1_f26m_ck", "clk26m", 28),
+ };
+ 
+-static const struct mtk_gate mt6991_dsi_clks[] = {
++static const struct mtk_gate mt6991_mm1_clks[] = {
++	GATE_HWV_MM10(MT6991_CLK_MM1_MUTEX, "mm1_disp_mutex0", "disp", 2),
+ 	GATE_HWV_MM10(MT6991_CLK_MM1_DSI0_ENGINE, "mm1_dsi0_engine", "disp", 22),
+ 	GATE_HWV_MM10(MT6991_CLK_MM1_DSI1_ENGINE, "mm1_dsi1_engine", "disp", 23),
+ 	GATE_HWV_MM11(MT6991_CLK_MM1_DSI0_DIGITAL, "mm1_dsi0_digital", "clk26m", 13),
+@@ -154,8 +155,8 @@ static const struct mtk_gate mt6991_dsi_clks[] = {
+ };
+ 
+ static const struct mtk_clk_desc mt6991_mm1_desc = {
+-	.clks = mt6991_dsi_clks,
+-	.num_clks = ARRAY_SIZE(mt6991_dsi_clks),
++	.clks = mt6991_mm1_clks,
++	.num_clks = ARRAY_SIZE(mt6991_mm1_clks),
+ };
+ 
+ static const struct mtk_clk_desc mm1_mcd = {
+diff --git a/drivers/clk/mediatek/clk-mt8196-ovl0.c b/drivers/clk/mediatek/clk-mt8196-ovl0.c
+index d4affd14..e452cad0 100644
+--- a/drivers/clk/mediatek/clk-mt8196-ovl0.c
++++ b/drivers/clk/mediatek/clk-mt8196-ovl0.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2025 Collabora Ltd.
+  *                    Laura Nao <laura.nao@collabora.com>
+  */
++#include <dt-bindings/clock/mediatek,mt6991-clock.h>
+ #include <dt-bindings/clock/mediatek,mt8196-clock.h>
+ 
+ #include <linux/clk-provider.h>
+@@ -134,7 +135,17 @@ static const struct mtk_clk_desc ovl_mcd = {
+ 	.num_clks = ARRAY_SIZE(ovl_clks),
+ };
+ 
++static const struct mtk_gate mt6991_ovl0_clks[] = {
++	GATE_HWV_OVL0(MT6991_CLK_OVL0_MUTEX, "ovl_mutex0", "disp", 3),
++};
++
++static const struct mtk_clk_desc mt6991_ovl0_desc = {
++	.clks = mt6991_ovl0_clks,
++	.num_clks = ARRAY_SIZE(mt6991_ovl0_clks),
++};
++
+ static const struct platform_device_id clk_mt8196_ovl0_id_table[] = {
++	{ .name = "clk-mt6991-ovl0", .driver_data = (kernel_ulong_t)&mt6991_ovl0_desc },
+ 	{ .name = "clk-mt8196-ovl0", .driver_data = (kernel_ulong_t)&ovl_mcd },
+ 	{ /* sentinel */ }
+ };
+diff --git a/drivers/clk/mediatek/clk-mt8196-ovl1.c b/drivers/clk/mediatek/clk-mt8196-ovl1.c
+index c8843d0d..1bcf153d 100644
+--- a/drivers/clk/mediatek/clk-mt8196-ovl1.c
++++ b/drivers/clk/mediatek/clk-mt8196-ovl1.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2025 Collabora Ltd.
+  *                    Laura Nao <laura.nao@collabora.com>
+  */
++#include <dt-bindings/clock/mediatek,mt6991-clock.h>
+ #include <dt-bindings/clock/mediatek,mt8196-clock.h>
+ 
+ #include <linux/clk-provider.h>
+@@ -134,7 +135,17 @@ static const struct mtk_clk_desc ovl1_mcd = {
+ 	.num_clks = ARRAY_SIZE(ovl1_clks),
+ };
+ 
++static const struct mtk_gate mt6991_ovl1_clks[] = {
++	GATE_HWV_OVL10(MT6991_CLK_OVL1_MUTEX, "ovl1_ovl_mutex0", "disp", 3),
++};
++
++static const struct mtk_clk_desc mt6991_ovl1_desc = {
++	.clks = mt6991_ovl1_clks,
++	.num_clks = ARRAY_SIZE(mt6991_ovl1_clks),
++};
++
+ static const struct platform_device_id clk_mt8196_ovl1_id_table[] = {
++	{ .name = "clk-mt6991-ovl1", .driver_data = (kernel_ulong_t)&mt6991_ovl1_desc },
+ 	{ .name = "clk-mt8196-ovl1", .driver_data = (kernel_ulong_t)&ovl1_mcd },
+ 	{ /* sentinel */ }
+ };
+diff --git a/drivers/soc/mediatek/mtk-mmsys.c b/drivers/soc/mediatek/mtk-mmsys.c
+index 231a4a04..5255b38c 100644
+--- a/drivers/soc/mediatek/mtk-mmsys.c
++++ b/drivers/soc/mediatek/mtk-mmsys.c
+@@ -53,8 +53,24 @@ static const struct mtk_mmsys_driver_data mt6797_mmsys_driver_data = {
+ 	.clk_driver = "clk-mt6797-mm",
+ };
+ 
++static const struct mtk_mmsys_driver_data mt6991_mmsys0_driver_data = {
++	.clk_driver = "clk-mt6991-disp0",
++	.clk_only = true,
++};
++
+ static const struct mtk_mmsys_driver_data mt6991_mmsys1_driver_data = {
+ 	.clk_driver = "clk-mt6991-disp1",
++	.clk_only = true,
++};
++
++static const struct mtk_mmsys_driver_data mt6991_ovlsys0_driver_data = {
++	.clk_driver = "clk-mt6991-ovl0",
++	.clk_only = true,
++};
++
++static const struct mtk_mmsys_driver_data mt6991_ovlsys1_driver_data = {
++	.clk_driver = "clk-mt6991-ovl1",
++	.clk_only = true,
+ };
+ 
+ static const struct mtk_mmsys_driver_data mt8167_mmsys_driver_data = {
+@@ -108,12 +124,12 @@ static const struct mtk_mmsys_driver_data mt8188_vdosys1_driver_data = {
+ 
+ static const struct mtk_mmsys_driver_data mt8188_vppsys0_driver_data = {
+ 	.clk_driver = "clk-mt8188-vpp0",
+-	.is_vppsys = true,
++	.clk_only = true,
+ };
+ 
+ static const struct mtk_mmsys_driver_data mt8188_vppsys1_driver_data = {
+ 	.clk_driver = "clk-mt8188-vpp1",
+-	.is_vppsys = true,
++	.clk_only = true,
+ };
+ 
+ static const struct mtk_mmsys_driver_data mt8192_mmsys_driver_data = {
+@@ -140,12 +156,12 @@ static const struct mtk_mmsys_driver_data mt8195_vdosys1_driver_data = {
+ 
+ static const struct mtk_mmsys_driver_data mt8195_vppsys0_driver_data = {
+ 	.clk_driver = "clk-mt8195-vpp0",
+-	.is_vppsys = true,
++	.clk_only = true,
+ };
+ 
+ static const struct mtk_mmsys_driver_data mt8195_vppsys1_driver_data = {
+ 	.clk_driver = "clk-mt8195-vpp1",
+-	.is_vppsys = true,
++	.clk_only = true,
+ };
+ 
+ static const struct mtk_mmsys_driver_data mt8365_mmsys_driver_data = {
+@@ -438,7 +454,7 @@ static int mtk_mmsys_probe(struct platform_device *pdev)
+ 		return PTR_ERR(clks);
+ 	mmsys->clks_pdev = clks;
+ 
+-	if (mmsys->data->is_vppsys)
++	if (mmsys->data->clk_only)
+ 		goto out_probe_done;
+ 
+ 	drm = platform_device_register_data(&pdev->dev, "mediatek-drm",
+@@ -467,7 +483,10 @@ static const struct of_device_id of_match_mtk_mmsys[] = {
+ 	{ .compatible = "mediatek,mt6779-mmsys", .data = &mt6779_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt6795-mmsys", .data = &mt6795_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt6797-mmsys", .data = &mt6797_mmsys_driver_data },
++	{ .compatible = "mediatek,mt6991-mmsys0", .data = &mt6991_mmsys0_driver_data },
+ 	{ .compatible = "mediatek,mt6991-mmsys1", .data = &mt6991_mmsys1_driver_data },
++	{ .compatible = "mediatek,mt6991-ovlsys0", .data = &mt6991_ovlsys0_driver_data },
++	{ .compatible = "mediatek,mt6991-ovlsys1", .data = &mt6991_ovlsys1_driver_data },
+ 	{ .compatible = "mediatek,mt8167-mmsys", .data = &mt8167_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt8173-mmsys", .data = &mt8173_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt8183-mmsys", .data = &mt8183_mmsys_driver_data },
+diff --git a/drivers/soc/mediatek/mtk-mmsys.h b/drivers/soc/mediatek/mtk-mmsys.h
+index c51a5e33..10195335 100644
+--- a/drivers/soc/mediatek/mtk-mmsys.h
++++ b/drivers/soc/mediatek/mtk-mmsys.h
+@@ -118,7 +118,7 @@ struct mtk_mmsys_routes {
+  * @num_routes: Array size of the routes.
+  * @sw0_rst_offset: Register offset for the reset control.
+  * @num_resets: Number of reset bits that are defined
+- * @is_vppsys: Whether the mmsys is VPPSYS (Video Processing Pipe)
++ * @clk_only: Whether the mmsys is VPPSYS (Video Processing Pipe)
+  *             or VDOSYS (Video). Only VDOSYS needs to be added to drm driver.
+  * @vsync_len: VSYNC length of the MIXER.
+  *             VSYNC is usually triggered by the connector, so its length is a
+@@ -144,7 +144,7 @@ struct mtk_mmsys_driver_data {
+ 	const u16 sw0_rst_offset;
+ 	const u8 *rst_tb;
+ 	const u32 num_resets;
+-	const bool is_vppsys;
++	const bool clk_only;
+ 	const u8 vsync_len;
+ };
+ 
+-- 
+2.50.1 (Apple Git-155)
+

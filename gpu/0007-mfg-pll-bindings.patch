@@ -1,0 +1,17 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] dt-bindings: clock: mediatek: describe MT6991 GPU PLL blocks
+
+Each block exposes one GPUFreq-managed PLL at index zero.
+
+--- a/Documentation/devicetree/bindings/clock/mediatek,mt8196-sys-clock.yaml
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt8196-sys-clock.yaml
+@@ -28,6 +28,9 @@
+     items:
+       - enum:
+           - mediatek,mt6991-apmixedsys
++          - mediatek,mt6991-mfgpll-pll-ctrl
++          - mediatek,mt6991-mfgpll-sc0-pll-ctrl
++          - mediatek,mt6991-mfgpll-sc1-pll-ctrl
+           - mediatek,mt6991-topckgen
+           - mediatek,mt6991-vlpckgen
+           - mediatek,mt8196-apmixedsys

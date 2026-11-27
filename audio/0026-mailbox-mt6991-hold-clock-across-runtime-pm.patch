@@ -1,0 +1,76 @@
+--- a/drivers/mailbox/mt6991-adsp-mailbox.c
++++ b/drivers/mailbox/mt6991-adsp-mailbox.c
+@@ -31,6 +31,7 @@
+ 	struct clk *clk;
+ 	struct clk *pll;
+ 	struct clk *clk26m;
++	bool runtime_clock;
+ 	struct mbox_chan chan[2];
+ 	struct mt6991_rx rx[2];
+ };
+@@ -79,12 +80,24 @@
+ 
+ 	if (!old_parent)
+ 		return -ENODEV;
++	/* A PM user can outlive the last mailbox channel. Keep the gate
++	 * enabled for firmware accesses through the end of runtime suspend.
++	 */
++	ret = clk_prepare_enable(mb->clk);
++	if (ret)
++		return ret;
+ 	ret = clk_set_parent(mb->clk, mb->pll);
+ 	if (ret)
+-		return ret;
++		goto disable_clk;
+ 	ret = mt6991_adsp_local_mux(dev, true);
+-	if (ret && clk_set_parent(mb->clk, old_parent))
++	if (!ret) {
++		mb->runtime_clock = true;
++		return 0;
++	}
++	if (clk_set_parent(mb->clk, old_parent))
+ 		dev_err(dev, "failed to restore ADSP clock parent\n");
++disable_clk:
++	clk_disable_unprepare(mb->clk);
+ 	return ret;
+ }
+ 
+@@ -97,9 +110,26 @@
+ 	if (ret)
+ 		return ret;
+ 	ret = clk_set_parent(mb->clk, mb->clk26m);
+-	if (ret)
++	if (ret) {
+ 		mt6991_adsp_local_mux(dev, true);
+-	return ret;
++		return ret;
++	}
++	clk_disable_unprepare(mb->clk);
++	mb->runtime_clock = false;
++	return 0;
++}
++
++static void mt6991_adsp_release_clock(void *data)
++{
++	struct device *dev = data;
++	struct mt6991_adsp_mailbox *mb = dev_get_drvdata(dev);
++
++	/* Runtime PM is disabled and clients have been unregistered. */
++	if (mb->runtime_clock && mt6991_adsp_runtime_suspend(dev)) {
++		dev_warn(dev, "failed to restore idle ADSP clock on detach\n");
++		clk_disable_unprepare(mb->clk);
++		mb->runtime_clock = false;
++	}
+ }
+ 
+ static const struct dev_pm_ops mt6991_adsp_pm_ops = {
+@@ -233,6 +263,9 @@
+ 			return dev_err_probe(dev, ret, "requesting %s IRQ\n", name);
+ 	}
+ 
++	ret = devm_add_action_or_reset(dev, mt6991_adsp_release_clock, dev);
++	if (ret)
++		return ret;
+ 	ret = devm_pm_runtime_enable(dev);
+ 	if (ret)
+ 		return ret;

@@ -1,0 +1,27 @@
+From 79e8921bc6138172c940874076f0a72c65dcc3f9 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 09:55:35 +0800
+Subject: [PATCH 89/89] clk: mediatek: add the four MT6991 DSC wrapper gates
+
+---
+ drivers/clk/mediatek/clk-mt8196-disp1.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-disp1.c b/drivers/clk/mediatek/clk-mt8196-disp1.c
+index 738c24477..47a5e2e9d 100644
+--- a/drivers/clk/mediatek/clk-mt8196-disp1.c
++++ b/drivers/clk/mediatek/clk-mt8196-disp1.c
+@@ -147,6 +147,10 @@ static const struct mtk_gate mm1_clks[] = {
+ };
+ 
+ static const struct mtk_gate mt6991_mm1_clks[] = {
++	GATE_HWV_MM10(MT6991_CLK_MM1_DSC_WRAP0, "mm1_disp_dsc_wrap0", "disp", 18),
++	GATE_HWV_MM10(MT6991_CLK_MM1_DSC_WRAP1, "mm1_disp_dsc_wrap1", "disp", 19),
++	GATE_HWV_MM10(MT6991_CLK_MM1_DSC_WRAP2, "mm1_disp_dsc_wrap2", "disp", 20),
++	GATE_HWV_MM10(MT6991_CLK_MM1_DSC_WRAP3, "mm1_disp_dsc_wrap3", "disp", 21),
+ 	GATE_HWV_MM10(MT6991_CLK_MM1_MUTEX, "mm1_disp_mutex0", "disp", 2),
+ 	GATE_HWV_MM10(MT6991_CLK_MM1_DSI0_ENGINE, "mm1_dsi0_engine", "disp", 22),
+ 	GATE_HWV_MM10(MT6991_CLK_MM1_DSI1_ENGINE, "mm1_dsi1_engine", "disp", 23),
+-- 
+2.50.1 (Apple Git-155)
+

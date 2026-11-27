@@ -1,0 +1,32 @@
+/dts-v1/; /plugin/;
+/* MT6991 vendor SR aliases DIR. Translate slew-rate = <0> on these
+ * stock GPIO states to the Paris driver's output-disable.
+ */
+&pio {
+	turner_conn_idle_input: turner-conn-idle-input {
+		pins {
+			pinmux = <0xef00 0xf000>;
+			output-disable;
+			bias-pull-down;
+		};
+	};
+	turner_conn_pre_on_input: turner-conn-pre-on-input {
+		pins {
+			pinmux = <0xef00 0xf000>;
+			output-disable;
+			bias-pull-up;
+		};
+	};
+	turner_conn_dfd_input: turner-conn-dfd-input {
+		pins {
+			pinmux = <0xf200>;
+			output-disable;
+		};
+	};
+};
+
+&connv3 {
+	pinctrl-5 = <&turner_conn_idle_input>;
+	pinctrl-6 = <&turner_conn_pre_on_input>;
+	pinctrl-8 = <&turner_conn_dfd_input>;
+};

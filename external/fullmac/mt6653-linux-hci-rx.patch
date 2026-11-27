@@ -1,0 +1,22 @@
+--- a/drivers/misc/mediatek/connectivity/bt/linux_v2/uart/btmtktty.c
++++ b/drivers/misc/mediatek/connectivity/bt/linux_v2/uart/btmtktty.c
+@@ -1344,6 +1344,8 @@
+ 
+ 	/* after fw download */
+ #if IS_ENABLED(CONFIG_MTK_UARTHUB)
++	/* The Turner AP keeps the UART hub in bypass after download. */
++	cif_dev->hub_bypass_only = true;
+ 	if (cif_dev->hub_en && !cif_dev->hub_bypass_only) {
+ 		/* uarhub setting */
+ 		cif_dev->ap_cfg.detail.hub_mode_en = 1;
+--- a/drivers/misc/mediatek/connectivity/bt/linux_v2/chip/btmtk_chip_66xx.c
++++ b/drivers/misc/mediatek/connectivity/bt/linux_v2/chip/btmtk_chip_66xx.c
+@@ -25,7 +25,7 @@
+ {
+ 	BTMTK_DBG("%s start", __func__);
+ #if (USE_DEVICE_NODE == 1)
+-	return rx_skb_enqueue(skb);
++	return hci_recv_frame(bdev->hdev, skb);
+ #else
+ 	return 0;
+ #endif

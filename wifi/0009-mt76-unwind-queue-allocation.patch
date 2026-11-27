@@ -1,0 +1,75 @@
+Subject: [RFC PATCH] wifi: mt76: unwind DMA queue allocation before hardware setup
+
+An early allocation error leaves ndesc set. RX cleanup then treats an
+incomplete ring as live, and a second MT6653 allocation returns EBUSY.
+Release the managed buffers on pre-hardware failures, and clear the
+count used to identify active rings. Preserve WED-specific teardown.
+
+--- a/drivers/net/wireless/mediatek/mt76/dma.c
++++ b/drivers/net/wireless/mediatek/mt76/dma.c
+@@ -833,6 +833,7 @@
+ 		     int idx, int n_desc, int bufsize,
+ 		     u32 ring_base)
+ {
++	size_t desc_bytes;
+ 	int ret, size;
+ 
+ 	spin_lock_init(&q->lock);
+@@ -853,23 +854,30 @@
+ 	else
+ 		size = sizeof(struct mt76_desc);
+ 
+-	q->desc = dmam_alloc_coherent(dev->dma_dev, q->ndesc * size,
+-				      &q->desc_dma, GFP_KERNEL);
+-	if (!q->desc)
+-		return -ENOMEM;
++	desc_bytes = (size_t)q->ndesc * size;
++	q->desc = dmam_alloc_coherent(dev->dma_dev, desc_bytes, &q->desc_dma,
++				      GFP_KERNEL);
++	if (!q->desc) {
++		ret = -ENOMEM;
++		goto clear_count;
++	}
+ 	if ((q->flags & MT_QFLAG_RING_BASE_36BIT) &&
+-	    (q->desc_dma + (u64)q->ndesc * size - 1 > DMA_BIT_MASK(36)))
+-		return -ERANGE;
++	    (q->desc_dma > DMA_BIT_MASK(36) - (desc_bytes - 1))) {
++		ret = -ERANGE;
++		goto free_desc;
++	}
+ 
+ 	mt76_dma_queue_magic_cnt_init(dev, q);
+ 	size = q->ndesc * sizeof(*q->entry);
+ 	q->entry = devm_kzalloc(dev->dev, size, GFP_KERNEL);
+-	if (!q->entry)
+-		return -ENOMEM;
++	if (!q->entry) {
++		ret = -ENOMEM;
++		goto free_desc;
++	}
+ 
+ 	ret = mt76_create_page_pool(dev, q);
+ 	if (ret)
+-		return ret;
++		goto free_entry;
+ 
+ 	mt76_npu_queue_setup(dev, q);
+ 	ret = mt76_wed_dma_setup(dev, q, false);
+@@ -888,6 +896,17 @@
+ 	mt76_dma_queue_reset(dev, q, !mt76_queue_is_emi(q));
+ 
+ 	return 0;
++
++free_entry:
++	devm_kfree(dev->dev, q->entry);
++	q->entry = NULL;
++free_desc:
++	dmam_free_coherent(dev->dma_dev, desc_bytes, q->desc, q->desc_dma);
++	q->desc = NULL;
++clear_count:
++	q->ndesc = 0;
++	q->desc_dma = 0;
++	return ret;
+ }
+ 
+ static void

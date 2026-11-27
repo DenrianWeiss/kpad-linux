@@ -1,0 +1,977 @@
+--- a/sound/soc/mediatek/mt6991/Makefile
++++ b/sound/soc/mediatek/mt6991/Makefile
+@@ -1,3 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ obj-$(CONFIG_SND_SOC_MT6991_TURNER) += turner.o
+ obj-$(CONFIG_SND_SOC_MT6991_TURNER) += mt6991-afe.o
++obj-$(CONFIG_SND_SOC_MT6991_TURNER) += mt6991-stream.o
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -17,6 +17,7 @@
+ #include <sound/soc.h>
+ 
+ #include "mt6991-afe.h"
++#include "mt6991-stream.h"
+ #include "../common/mtk-base-afe.h"
+ #include "../common/mtk-afe-fe-dai.h"
+ #include "../common/mtk-afe-platform-driver.h"
+@@ -83,12 +84,15 @@
+ 	struct mtk_base_afe_memif dl0;
+ 	spinlock_t irq_lock;
+ 	int irq;
++	struct turner_stream stream;
+ 	bool dram_held;
+ 	bool speaker_windows_set;
+ 	struct clk_bulk_data bus[NUM_BUS_CLKS];
+ 	struct clk_bulk_data mclk[NUM_MCLK_CLKS];
+ 	struct clk_bulk_data apll2_gates[2];
+ 	bool mclk_enabled;
++	struct mutex engine_lock;
++	unsigned int engine_users;
+ 	bool engine_acquired;
+ 	struct clk *clksq;
+ 	void __iomem *base;
+@@ -188,7 +192,7 @@
+ 	return 0;
+ }
+ 
+-#define DL0_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
++#define DL0_FORMATS SNDRV_PCM_FMTBIT_S32_LE
+ #define IRQ_MCU_EN	0x100
+ #define IRQ_MCU_STATUS	0x120
+ #define IRQ0_CFG0	0x140
+@@ -205,8 +209,8 @@
+ static const struct snd_pcm_hardware dl0_hw = {
+ 	.info = SNDRV_PCM_INFO_INTERLEAVED,
+ 	.formats = DL0_FORMATS,
+-	.period_bytes_min = 96, .period_bytes_max = 192 * 1024,
+-	.periods_min = 2, .periods_max = 256, .buffer_bytes_max = 256 * 1024,
++	.period_bytes_min = 4096, .period_bytes_max = 4096,
++	.periods_min = 4, .periods_max = 4, .buffer_bytes_max = 16384,
+ };
+ 
+ static void mt6991_irq0_ack(struct regmap *map)
+@@ -245,6 +249,8 @@
+ 	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
+ 	int ret;
+ 
++	/* Profile authentication and the muted DSP preroll precede the first period. */
++	s->wait_time = 800;
+ 	ret = snd_soc_set_runtime_hwparams(s, &dl0_hw);
+ 	if (ret < 0)
+ 		return ret;
+@@ -313,32 +319,30 @@
+ static int mt6991_dl0_trigger(struct snd_pcm_substream *s, int cmd, struct snd_soc_dai *dai)
+ {
+ 	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
+-	struct regmap *map = afe->common.regmap;
+-	unsigned long flags;
+-
+-	spin_lock_irqsave(&afe->irq_lock, flags);
++	struct turner_stream *stream = &afe->stream;
++
+ 	switch (cmd) {
+ 	case SNDRV_PCM_TRIGGER_START:
+-	case SNDRV_PCM_TRIGGER_RESUME:
+-		/* Prefilling the protected ring is supported. Starting DL0 would
+-		 * bypass the DSP's consumer pointer and interrupt accounting.
+-		 */
+-		spin_unlock_irqrestore(&afe->irq_lock, flags);
+-		return -EOPNOTSUPP;
++		stream->pcm = s;
++		WRITE_ONCE(stream->position, 0);
++		WRITE_ONCE(stream->running, true);
++		queue_work(system_unbound_wq, &stream->work);
++		return 0;
+ 	case SNDRV_PCM_TRIGGER_STOP:
+ 	case SNDRV_PCM_TRIGGER_SUSPEND:
+-		regmap_clear_bits(map, AFE_DL0_CON0, BIT(28));
+-		regmap_clear_bits(map, IRQ0_CFG0, BIT(0));
+-		regmap_clear_bits(map, IRQ_MCU_EN, BIT(0));
+-		mt6991_irq0_ack(map);
+-		afe->dl0.substream = NULL;
+-		break;
++		WRITE_ONCE(stream->running, false);
++		return 0;
+ 	default:
+-		spin_unlock_irqrestore(&afe->irq_lock, flags);
+ 		return -EINVAL;
+ 	}
+-	spin_unlock_irqrestore(&afe->irq_lock, flags);
+-	return 0;
++}
++
++static snd_pcm_uframes_t mt6991_stream_pointer(struct snd_soc_component *c,
++					       struct snd_pcm_substream *s)
++{
++	struct mt6991_afe *afe = snd_soc_component_get_drvdata(c);
++
++	return READ_ONCE(afe->stream.position);
+ }
+ 
+ static const struct snd_soc_dai_ops dl0_ops = {
+@@ -562,6 +566,35 @@
+ 	return clk_get_rate(div) == rate ? 0 : -ERANGE;
+ }
+ 
++/* Both VUL0 capture and protected playback need the AFE 26 MHz engine. */
++int mt6991_afe_engine_get(struct device *dev)
++{
++	struct mt6991_afe *afe = dev_get_drvdata(dev);
++	int ret = 0;
++
++	guard(mutex)(&afe->engine_lock);
++	if (!afe->engine_users)
++		ret = regmap_update_bits_check(afe->common.regmap, AUDIO_ENGEN_CON0,
++					       BIT(0), BIT(0), &afe->engine_acquired);
++	if (!ret)
++		afe->engine_users++;
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt6991_afe_engine_get);
++
++int mt6991_afe_engine_put(struct device *dev)
++{
++	struct mt6991_afe *afe = dev_get_drvdata(dev);
++
++	guard(mutex)(&afe->engine_lock);
++	if (WARN_ON(!afe->engine_users))
++		return -EINVAL;
++	if (!--afe->engine_users && afe->engine_acquired)
++		return regmap_clear_bits(afe->common.regmap, AUDIO_ENGEN_CON0, BIT(0));
++	return 0;
++}
++EXPORT_SYMBOL_GPL(mt6991_afe_engine_put);
++
+ static int mt6991_i2sout4_prepare(struct snd_pcm_substream *s,
+ 				  struct snd_soc_dai *dai)
+ {
+@@ -608,8 +641,7 @@
+ 		goto disable_input;
+ 
+ 	/* The APLL alone does not clock either speaker MEMIF. */
+-	ret = regmap_update_bits_check(map, AUDIO_ENGEN_CON0, BIT(0), BIT(0),
+-				       &afe->engine_acquired);
++	ret = mt6991_afe_engine_get(dai->dev);
+ 	if (ret) {
+ 		regmap_clear_bits(map, ETDM_OUT4_CON0, ETDM_ENABLE);
+ 		goto disable_input;
+@@ -654,12 +686,9 @@
+ 	if (!afe->mclk_enabled)
+ 		return ret;
+ 
+-	if (afe->engine_acquired) {
+-		err = regmap_clear_bits(map, AUDIO_ENGEN_CON0, BIT(0));
+-		if (!ret)
+-			ret = err;
+-		afe->engine_acquired = false;
+-	}
++	err = mt6991_afe_engine_put(dai->dev);
++	if (!ret)
++		ret = err;
+ 	err = regmap_clear_bits(map, ETDM_OUT4_CON0, ETDM_ENABLE);
+ 	if (!ret)
+ 		ret = err;
+@@ -715,6 +744,8 @@
+ {
+ 	struct mt6991_afe *afe = snd_soc_component_get_drvdata(component);
+ 
++	cancel_work_sync(&afe->stream.work);
++	WRITE_ONCE(afe->stream.position, 0);
+ 	synchronize_irq(afe->irq);
+ 	return 0;
+ }
+@@ -738,7 +769,7 @@
+ 	.dapm_routes = mt6991_output_routes,
+ 	.num_dapm_routes = ARRAY_SIZE(mt6991_output_routes),
+ 	.name = "mt6991-afe",
+-	.pointer = mtk_afe_pcm_pointer,
++	.pointer = mt6991_stream_pointer,
+ 	.pcm_new = mtk_afe_pcm_new,
+ 	.sync_stop = mt6991_dl0_sync_stop,
+ };
+@@ -817,7 +848,9 @@
+ 	afe->common.memif_size = 1;
+ 	afe->common.mtk_afe_hardware = &dl0_hw;
+ 	afe->dl0.data = &dl0_data;
++	mutex_init(&afe->engine_lock);
+ 	spin_lock_init(&afe->irq_lock);
++	INIT_WORK(&afe->stream.work, turner_playback_work);
+ 	platform_set_drvdata(pdev, afe);
+ 	pm_runtime_enable(dev);
+ 	ret = pm_runtime_resume_and_get(dev);
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.h
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.h
+@@ -4,6 +4,9 @@
+ 
+ #include <linux/types.h>
+ 
++struct device;
++int mt6991_afe_engine_get(struct device *dev);
++int mt6991_afe_engine_put(struct device *dev);
+ struct snd_soc_dai;
+ int mt6991_afe_set_speaker_windows(struct snd_soc_dai *dai, phys_addr_t output, phys_addr_t iv);
+ 
+--- /dev/null
++++ b/sound/soc/mediatek/mt6991/mt6991-stream.h
+@@ -0,0 +1,13 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __MT6991_STREAM_H
++#define __MT6991_STREAM_H
++#include <linux/workqueue.h>
++#include <sound/pcm.h>
++struct turner_stream {
++	struct work_struct work;
++	struct snd_pcm_substream *pcm;
++	snd_pcm_uframes_t position;
++	bool running;
++};
++void turner_playback_work(struct work_struct *work);
++#endif
+--- /dev/null
++++ b/sound/soc/mediatek/mt6991/mt6991-stream.c
+@@ -0,0 +1,604 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/i2c.h>
++#include <sound/control.h>
++#include <sound/soc.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/reset.h>
++#include <linux/delay.h>
++#include <linux/iopoll.h>
++#include <linux/firmware.h>
++#include <linux/regmap.h>
++#include <linux/pm_runtime.h>
++#include <linux/mailbox_client.h>
++#include <linux/crc32.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <linux/soc/mediatek/mt6991-adsp-ipi.h>
++#include <linux/unaligned.h>
++
++struct field {
++	u16 id, value;
++};
++#include "turner_profile.h"
++
++static int configure(struct device *dev, const struct field *settings, size_t n)
++{
++	struct regmap *m = dev_get_regmap(dev, NULL);
++	unsigned int product, version, f0, f3, f4, state, key, ctrl;
++	int ret;
++
++	if (!m)
++		return -ENODEV;
++	ret = regmap_read(m, 0, &ctrl);
++	if (ret || (ctrl & 0x18))
++		return ret ?: -EBUSY;
++	ret = regmap_clear_bits(m, 0, 1);
++	if (!ret)
++		ret = regmap_clear_bits(m, 4, BIT(6));
++	if (!ret)
++		ret = regmap_read_poll_timeout(m, 0x12, state,
++					       (state & 15) == 1, 500, 50000);
++	if (ret)
++		return ret;
++	if (regmap_read(m, 3, &product) || regmap_read(m, 6, &version) ||
++	    regmap_read(m, 0xf0, &f0) || regmap_read(m, 0xf3, &f3) ||
++	    regmap_read(m, 0xf4, &f4))
++		return -EIO;
++	if (product != 0x9866 || version != 0x0507 || !(f3 & GENMASK(12, 11)) ||
++	    (f0 & BIT(9)) || (f4 & BIT(15)))
++		return -ENODEV;
++	ret = regmap_write(m, 0x0f, 0x5a6b);
++	if (!ret)
++		ret = regmap_read(m, 0xfb, &key);
++	if (!ret)
++		ret = regmap_write(m, 0xa0, key ^ 0x005a);
++	if (!ret)
++		ret = regmap_write(m, 0xa1, 0x5a);
++	for (size_t i = 0; !ret && i < ARRAY_SIZE(startup); i++)
++		ret = regmap_write(m, startup[i].reg, startup[i].def);
++	if (ret)
++		return ret;
++	ret = regmap_read_poll_timeout(m, 0x12, state, !(state & 15), 500,
++				       50000);
++	if (!ret)
++		ret = regmap_set_bits(m, 4, BIT(6));
++	for (size_t i = 0; !ret && i < n; i++) {
++		u16 id = settings[i].id, shift = (id >> 4) & 15;
++		u16 mask = (BIT((id & 15) + 1) - 1) << shift;
++		u16 value = settings[i].value << shift;
++		unsigned int actual;
++
++		/* Defer boost enable until the protected playback test. */
++		if (id == 0x0040)
++			continue;
++		ret = regmap_update_bits(m, id >> 8, mask, value);
++		if (!ret)
++			ret = regmap_read(m, id >> 8, &actual);
++		if (!ret && (actual & mask) != value) {
++			dev_err(dev, "field %04x expected %04x read %04x\n", id,
++				value, actual);
++			ret = -EIO;
++		}
++	}
++	if (!ret)
++		ret = regmap_write(m, 0xa1, 0);
++	if (!ret)
++		ret = regmap_write(m, 0x0f, 0);
++	if (!ret)
++		ret = regmap_set_bits(m, 1, BIT(2));
++	if (!ret)
++		ret = regmap_clear_bits(m, 0, BIT(0));
++	if (!ret)
++		ret = regmap_read_poll_timeout(m, 0x11, state, state & BIT(0),
++					       1000, 50000);
++	dev_info(dev,
++		 "Turner muted profile 0x110b65 status=%04x clock ret=%d\n",
++		 state, ret);
++	return ret;
++}
++
++static bool test_layout_matches(struct device *dev, phys_addr_t output)
++{
++	static const char *const prior[] = {
++		"adsp-rsv-logger-a", "adsp-rsv-dbg-dump-a",
++		"adsp-rsv-ipidma-a", "adsp-rsv-core-dump-a",
++		"adsp-rsv-logger-b", "adsp-rsv-dbg-dump-b",
++		"adsp-rsv-ipidma-b", "adsp-rsv-core-dump-b",
++		"adsp-rsv-c2c",	     "adsp-rsv-pcie",
++		"adsp-rsv-l2sram",   "adsp-rsv-xhci",
++	};
++	struct device_node *sys __free(device_node) =
++		of_parse_phandle(dev->of_node, "mboxes", 0);
++	u64 range[2], offset = 0;
++	u32 size;
++	int i;
++
++	if (!sys || of_property_read_u64_array(sys, "shared_memory", range, 2))
++		return false;
++	for (i = 0; i < ARRAY_SIZE(prior); i++)
++		if (!of_property_read_u32(sys, prior[i], &size))
++			offset += ALIGN((u64)size, SZ_4K);
++	return !of_property_read_u32(sys, "adsp-rsv-audio", &size) &&
++	       size >= SZ_4K + 4 * SZ_16K && offset + size <= range[1] &&
++	       output == range[0] + offset + SZ_4K + SZ_16K;
++}
++
++static int trigger(struct mbox_chan *tx, u16 command)
++{
++	struct mt6991_adsp_tx msg = { .id = 9, .len = 16 };
++
++	put_unaligned_le16(0x8888, msg.payload);
++	msg.payload[2] = 32;
++	msg.payload[3] = 0x21;
++	msg.payload[5] = 3;
++	put_unaligned_le16(command, msg.payload + 6);
++	put_unaligned_le32(1, msg.payload + 8);
++	return mbox_send_message(tx, &msg);
++}
++
++static int send_measured_cal(struct device *dev, struct mbox_chan *tx)
++{
++	struct device_node *sys __free(device_node) =
++		of_parse_phandle(dev->of_node, "mboxes", 0);
++	struct mt6991_adsp_tx m = { .id = 9, .len = 72 };
++	const struct firmware *fw;
++	u64 range[2];
++	u32 a, b, size, w, next;
++	void __iomem *pool, *desc, *ring;
++	int ret;
++	if (!sys ||
++	    of_property_read_u64_array(sys, "shared_memory", range, 2) ||
++	    of_property_read_u32(sys, "adsp-rsv-logger-a", &a) ||
++	    of_property_read_u32(sys, "adsp-rsv-dbg-dump-a", &b) ||
++	    of_property_read_u32(sys, "adsp-rsv-ipidma-a", &size) ||
++	    size != SZ_1M ||
++	    ALIGN((u64)a, SZ_4K) + ALIGN((u64)b, SZ_4K) + size > range[1])
++		return -EINVAL;
++	ret = request_firmware(&fw, "mediatek/turner/turner-unit-cal.bin", dev);
++	if (ret)
++		return ret;
++	if (fw->size != 9 || memcmp(fw->data, "\x00\x81\x05", 3)) {
++		ret = -EINVAL;
++		goto release;
++	}
++	pool = ioremap_wc(range[0] + ALIGN(a, SZ_4K) + ALIGN(b, SZ_4K), size);
++	if (!pool) {
++		ret = -ENOMEM;
++		goto release;
++	}
++	desc = pool + 32 * 0x300 + 0x80;
++	w = readl(desc + 0x100);
++	if (readl(desc) != ALIGN(0x8484, 128) || readl(desc + 4) != SZ_32K ||
++	    w != readl(desc + 0x80) || w > SZ_32K - 128 ||
++	    !IS_ALIGNED(w, 128)) {
++		ret = -ERANGE;
++		goto unmap;
++	}
++	ring = pool + readl(desc);
++	memcpy_toio(ring + w, fw->data, 9);
++	wmb();
++	next = (w + 128) % SZ_32K;
++	writel(next, desc + 0x100);
++	wmb();
++	put_unaligned_le16(0x8888, m.payload);
++	m.payload[2] = 32;
++	m.payload[3] = 0x21;
++	m.payload[4] = 2;
++	m.payload[5] = 1;
++	put_unaligned_le16(0x204, m.payload + 6);
++	put_unaligned_le32(9, m.payload + 8);
++	put_unaligned_le32(3, m.payload + 12);
++	put_unaligned_le32(9, m.payload + 0x24);
++	put_unaligned_le32(w, m.payload + 0x30);
++	put_unaligned_le32(9, m.payload + 0x34);
++	ret = mbox_send_message(tx, &m);
++	if (ret >= 0)
++		ret = readl_poll_timeout(desc + 0x80, w, w == next, 100,
++					 300000);
++	pr_info("turner-trigger measured cal transport=%d\n", ret);
++unmap:
++	iounmap(pool);
++release:
++	release_firmware(fw);
++	return ret;
++}
++
++static int source_msg(struct mbox_chan *tx, u16 cmd, u8 ack, u32 param,
++		      const void *body, u32 len)
++{
++	struct mt6991_adsp_tx m = { .id = 9, .len = 16 + len };
++	put_unaligned_le16(0x8888, m.payload);
++	m.payload[2] = 7;
++	m.payload[3] = 0x21;
++	m.payload[4] = !!len;
++	m.payload[5] = ack;
++	put_unaligned_le16(cmd, m.payload + 6);
++	put_unaligned_le32(param, m.payload + 8);
++	if (len)
++		memcpy(m.payload + 16, body, len);
++	int ret = mbox_send_message(tx, &m);
++	usleep_range(2000, 2500);
++	return ret < 0 ? ret : 0;
++}
++
++static int source_setup(struct mbox_chan *tx, void __iomem *mem,
++			phys_addr_t base, u8 *buf)
++{
++	u64 start = base + SZ_4K + 3 * SZ_16K;
++	__le64 ptrs[4];
++	u8 desc[96];
++	int ret = source_msg(tx, 0x19, 0, 0, NULL, 0);
++	for (int i = 0; !ret && i < 2; i++) {
++		u32 off = (i + 2) * SZ_1K;
++		ptrs[0] = cpu_to_le64(base + off);
++		ptrs[1] = cpu_to_le64((unsigned long)(mem + off));
++		ptrs[2] = cpu_to_le64(SZ_1K);
++		ptrs[3] = ptrs[1];
++		ret = source_msg(tx, 5 + i, 0, 32, ptrs, 32);
++	}
++	if (ret)
++		return ret;
++	ret = source_msg(tx, 1, 1, 0, NULL, 0);
++	memcpy_fromio(desc, mem, sizeof(desc));
++	put_unaligned_le64(start, desc);
++	put_unaligned_le64(start + SZ_16K, desc + 8);
++	put_unaligned_le64(start, desc + 16);
++	put_unaligned_le64(start, desc + 24);
++	put_unaligned_le32(0, desc + 84);
++	memcpy_toio(mem + 2 * SZ_1K, desc, sizeof(desc));
++	wmb();
++	ptrs[0] = cpu_to_le64(base + 2 * SZ_1K);
++	if (!ret)
++		ret = source_msg(tx, 4, 1, 8, ptrs, 8);
++	if (!ret)
++		ret = source_msg(tx, 3, 1, 8, ptrs, 8);
++	if (ret)
++		return ret;
++	memset(buf, 0, SZ_16K);
++	memcpy_toio(mem + SZ_4K + 3 * SZ_16K, buf, SZ_16K);
++	for (int i = 0; !ret && i < 3; i++) {
++		put_unaligned_le64(start + SZ_4K * (i + 1), desc + 24);
++		put_unaligned_le32(i, desc + 84);
++		memcpy_toio(mem + 2 * SZ_1K, desc, sizeof(desc));
++		wmb();
++		ret = source_msg(tx, 10, 1, 8, ptrs, 8);
++	}
++	return ret;
++}
++
++static int amp_ok(struct regmap *map)
++{
++	unsigned int status, irq;
++	if (regmap_read(map, 0x11, &status) || regmap_read(map, 0x40, &irq))
++		return -EIO;
++	if ((status & 0x81) != 0x81 || status & 0x1104 || irq & 0xffe) {
++		pr_err("turner-tone fault status=%04x irq=%04x\n", status, irq);
++		return -EIO;
++	}
++	return 0;
++}
++struct afe_field {
++	unsigned int reg, mask, value, saved;
++};
++
++/* 48 kHz PCM32 stereo. IRQ12 and IRQ16 go to DSP core A. */
++static const struct afe_field field_defaults[] = {
++	
++	{ 0x4640, GENMASK(29, 24) | GENMASK(12, 8) | 7, 2 << 24 | 10 << 8 | 2 },
++	{ 0x4e10, GENMASK(12, 8) | BIT(4) | 7, 10 << 8 | 2 },
++	{ 0x1a4, GENMASK(23, 0), 512 },
++	{ 0x1c4, GENMASK(23, 0), 512 },
++	{ 0x104, BIT(12) | BIT(16), BIT(12) | BIT(16) },
++	{ 0x1a0, GENMASK(8, 4) | BIT(0), 10 << 4 | 1 },
++	{ 0x1c0, GENMASK(8, 4) | BIT(0), 10 << 4 | 1 },
++	{ 0x4e10, BIT(28), BIT(28) },
++	{ 0x4640, BIT(31), BIT(31) },
++};
++
++static int check_window(struct regmap *map, unsigned int reg, u64 expected,
++			unsigned int enable)
++{
++	unsigned int hi, lo, ctrl;
++	int ret;
++
++	ret = regmap_read(map, reg + 32, &ctrl);
++	if (ret || ctrl & enable)
++		return ret ?: -EBUSY;
++	for (int i = 0; i < 2; i++, reg += 16, expected += SZ_16K - 1) {
++		if (regmap_read(map, reg, &hi) ||
++		    regmap_read(map, reg + 4, &lo))
++			return -EIO;
++		if (((u64)hi << 32 | lo) != expected)
++			return -ERANGE;
++	}
++	return 0;
++}
++
++
++#include "mt6991-stream.h"
++
++/* The protected source is four stereo S32 periods.  Follow the output DMA
++ * cursor to avoid clock drift between Linux and the DSP during long streams.
++ */
++static int wait_period(struct regmap *map, u32 base, unsigned int *last, unsigned int *credit, ktime_t *tick)
++{
++	unsigned int pos;
++	unsigned int elapsed;
++	int ret;
++
++	/* The source FIFO is four periods deep. Refill a missed slot from its
++	 * reserve when Linux was late, without resetting the amplifiers.
++	 */
++	if (*credit) {
++		--*credit;
++		return 0;
++	}
++	ret = regmap_read_poll_timeout(map, 0x462c, pos,
++		pos - base < SZ_16K && (pos - base) / SZ_4K != *last,
++		300, 30000);
++	if (ret)
++		return ret;
++	pos = (pos - base) / SZ_4K;
++	elapsed = *last < 4 ? (pos + 4 - *last) % 4 : 1;
++	if (ktime_us_delta(ktime_get(), *tick) >= 4 * 10667)
++		return -EPIPE;
++	*tick = ktime_get();
++	*credit = elapsed - 1;
++	*last = pos;
++	return 0;
++}
++
++static int submit(struct mbox_chan *tx, void __iomem *mem, phys_addr_t base,
++		  unsigned int seq, u8 *buf)
++{
++	u64 start = base + SZ_4K + 3 * SZ_16K;
++	unsigned int slot = seq % 4;
++	__le64 ptr = cpu_to_le64(base + 2 * SZ_1K);
++	u8 desc[96];
++
++	memcpy_toio(mem + SZ_4K + 3 * SZ_16K + slot * SZ_4K, buf, SZ_4K);
++	memcpy_fromio(desc, mem + 2 * SZ_1K, sizeof(desc));
++	put_unaligned_le64(start + ((slot + 1) % 4) * SZ_4K, desc + 24);
++	put_unaligned_le32(seq, desc + 84);
++	memcpy_toio(mem + 2 * SZ_1K, desc, sizeof(desc));
++	wmb();
++	return source_msg(tx, 10, 1, 8, &ptr, 8);
++}
++static int play_stream(struct turner_stream *stream)
++{
++	struct device *dev __free(put_device) = bus_find_device_by_name(
++		&platform_bus_type, NULL, "1a060000.adsp-core0");
++	struct mbox_client client = { .dev = dev,
++				      .tx_block = true,
++				      .tx_tout = 200 };
++	phys_addr_t out, iv;
++	struct mbox_chan *tx;
++	u8 *buf __free(kfree) = NULL;
++	void __iomem *mem;
++	struct device *afe __free(put_device) = bus_find_device_by_name(
++		&platform_bus_type, NULL, "1a110000.mt6991-afe-pcm");
++	struct regmap *map;
++
++	struct afe_field fields[ARRAY_SIZE(field_defaults)];
++	struct snd_pcm_substream *pcm = stream->pcm;
++	struct snd_pcm_runtime *rt = pcm->runtime;
++	unsigned int last = 0, seq, drain_ticks = 0, tail_frames = 0, credit = 0;
++	ktime_t tick;
++	unsigned int iv_missing = 0, feedback_checks = 0, output_peak = 0;
++	snd_pcm_uframes_t pos = 0;
++	int ret, stop, i, changed = 0;
++	memcpy(fields, field_defaults, sizeof(fields));
++
++	struct device *left __free(put_device) =
++		bus_find_device_by_name(&i2c_bus_type, NULL, "0-0034");
++	struct device *right __free(put_device) =
++		bus_find_device_by_name(&i2c_bus_type, NULL, "0-0036");
++	struct device *card __free(put_device) =
++		bus_find_device_by_name(&platform_bus_type, NULL, "sound");
++	struct reset_control *reset = NULL;
++	struct pinctrl *pins = NULL;
++	struct regmap *amps[2];
++	bool awake = false;
++	if (!left || !right || !card)
++		return -ENODEV;
++	amps[0] = dev_get_regmap(left, NULL);
++	amps[1] = dev_get_regmap(right, NULL);
++	if (!amps[0] || !amps[1])
++		return -ENODEV;
++	if (!dev || !afe)
++		return -ENODEV;
++	ret = mt6991_adsp_memif_windows(dev, &out, &iv);
++	if (ret)
++		return ret;
++	if (!test_layout_matches(dev, out) || iv != out + SZ_16K)
++		return -ERANGE;
++	buf = kmalloc(SZ_16K, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
++	mem = ioremap_wc(out - SZ_16K - SZ_4K, SZ_4K + 4 * SZ_16K);
++	if (!mem)
++		return -ENOMEM;
++	tx = mbox_request_channel(&client, 0);
++	if (IS_ERR(tx)) {
++		ret = PTR_ERR(tx);
++		goto unmap;
++	}
++	map = dev_get_regmap(afe, NULL);
++	if (!map || pm_runtime_get_if_in_use(afe) <= 0) {
++		ret = -EAGAIN;
++		goto free_tx;
++	}
++	ret = check_window(map, 0x4620, out, BIT(31));
++	if (!ret)
++		ret = check_window(map, 0x4df0, iv, BIT(28));
++	if (ret)
++		goto restore;
++	for (i = 0; i < ARRAY_SIZE(fields); i++) {
++		struct afe_field *f = &fields[i];
++
++		ret = regmap_read(map, f->reg, &f->saved);
++		if (ret)
++			goto restore;
++		changed++;
++		ret = regmap_update_bits(map, f->reg, f->mask, f->value);
++		if (ret)
++			goto restore;
++	}
++	ret = send_measured_cal(dev, tx);
++	if (ret < 0)
++		goto restore;
++
++	pins = pinctrl_get_select(card, "i2s4-active");
++	if (IS_ERR(pins)) {
++		ret = PTR_ERR(pins);
++		pins = NULL;
++		goto restore;
++	}
++	reset = reset_control_get_shared(left, NULL);
++	if (IS_ERR(reset)) {
++		ret = PTR_ERR(reset);
++		reset = NULL;
++		goto restore;
++	}
++
++	ret = reset_control_deassert(reset);
++	if (ret)
++		goto restore;
++	awake = true;
++	usleep_range(2500, 3000);
++	ret = configure(left, profile_34, ARRAY_SIZE(profile_34));
++	if (!ret)
++		ret = configure(right, profile_36, ARRAY_SIZE(profile_36));
++	if (ret)
++		goto restore;
++
++	ret = trigger(tx, 0xf);
++	if (ret >= 0)
++		ret = source_setup(tx, mem, out - SZ_16K - SZ_4K, buf);
++	if (!ret)
++		ret = source_msg(tx, 15, 3, 1, NULL, 0);
++	if (!ret)
++		ret = regmap_read(map, 0x462c, &last);
++	last = (last - lower_32_bits(out)) / SZ_4K;
++	tick = ktime_get();
++	for (seq = 3; !ret && READ_ONCE(stream->running); seq++) {
++		unsigned int frames = 0;
++		snd_pcm_uframes_t appl, ready;
++		ret = wait_period(map, lower_32_bits(out), &last, &credit, &tick);
++		if (ret || !READ_ONCE(stream->running))
++			break;
++		if (seq >= 10) {
++			for (i = 0; i < 2 && !ret; i++) {
++				ret = amp_ok(amps[i]);
++				if (!ret && seq == 10)
++					ret = regmap_set_bits(amps[i], 0, BIT(4) | BIT(3));
++			}
++			if (ret)
++				break;
++		}
++		if (seq >= 26 && !(seq % 8)) {
++			u32 iv_bits = 0, peak = 0;
++
++			for (unsigned int off = 0; off < SZ_16K; off += 132) {
++				s32 sample = readl(mem + SZ_4K + SZ_16K + off);
++
++				peak = max(peak, (u32)abs(sample >> 8));
++				iv_bits |= readl(mem + SZ_4K + 2 * SZ_16K + off);
++			}
++			output_peak = max(peak, output_peak);
++			if (iv_bits)
++				feedback_checks++;
++			if (peak > 128 && !iv_bits) {
++				if (++iv_missing >= 2) {
++					dev_err(dev, "speaker output active without IV feedback\n");
++					ret = -EIO;
++					break;
++				}
++			} else {
++				iv_missing = 0;
++			}
++		}
++		memset(buf, 0, SZ_4K);
++		if (seq >= 10 && !drain_ticks) {
++			appl = READ_ONCE(rt->control->appl_ptr);
++			ready = appl >= pos ? appl - pos : rt->boundary - pos + appl;
++			frames = min_t(snd_pcm_uframes_t, ready, 512);
++			for (unsigned int j = 0; j < frames; j++) {
++				const u8 *p = rt->dma_area + ((pos + j) % rt->buffer_size) * 8;
++				for (unsigned int ch = 0; ch < 2; ch++) {
++					s32 v = get_unaligned_le32(p + ch * 4);
++					/* Reserve 18 dB of digital headroom ahead of the calibrated DSP. */
++					put_unaligned_le32(v / 8, buf + j * 8 + ch * 4);
++				}
++			}
++			pos = (pos + frames) % rt->boundary;
++		}
++		ret = submit(tx, mem, out - SZ_16K - SZ_4K, seq, buf);
++		if (ret)
++			break;
++		/* ALSA may reuse a period as soon as the DSP owns its copy.
++		 * Hold the final notification through the firmware FIFO on drain.
++		 */
++		if (!drain_ticks && frames && READ_ONCE(rt->state) == SNDRV_PCM_STATE_DRAINING &&
++		    READ_ONCE(rt->control->appl_ptr) == pos) {
++			tail_frames = frames;
++			drain_ticks = 5;
++			frames = 0;
++		}
++		if (drain_ticks && !--drain_ticks) {
++			frames = tail_frames;
++			tail_frames = 0;
++		}
++		if (frames) {
++			WRITE_ONCE(stream->position, (stream->position + frames) % rt->buffer_size);
++			snd_pcm_period_elapsed(pcm);
++		}
++	}
++	if (awake)
++		for (int j = 0; j < 2; j++)
++			regmap_clear_bits(amps[j], 0, BIT(3) | BIT(4));
++	source_msg(tx, 16, 3, 1, NULL, 0);
++	source_msg(tx, 9, 1, 1, NULL, 0);
++	source_msg(tx, 2, 1, 0, NULL, 0);
++	stop = trigger(tx, 0x10);
++
++	dev_info(dev, "speaker stream status=%d stop=%d feedback=%u peak=%u\n",
++		 ret, stop, feedback_checks, output_peak);
++	if (ret >= 0)
++		ret = min(stop, 0);
++restore:
++
++	if (awake && reset_control_assert(reset))
++		ret = -EIO;
++	if (reset)
++		reset_control_put(reset);
++	if (pins)
++		pinctrl_put(pins);
++	while (changed) {
++		struct afe_field *f = &fields[--changed];
++		int err = regmap_update_bits(map, f->reg, f->mask, f->saved);
++
++		if (!ret)
++			ret = err;
++	}
++	pm_runtime_put(afe);
++free_tx:
++	mbox_free_channel(tx);
++unmap:
++	iounmap(mem);
++	return ret;
++}
++
++void turner_playback_work(struct work_struct *work)
++{
++	struct turner_stream *stream = container_of(work, struct turner_stream, work);
++	int ret = play_stream(stream);
++
++	if (ret && READ_ONCE(stream->running)) {
++		pr_err_ratelimited("turner protected playback failed: %d\n", ret);
++		snd_pcm_stop_xrun(stream->pcm);
++	}
++}
+--- /dev/null
++++ b/sound/soc/mediatek/mt6991/turner_profile.h
+@@ -0,0 +1,116 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Turner 0x110b65 startup table from the board driver. */
++static const struct reg_sequence startup[] = {
++	{ 0x00, 0xf241 },
++	{ 0x02, 0x0c28 },
++	{ 0x08, 0x009a },
++	{ 0x50, 0xc000 },
++	{ 0x54, 0x10e0 },
++	{ 0x5a, 0x5f5e },
++	{ 0x5b, 0x74e2 },
++	{ 0x5c, 0xb02b },
++	{ 0x5f, 0x00a0 },
++	{ 0x62, 0x06c4 },
++	{ 0x63, 0x80d4 },
++	{ 0x65, 0x0c58 },
++	{ 0x67, 0x006e },
++	{ 0x68, 0x0820 },
++	{ 0x69, 0x0119 },
++	{ 0x74, 0x6028 },
++	{ 0x75, 0x1daa },
++	{ 0x78, 0x0001 },
++	{ 0x7c, 0x10f2 },
++	{ 0xdd, 0x01b6 },
++};
++static const struct field profile_36[] = {
++	{ 0x20c3, 0x0002 },
++	{ 0x2081, 0x0003 },
++	{ 0x20a1, 0x0003 },
++	{ 0x2061, 0x0000 },
++	{ 0x2140, 0x0001 },
++	{ 0x2183, 0x0000 },
++	{ 0x2130, 0x0001 },
++	{ 0x21c3, 0x0001 },
++	{ 0x2203, 0x0000 },
++	{ 0x6802, 0x0004 },
++	{ 0x6842, 0x0001 },
++	{ 0x6872, 0x0002 },
++	{ 0x8790, 0x0000 },
++	{ 0x5f54, 0x0005 },
++	{ 0x63c1, 0x0000 },
++	{ 0x62b2, 0x0006 },
++	{ 0x6243, 0x0004 },
++	{ 0x65b0, 0x0000 },
++	{ 0x68a1, 0x0002 },
++	{ 0xce30, 0x0000 },
++	{ 0x5a13, 0x0006 },
++	{ 0x7509, 0x01aa },
++	{ 0x75a4, 0x0007 },
++	{ 0x7424, 0x000a },
++	{ 0x7687, 0x00f0 },
++	{ 0x6705, 0x002e },
++	{ 0x0834, 0x0013 },
++	{ 0x50f0, 0x0001 },
++	{ 0x5b41, 0x0001 },
++	{ 0x5b62, 0x0003 },
++	{ 0x5a53, 0x0008 },
++	{ 0x5a91, 0x0002 },
++	{ 0x5b03, 0x0005 },
++	{ 0x5ab3, 0x0005 },
++	{ 0x5c81, 0x0003 },
++	{ 0x5b93, 0x0000 },
++	{ 0x5c43, 0x0000 },
++	{ 0x7ce1, 0x0001 },
++	{ 0x0203, 0x0008 },
++	{ 0x0256, 0x0061 },
++	{ 0x2130, 0x0001 },
++	{ 0x0040, 0x0001 },
++	{ 0x2030, 0x0000 },
++	{ 0x7ce1, 0x0001 },
++};
++static const struct field profile_34[] = {
++	{ 0x20c3, 0x0002 },
++	{ 0x2081, 0x0003 },
++	{ 0x20a1, 0x0003 },
++	{ 0x2061, 0x0000 },
++	{ 0x2140, 0x0001 },
++	{ 0x2183, 0x0001 },
++	{ 0x2130, 0x0001 },
++	{ 0x21c3, 0x0000 },
++	{ 0x2203, 0x0001 },
++	{ 0x6802, 0x0004 },
++	{ 0x6842, 0x0001 },
++	{ 0x6872, 0x0002 },
++	{ 0x8790, 0x0000 },
++	{ 0x5f54, 0x0005 },
++	{ 0x63c1, 0x0000 },
++	{ 0x62b2, 0x0006 },
++	{ 0x6243, 0x0004 },
++	{ 0x65b0, 0x0000 },
++	{ 0x68a1, 0x0002 },
++	{ 0xce30, 0x0000 },
++	{ 0x5a13, 0x0006 },
++	{ 0x7509, 0x01aa },
++	{ 0x75a4, 0x0007 },
++	{ 0x7424, 0x000a },
++	{ 0x7687, 0x00f0 },
++	{ 0x6705, 0x002e },
++	{ 0x0834, 0x0013 },
++	{ 0x50f0, 0x0001 },
++	{ 0x5b41, 0x0001 },
++	{ 0x5b62, 0x0003 },
++	{ 0x5a53, 0x0008 },
++	{ 0x5a91, 0x0002 },
++	{ 0x5b03, 0x0005 },
++	{ 0x5ab3, 0x0005 },
++	{ 0x5c81, 0x0003 },
++	{ 0x5b93, 0x0000 },
++	{ 0x5c43, 0x0000 },
++	{ 0x7ce1, 0x0001 },
++	{ 0x0203, 0x0008 },
++	{ 0x0256, 0x0061 },
++	{ 0x2130, 0x0001 },
++	{ 0x0040, 0x0001 },
++	{ 0x2030, 0x0000 },
++	{ 0x7ce1, 0x0001 },
++};
+--- a/sound/soc/mediatek/mt6991/turner.c
++++ b/sound/soc/mediatek/mt6991/turner.c
+@@ -115,7 +115,7 @@
+ 			put_unaligned_le32(((s64)sample * gain) / 65536, p);
+ 		}
+ 	}
+-	return mt6991_adsp_pcm_prefill(audio->dsp, pos, rt->dma_area + pos, bytes);
++	return 0;
+ }
+ 
+ static const struct snd_soc_component_driver turner_stream_component = {
+@@ -335,7 +335,8 @@
+ 	snd_soc_card_set_drvdata(&audio->card, audio);
+ 	audio->card.dev = dev;
+ 	audio->card.owner = THIS_MODULE;
+-	audio->volume = ARRAY_SIZE(speaker_gain) - 1;
++	/* Start within the previously measured low-level envelope. */
++	audio->volume = 32;
+ 	audio->unmuted = true;
+ 	audio->card.controls = turner_controls;
+ 	audio->card.num_controls = ARRAY_SIZE(turner_controls);

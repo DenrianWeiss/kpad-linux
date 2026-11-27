@@ -1,0 +1,345 @@
+Subject: usb: support Turner USB0 Type-C data role and gated 5 V output
+
+--- a/drivers/usb/roles/Makefile
++++ b/drivers/usb/roles/Makefile
+@@ -3,3 +3,5 @@
+ obj-$(CONFIG_USB_ROLE_SWITCH)		+= roles.o
+ roles-y					:= class.o
+ obj-$(CONFIG_USB_ROLES_INTEL_XHCI)	+= intel-xhci-usb-role-switch.o
++
++obj-$(CONFIG_USB_TURNER_TYPEC) += turner-usb0.o
+--- a/drivers/usb/roles/Kconfig
++++ b/drivers/usb/roles/Kconfig
+@@ -15,6 +15,12 @@
+ 
+ if USB_ROLE_SWITCH
+ 
++config USB_TURNER_TYPEC
++	tristate "Xiaomi Turner MT6379 USB0 Type-C controller"
++	depends on OF && GPIOLIB && REGMAP
++	help
++	  Detect Type-C partners and control USB0 data role and VBUS on Turner.
++
+ config USB_ROLES_INTEL_XHCI
+ 	tristate "Intel XHCI USB Role Switch"
+ 	depends on ACPI && X86
+--- /dev/null
++++ b/drivers/usb/roles/turner-usb0.c
+@@ -0,0 +1,289 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Turner USB0: MT6379 Type-C CC, shared boost and port-A load switch. */
++#include <linux/bitfield.h>
++#include <linux/gpio/consumer.h>
++#include <linux/interrupt.h>
++#include <linux/jiffies.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/usb/role.h>
++#include <linux/usb/tcpci.h>
++#include <linux/workqueue.h>
++
++#define TCPC_BASE       0x400
++#define CHG_TOP2        0x108
++#define BOOST_EN        BIT(0)
++#define OTG_CV          0x11c
++#define OTG_CC          0x11e
++#define TEST_KEY        0x007
++#define HD_PP7          0x135
++#define FLOW_IDLE       BIT(5)
++
++struct turner_port {
++	struct device *dev;
++	struct regmap *map;
++	struct gpio_desc *gate;
++	struct usb_role_switch *role;
++	struct delayed_work poll;
++	unsigned int samples;
++	unsigned int prev_cc;
++	bool owned;
++	bool sourcing;
++	enum { PREFER_SINK, DUAL_ROLE, TRY_SINK, TRY_SOURCE } phase;
++	unsigned long deadline;
++};
++
++static int boost_flow(struct turner_port *p, bool idle)
++{
++	static const u8 key[] = { 0x69, 0x96, 0x63, 0x79 };
++	int ret, lock;
++
++	ret = regmap_bulk_write(p->map, TEST_KEY, key, sizeof(key));
++	if (!ret)
++		ret = regmap_update_bits(p->map, HD_PP7, FLOW_IDLE, idle ? FLOW_IDLE : 0);
++	lock = regmap_write(p->map, TEST_KEY, 0);
++	return ret ?: lock;
++}
++
++static void source_off(struct turner_port *p)
++{
++	gpiod_set_value_cansleep(p->gate, 0);
++	if (p->owned && !regmap_update_bits(p->map, CHG_TOP2, BOOST_EN, 0)) {
++		boost_flow(p, true);
++		p->owned = false;
++	}
++	if (p->sourcing)
++		usb_role_switch_set_role(p->role, USB_ROLE_DEVICE);
++	p->sourcing = false;
++}
++
++static int read_cc(struct turner_port *p, unsigned int *cc)
++{
++	return regmap_read(p->map, TCPC_BASE + TCPC_CC_STATUS, cc);
++}
++
++static bool partner_is_sink(unsigned int cc)
++{
++	unsigned int a = FIELD_GET(TCPC_CC_STATUS_CC1, cc);
++	unsigned int b = FIELD_GET(TCPC_CC_STATUS_CC2, cc);
++
++	/* Local Rp: 2 = Rd, 1 = Ra, 0 = open. Reject debug accessories. */
++	return !(cc & (TCPC_CC_STATUS_TERM | TCPC_CC_STATUS_TOGGLING)) &&
++	       ((a == 2 && b <= 1) || (b == 2 && a <= 1));
++}
++
++static int check_vsafe0v(struct turner_port *p)
++{
++	unsigned int status, cc;
++	__le16 raw;
++	int ret;
++
++	ret = read_cc(p, &cc);
++	if (ret || !partner_is_sink(cc) || cc != p->prev_cc)
++		return ret ?: -EAGAIN;
++	ret = regmap_read(p->map, TCPC_BASE + TCPC_POWER_STATUS, &status);
++	if (ret || status & (TCPC_POWER_STATUS_VBUS_PRES | TCPC_POWER_STATUS_UNINIT))
++		return ret ?: -EBUSY;
++	ret = regmap_bulk_read(p->map, TCPC_BASE + TCPC_VBUS_VOLTAGE, &raw, sizeof(raw));
++	if (ret)
++		return ret;
++	return ((le16_to_cpu(raw) & TCPC_VBUS_VOLTAGE_MASK) * 25 < 800) ? 0 : -EBUSY;
++}
++
++static int source_on(struct turner_port *p)
++{
++	static const u8 cv_5v[] = { 0, 26 };
++	unsigned int top;
++	int ret;
++
++	ret = check_vsafe0v(p);
++	if (ret)
++		return ret;
++	ret = regmap_read(p->map, CHG_TOP2, &top);
++	if (ret || top & BOOST_EN)
++		return ret ?: -EBUSY;
++	ret = regmap_bulk_write(p->map, OTG_CV, cv_5v, sizeof(cv_5v));
++	if (!ret)
++		ret = regmap_update_bits(p->map, OTG_CC, GENMASK(2, 0), 0); /* 500 mA */
++	if (ret)
++		return ret;
++	p->owned = true;
++	ret = boost_flow(p, false);
++	if (!ret)
++		ret = regmap_update_bits(p->map, CHG_TOP2, BOOST_EN, BOOST_EN);
++	if (!ret)
++		ret = check_vsafe0v(p);
++	if (!ret)
++		ret = gpiod_set_value_cansleep(p->gate, 1);
++	if (!ret) {
++		ret = usb_role_switch_set_role(p->role, USB_ROLE_HOST);
++	}
++	if (ret)
++		source_off(p);
++	else {
++		p->sourcing = true;
++		dev_info(p->dev, "USB0 sourcing 5 V, 500 mA limit\n");
++	}
++	return ret;
++}
++
++/* A dual-role computer can accept power too. Give it the opportunity to
++ * advertise Rp before supplying VBUS. A fixed-role flash drive never does.
++ */
++static int prefer_sink(struct turner_port *p, bool retry)
++{
++	int ret = regmap_write(p->map, TCPC_BASE + TCPC_ROLE_CTRL, 0x0a); /* Rd/Rd */
++
++	if (!ret) {
++		p->phase = retry ? TRY_SINK : PREFER_SINK;
++		p->deadline = jiffies + msecs_to_jiffies(retry ? 140 : 650);
++		p->samples = 0;
++	}
++	return ret;
++}
++
++static int arm_drp(struct turner_port *p, bool tried_sink)
++{
++	int ret = regmap_write(p->map, TCPC_BASE + TCPC_ROLE_CTRL, 0x4a);
++
++	if (!ret)
++		ret = regmap_write(p->map, TCPC_BASE + TCPC_COMMAND, TCPC_CMD_LOOK4CONNECTION);
++	if (!ret) {
++		p->phase = tried_sink ? TRY_SOURCE : DUAL_ROLE;
++		p->deadline = jiffies + msecs_to_jiffies(650);
++		p->samples = 0;
++	}
++	return ret;
++}
++
++static void update_port(struct turner_port *p)
++{
++	unsigned int cc, power;
++	bool pins;
++	int ret;
++
++	ret = read_cc(p, &cc);
++	if (!ret)
++		ret = regmap_read(p->map, TCPC_BASE + TCPC_POWER_STATUS, &power);
++	if (ret) {
++		if (p->owned || p->sourcing)
++			source_off(p);
++		return;
++	}
++
++	pins = cc & (TCPC_CC_STATUS_CC1 | TCPC_CC_STATUS_CC2);
++	if (p->phase == PREFER_SINK || p->phase == TRY_SINK) {
++		/* In fixed Rd mode the TERM bit is undefined. VBUS and Rp
++		 * together identify a powered source on the connector.
++		 */
++		if (pins && (power & TCPC_POWER_STATUS_VBUS_PRES)) {
++			p->phase = PREFER_SINK;
++			p->deadline = jiffies + msecs_to_jiffies(650);
++			return;
++		}
++		if (time_after_eq(jiffies, p->deadline))
++			arm_drp(p, p->phase == TRY_SINK);
++		return;
++	}
++
++	if (!partner_is_sink(cc)) {
++		p->samples = 0;
++		if (p->sourcing || p->owned) {
++			source_off(p);
++			prefer_sink(p, false);
++		} else if (!(cc & TCPC_CC_STATUS_TOGGLING) && !pins &&
++			   time_after_eq(jiffies, p->deadline)) {
++			prefer_sink(p, false);
++		} else if (p->phase == TRY_SOURCE && time_after_eq(jiffies, p->deadline)) {
++			p->phase = DUAL_ROLE;
++		}
++		return;
++	}
++
++	if (p->phase == DUAL_ROLE && !p->sourcing) {
++		prefer_sink(p, true);
++		return;
++	}
++	p->samples = cc == p->prev_cc ? min(p->samples + 1, 4U) : 1;
++	p->prev_cc = cc;
++	if (p->samples == 4 && !p->sourcing) {
++		ret = source_on(p);
++		if (ret)
++			dev_warn_ratelimited(p->dev, "USB0 source refused: %d\n", ret);
++	}
++}
++
++static void check_port(struct work_struct *work)
++{
++	struct turner_port *p = container_of(to_delayed_work(work), struct turner_port, poll);
++
++	update_port(p);
++	schedule_delayed_work(&p->poll, msecs_to_jiffies(35));
++}
++
++static int turner_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct device_node *node;
++	struct turner_port *p;
++
++	p = devm_kzalloc(dev, sizeof(*p), GFP_KERNEL);
++	if (!p)
++		return -ENOMEM;
++	p->dev = dev;
++	p->map = dev_get_regmap(dev->parent, NULL);
++	if (!p->map)
++		return -EPROBE_DEFER;
++	node = of_parse_phandle(dev->of_node, "usb-controller", 0);
++	if (!node)
++		return -EINVAL;
++	p->role = usb_role_switch_find_by_fwnode(of_fwnode_handle(node));
++	of_node_put(node);
++	if (IS_ERR_OR_NULL(p->role))
++		return PTR_ERR(p->role) ?: -EPROBE_DEFER;
++	p->gate = devm_gpiod_get(dev, "boost-enable", GPIOD_OUT_LOW);
++	if (IS_ERR(p->gate)) {
++		usb_role_switch_put(p->role);
++		return dev_err_probe(dev, PTR_ERR(p->gate), "port A boost gate\n");
++	}
++	if (prefer_sink(p, false)) {
++		usb_role_switch_put(p->role);
++		return -EIO;
++	}
++	platform_set_drvdata(pdev, p);
++	INIT_DELAYED_WORK(&p->poll, check_port);
++	schedule_delayed_work(&p->poll, 0);
++	return 0;
++}
++
++static void turner_shutdown(struct platform_device *pdev)
++{
++	struct turner_port *p = platform_get_drvdata(pdev);
++
++	cancel_delayed_work_sync(&p->poll);
++	source_off(p);
++}
++
++static void turner_remove(struct platform_device *pdev)
++{
++	struct turner_port *p = platform_get_drvdata(pdev);
++
++	turner_shutdown(pdev);
++	usb_role_switch_put(p->role);
++}
++
++static const struct of_device_id turner_match[] = {
++	{ .compatible = "xiaomi,turner-usb0-typec" }, {}
++};
++MODULE_DEVICE_TABLE(of, turner_match);
++
++static struct platform_driver turner_driver = {
++	.probe = turner_probe,
++	.remove = turner_remove,
++	.shutdown = turner_shutdown,
++	.driver = { .name = "turner-usb0-typec", .of_match_table = turner_match },
++};
++module_platform_driver(turner_driver);
++MODULE_LICENSE("GPL");
+--- a/drivers/usb/mtu3/mtu3_core.c
++++ b/drivers/usb/mtu3/mtu3_core.c
+@@ -350,14 +350,13 @@
+ 		usb_speed_string(mtu->speed), is_on ? "+" : "-");
+ }
+ 
+-/* MT6991 reports connector VBUS outside the MAC. In fixed peripheral
++/* MT6991 reports connector VBUS outside the MAC. In gadget
+  * mode the firmware requests a software session while the gadget runs.
+  * This controls the MAC input only, not the connector's VBUS supply.
+  */
+ static void mtu3_set_peripheral_session(struct mtu3 *mtu, bool active)
+ {
+-	if (mtu->ssusb->dr_mode != USB_DR_MODE_PERIPHERAL ||
+-	    !of_property_read_bool(mtu->dev->of_node, "mediatek,force-vbus"))
++	if (!of_property_read_bool(mtu->dev->of_node, "mediatek,force-vbus"))
+ 		return;
+ 
+ 	if (active) {
+@@ -365,6 +364,8 @@
+ 		mtu3_setbits(mtu->mac_base, U3D_MISC_CTRL, VBUS_FRC_EN | VBUS_ON);
+ 	} else {
+ 		mtu3_clrbits(mtu->mac_base, U3D_MISC_CTRL, VBUS_FRC_EN | VBUS_ON);
++		if (mtu->ssusb->dr_mode == USB_DR_MODE_OTG)
++			mtu3_setbits(mtu->ippc_base, SSUSB_U2_CTRL(0), SSUSB_U2_PORT_OTG_SEL);
+ 	}
+ }
+ 

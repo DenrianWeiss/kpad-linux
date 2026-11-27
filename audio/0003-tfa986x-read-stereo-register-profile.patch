@@ -1,0 +1,230 @@
+--- a/sound/soc/codecs/tfa986x.c
++++ b/sound/soc/codecs/tfa986x.c
+@@ -1,6 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* NXP TFA986x smart amplifier */
++#include <linux/crc32.h>
+ #include <linux/delay.h>
++#include <linux/firmware.h>
++#include <linux/unaligned.h>
+ #include <linux/i2c.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+@@ -10,7 +13,173 @@
+ 
+ #define TFA986X_REVISION	0x03
+ 
++#define TFA986X_CONTAINER "tfa98xx.cnt"
++
++/* PM3 descriptor pointers encode a 24-bit offset and an 8-bit type. */
++enum tfa_pm3_type {
++	TFA_DEVICE = 0,
++	TFA_PROFILE = 1,
++	TFA_STRING = 3,
++	TFA_PATCH = 5,
++	TFA_FIELD = 16,
++	TFA_DEFAULT = 17,
++	TFA_INTERFACE = 29,
++	TFA_DEVICE_ID = 33,
++};
++
++struct tfa_field {
++	u16 mask;
++	u16 value;
++	u8 reg;
++};
++
++struct tfa_settings {
++	struct tfa_field *fields;
++	unsigned int count;
++};
++
++struct tfa_stereo {
++	struct tfa_settings device;
++	struct tfa_settings enter;
++	struct tfa_settings leave;
++};
++
++static const u8 *tfa_item(const struct firmware *fw, u32 desc, size_t len)
++{
++	u32 offset = desc & 0xffffff;
++
++	if (offset > fw->size || len > fw->size - offset)
++		return NULL;
++	return fw->data + offset;
++}
++
++static int tfa_add_field(const struct firmware *fw, u32 desc,
++			 struct tfa_settings *settings)
++{
++	const u8 *p = tfa_item(fw, desc, 4);
++	u16 id, value, mask;
++	unsigned int shift, width;
++	struct tfa_field *field;
++
++	if (!p)
++		return -EINVAL;
++	value = get_unaligned_le16(p);
++	id = get_unaligned_le16(p + 2);
++	shift = (id >> 4) & 0xf;
++	width = (id & 0xf) + 1;
++	if (shift + width > 16 || value >= BIT(width))
++		return -EINVAL;
++	mask = GENMASK(shift + width - 1, shift);
++	field = &settings->fields[settings->count++];
++	field->reg = id >> 8;
++	field->mask = mask;
++	field->value = value << shift;
++	return 0;
++}
++
++static int tfa_parse_profile(struct device *dev, const struct firmware *fw,
++			     u32 desc, struct tfa_stereo *stereo)
++{
++	const u8 *p = tfa_item(fw, desc, 8);
++	const u8 *name;
++	u32 ref;
++	unsigned int i, count;
++	struct tfa_settings *settings = &stereo->enter;
++
++	if (!p || !p[0] || get_unaligned_le16(p + 2) != 0x1234)
++		return -EINVAL;
++	count = p[0] - 1; /* The name is included in the profile length. */
++	if (!tfa_item(fw, desc, 8 + 4 * count))
++		return -EINVAL;
++	ref = get_unaligned_le32(p + 4);
++	name = tfa_item(fw, ref, 1);
++	if (ref >> 24 != TFA_STRING || !name ||
++	    !memchr(name, 0, fw->size - (name - fw->data)))
++		return -EINVAL;
++	if (strcmp((const char *)name, "stereo"))
++		return 0;
++	if (stereo->enter.fields || !count)
++		return -EINVAL;
++	settings->fields = devm_kcalloc(dev, count, sizeof(*settings->fields), GFP_KERNEL);
++	if (!settings->fields)
++		return -ENOMEM;
++	for (i = 0; i < count; i++) {
++		ref = get_unaligned_le32(p + 8 + i * 4);
++		switch (ref >> 24) {
++		case TFA_DEFAULT:
++			if (settings == &stereo->leave)
++				return -EINVAL;
++			stereo->leave.fields = settings->fields + settings->count;
++			settings = &stereo->leave;
++			break;
++		case TFA_FIELD:
++			if (tfa_add_field(fw, ref, settings))
++				return -EINVAL;
++			break;
++		default:
++			return -EOPNOTSUPP;
++		}
++	}
++	return stereo->enter.count ? 0 : -EINVAL;
++}
++
++static int tfa_parse_stereo(struct device *dev, const struct firmware *fw,
++			    unsigned int address, struct tfa_stereo *stereo)
++{
++	const u8 *p;
++	u32 desc, ref;
++	unsigned int i, j, ndev;
++	int ret;
++
++	if (fw->size < 46 || memcmp(fw->data, "PM3_01", 6) ||
++	    get_unaligned_le32(fw->data + 6) != fw->size ||
++	    (crc32_le(~0U, fw->data + 14, fw->size - 14) ^ ~0U) !=
++	    get_unaligned_le32(fw->data + 10))
++		return -EINVAL;
++	ndev = get_unaligned_le16(fw->data + 40);
++	if (ndev > (fw->size - 46) / 4)
++		return -EINVAL;
++
++	for (i = 0; i < ndev; i++) {
++		desc = get_unaligned_le32(fw->data + 46 + 4 * i);
++		p = tfa_item(fw, desc, 12);
++		if (desc >> 24 != TFA_DEVICE || !p ||
++		    !tfa_item(fw, desc, 12 + 4 * p[0]))
++			return -EINVAL;
++		if (p[2] != address)
++			continue;
++		if (stereo->device.fields || !p[0])
++			return -EINVAL;
++		stereo->device.fields = devm_kcalloc(dev, p[0],
++						sizeof(struct tfa_field), GFP_KERNEL);
++		if (!stereo->device.fields)
++			return -ENOMEM;
++		for (j = 0; j < p[0]; j++) {
++			ref = get_unaligned_le32(p + 12 + 4 * j);
++			switch (ref >> 24) {
++			case TFA_FIELD:
++				ret = tfa_add_field(fw, ref, &stereo->device);
++				break;
++			case TFA_PROFILE:
++				ret = tfa_parse_profile(dev, fw, ref, stereo);
++				break;
++			case TFA_INTERFACE:
++			case TFA_DEVICE_ID:
++			case TFA_PATCH:
++				/* Separate from the register field lists. */
++				continue;
++			default:
++				return -EOPNOTSUPP;
++			}
++			if (ret)
++				return ret;
++		}
++	}
++	return stereo->device.count && stereo->enter.count ? 0 : -ENOENT;
++}
++
+ struct tfa986x {
++	struct tfa_stereo stereo;
+ 	struct regmap *regmap;
+ 	struct reset_control *reset;
+ };
+@@ -61,6 +230,7 @@
+ {
+ 	struct device *dev = &client->dev;
+ 	struct tfa986x *tfa;
++	const struct firmware *fw;
+ 	unsigned int revision;
+ 	int ret, suspend_ret;
+ 
+@@ -93,7 +263,17 @@
+ 	if (revision != 0x9866)
+ 		return dev_err_probe(dev, -ENODEV, "unknown revision %#x\n", revision);
+ 
+-	dev_info(dev, "TFA986x revision %#04x\n", revision);
++	ret = request_firmware(&fw, TFA986X_CONTAINER, dev);
++	if (ret)
++		return dev_err_probe(dev, ret, "loading speaker container\n");
++	ret = tfa_parse_stereo(dev, fw, client->addr, &tfa->stereo);
++	release_firmware(fw);
++	if (ret)
++		return dev_err_probe(dev, ret, "reading stereo register settings\n");
++
++	dev_info(dev, "revision %#04x, stereo fields %u/%u/%u\n", revision,
++		 tfa->stereo.device.count, tfa->stereo.enter.count,
++		 tfa->stereo.leave.count);
+ 	return 0;
+ }
+ 
+@@ -118,4 +298,5 @@
+ module_i2c_driver(tfa986x_driver);
+ 
+ MODULE_DESCRIPTION("NXP TFA986x speaker amplifier");
++MODULE_FIRMWARE(TFA986X_CONTAINER);
+ MODULE_LICENSE("GPL");
+--- a/sound/soc/codecs/Kconfig
++++ b/sound/soc/codecs/Kconfig
+@@ -2298,6 +2298,8 @@
+ 	depends on I2C && GPIOLIB && RESET_CONTROLLER && PM
+ 	select REGMAP_I2C
+ 	select RESET_GPIO
++	select CRC32
++	select FW_LOADER
+ 	help
+ 	  Enable identification and shared reset management on TFA986x
+ 	  amplifiers fitted to the Xiaomi Turner tablet.

@@ -1,0 +1,95 @@
+Subject: [PATCH] watchdog: keep MT6991 reset supervision across handoff
+
+--- a/drivers/watchdog/mtk_wdt.c
++++ b/drivers/watchdog/mtk_wdt.c
+@@ -74,6 +74,7 @@
+ 	void __iomem *wdt_base;
+ 	spinlock_t lock; /* protects WDT_SWSYSRST reg */
+ 	struct reset_controller_dev rcdev;
++	bool keep_running;
+ 	bool disable_wdt_extrst;
+ 	bool reset_by_toprgu;
+ 	bool has_swsysrst_en;
+@@ -265,6 +266,8 @@
+ 	u32 reg;
+ 
+ 	wdt_dev->timeout = timeout;
++	/* The core extends longer userspace deadlines with keepalives. */
++	timeout = min_t(unsigned int, timeout, WDT_MAX_TIMEOUT);
+ 	/*
+ 	 * In dual mode, irq will be triggered at timeout / 2
+ 	 * the real timeout occurs at timeout
+@@ -435,20 +438,34 @@
+ 	mtk_wdt->wdt_dev.parent = dev;
+ 
+ 	watchdog_init_timeout(&mtk_wdt->wdt_dev, timeout, dev);
+-	watchdog_set_nowayout(&mtk_wdt->wdt_dev, nowayout);
++	mtk_wdt->keep_running = of_device_is_compatible(dev->of_node, "mediatek,mt6991-wdt");
++	watchdog_set_nowayout(&mtk_wdt->wdt_dev, nowayout || mtk_wdt->keep_running);
+ 	watchdog_set_restart_priority(&mtk_wdt->wdt_dev, 128);
+ 
+ 	watchdog_set_drvdata(&mtk_wdt->wdt_dev, mtk_wdt);
+ 
++	mtk_wdt->disable_wdt_extrst =
++		of_property_read_bool(dev->of_node, "mediatek,disable-extrst");
++
++	mtk_wdt->reset_by_toprgu =
++		of_property_read_bool(dev->of_node, "mediatek,reset-by-toprgu");
++
+ 	mtk_wdt_init(&mtk_wdt->wdt_dev);
+ 
+-	watchdog_stop_on_reboot(&mtk_wdt->wdt_dev);
++	if (mtk_wdt->keep_running && !watchdog_hw_running(&mtk_wdt->wdt_dev)) {
++		err = mtk_wdt_start(&mtk_wdt->wdt_dev);
++		if (err)
++			return err;
++		set_bit(WDOG_HW_RUNNING, &mtk_wdt->wdt_dev.status);
++	}
++	if (!mtk_wdt->keep_running)
++		watchdog_stop_on_reboot(&mtk_wdt->wdt_dev);
+ 	err = devm_watchdog_register_device(dev, &mtk_wdt->wdt_dev);
+ 	if (unlikely(err))
+ 		return err;
+ 
+ 	dev_info(dev, "Watchdog enabled (timeout=%d sec, nowayout=%d)\n",
+-		 mtk_wdt->wdt_dev.timeout, nowayout);
++		 mtk_wdt->wdt_dev.timeout, nowayout || mtk_wdt->keep_running);
+ 
+ 	wdt_data = of_device_get_match_data(dev);
+ 	if (wdt_data) {
+@@ -460,12 +477,6 @@
+ 		mtk_wdt->has_swsysrst_en = wdt_data->has_swsysrst_en;
+ 	}
+ 
+-	mtk_wdt->disable_wdt_extrst =
+-		of_property_read_bool(dev->of_node, "mediatek,disable-extrst");
+-
+-	mtk_wdt->reset_by_toprgu =
+-		of_property_read_bool(dev->of_node, "mediatek,reset-by-toprgu");
+-
+ 	return 0;
+ }
+ 
+@@ -473,6 +484,8 @@
+ {
+ 	struct mtk_wdt_dev *mtk_wdt = dev_get_drvdata(dev);
+ 
++	if (mtk_wdt->keep_running)
++		return mtk_wdt_ping(&mtk_wdt->wdt_dev);
+ 	if (watchdog_active(&mtk_wdt->wdt_dev))
+ 		mtk_wdt_stop(&mtk_wdt->wdt_dev);
+ 
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -486,6 +486,11 @@
+ 			reg = <0 0x1c00d000 0 0x1000>;
+ 		};
+ 
++		watchdog@1c010000 {
++			compatible = "mediatek,mt6991-wdt", "mediatek,mt6589-wdt";
++			reg = <0 0x1c010000 0 0x1000>;
++		};
++
+ 		vlpckgen: clock-controller@1c016000 {
+ 			compatible = "mediatek,mt6991-vlpckgen", "syscon";
+ 			reg = <0 0x1c016000 0 0x1000>;

@@ -1,0 +1,168 @@
+Subject: [RFC PATCH] wifi: mt76: install the MT6653 runtime MCU transport
+
+The ROM transport only speaks the download commands. Once the WM firmware
+reports ready the device answers the normal connac3 command set on the same
+WM queue, so add that runtime message builder/parser and switch to it after
+mt6653_pci_boot_ram() succeeds.
+
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_mcu.c
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: BSD-3-Clause-Clear
+ #include <linux/unaligned.h>
+ #include "mt76_connac_mcu.h"
++#include "mt76_connac3_mac.h"
+ 
+ #define MT6653_NVRAM_PREFIX_SIZE	256
+ #define MT6653_NVRAM_FRAGMENT_SIZE	1500
+@@ -72,3 +73,128 @@
+ 	return ret;
+ }
+ EXPORT_SYMBOL_GPL(mt6653_mcu_set_nvram);
++
++/* Runtime MCU transport. The ROM path only speaks the download commands; once
++ * the WM firmware reports ready the device answers the normal connac command
++ * set through the same WM queue.
++ */
++struct mt6653_mcu_rxd {
++	__le32 rxd[8];
++	__le16 len;
++	__le16 pkt_type;
++	u8 eid;
++	u8 seq;
++	u8 reserved[2];
++} __packed;
++
++static int mt6653_mcu_parse_response(struct mt76_dev *mdev, int cmd,
++				     struct sk_buff *skb, int seq)
++{
++	struct mt6653_mcu_rxd *rxd;
++	int mcu_cmd = FIELD_GET(__MCU_CMD_FIELD_ID, cmd);
++	int ret = 0;
++
++	if (!skb) {
++		dev_err(mdev->dev, "Message %08x (seq %d) timeout\n", cmd, seq);
++		return -ETIMEDOUT;
++	}
++
++	rxd = (struct mt6653_mcu_rxd *)skb->data;
++	if (seq != rxd->seq)
++		return -EAGAIN;
++
++	if (rxd->pkt_type != MCU_PKT_ID && !(rxd->eid & 1))
++		return -EPROTO;
++
++	if (cmd == MCU_CMD(PATCH_SEM_CONTROL)) {
++		skb_pull(skb, sizeof(*rxd) - 4);
++		ret = *skb->data;
++	} else if (rxd->eid == MCU_UNI_EVENT_RESULT) {
++		struct {
++			__le16 cid;
++			__le16 reserved;
++			__le32 status;
++		} __packed *event;
++
++		skb_pull(skb, sizeof(*rxd));
++		event = (void *)skb->data;
++		ret = le32_to_cpu(event->status);
++		if (mcu_cmd != le16_to_cpu(event->cid))
++			ret = -EAGAIN;
++	} else {
++		skb_pull(skb, sizeof(*rxd));
++	}
++
++	return ret;
++}
++
++static int mt6653_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
++				   int cmd, int *wait_seq)
++{
++	struct mt76_connac2_mcu_uni_txd *uni_txd;
++	struct mt76_connac2_mcu_txd *mcu_txd;
++	enum mt76_mcuq_id qid = MT_MCUQ_WM;
++	int txd_len, mcu_cmd = FIELD_GET(__MCU_CMD_FIELD_ID, cmd);
++	__le32 *txd;
++	u32 val;
++	u8 seq;
++
++	seq = ++mdev->mcu.msg_seq;
++	if (!seq)
++		seq = ++mdev->mcu.msg_seq;
++
++	if (cmd == MCU_CMD(FW_SCATTER))
++		qid = MT_MCUQ_FWDL;
++
++	txd_len = cmd & __MCU_CMD_FIELD_UNI ? sizeof(*uni_txd) : sizeof(*mcu_txd);
++	txd = (__le32 *)skb_push(skb, txd_len);
++
++	val = FIELD_PREP(MT_TXD0_TX_BYTES, skb->len) |
++	      FIELD_PREP(MT_TXD0_PKT_FMT, MT_TX_TYPE_CMD) |
++	      FIELD_PREP(MT_TXD0_Q_IDX, MT_TX_MCU_PORT_RX_Q0);
++	txd[0] = cpu_to_le32(val);
++	txd[1] = cpu_to_le32(FIELD_PREP(MT_TXD1_HDR_FORMAT, MT_HDR_FORMAT_CMD));
++
++	if (cmd & __MCU_CMD_FIELD_UNI) {
++		uni_txd = (struct mt76_connac2_mcu_uni_txd *)txd;
++		uni_txd->len = cpu_to_le16(skb->len - sizeof(uni_txd->txd));
++		uni_txd->cid = cpu_to_le16(mcu_cmd);
++		uni_txd->s2d_index = MCU_S2D_H2CN;
++		uni_txd->pkt_type = MCU_PKT_ID;
++		uni_txd->seq = seq;
++		uni_txd->option = MCU_CMD_UNI;
++		if (!(cmd & __MCU_CMD_FIELD_QUERY))
++			uni_txd->option |= MCU_CMD_SET;
++		if (wait_seq)
++			uni_txd->option |= MCU_CMD_ACK;
++	} else {
++		mcu_txd = (struct mt76_connac2_mcu_txd *)txd;
++		mcu_txd->len = cpu_to_le16(skb->len - sizeof(mcu_txd->txd));
++		mcu_txd->pq_id = cpu_to_le16(MCU_PQ_ID(MT_TX_PORT_IDX_MCU,
++						       MT_TX_MCU_PORT_RX_Q0));
++		mcu_txd->pkt_type = MCU_PKT_ID;
++		mcu_txd->seq = seq;
++		mcu_txd->cid = mcu_cmd;
++		mcu_txd->set_query = MCU_Q_NA;
++		mcu_txd->ext_cid = FIELD_GET(__MCU_CMD_FIELD_EXT_ID, cmd);
++		if (mcu_txd->ext_cid) {
++			mcu_txd->ext_cid_ack = 1;
++			mcu_txd->set_query = cmd & __MCU_CMD_FIELD_QUERY ?
++					     MCU_Q_QUERY : MCU_Q_SET;
++		}
++		mcu_txd->s2d_index = MCU_S2D_H2N;
++	}
++
++	if (wait_seq)
++		*wait_seq = seq;
++	mdev->mcu.timeout = 3 * HZ;
++
++	return mdev->queue_ops->tx_queue_skb_raw(mdev, mdev->q_mcu[qid], skb, 0);
++}
++
++const struct mt76_mcu_ops mt6653_mcu_ops = {
++	.headroom = sizeof(struct mt76_connac2_mcu_txd),
++	.mcu_skb_send_msg = mt6653_mcu_send_message,
++	.mcu_parse_response = mt6653_mcu_parse_response,
++};
++EXPORT_SYMBOL_GPL(mt6653_mcu_ops);
+--- a/drivers/net/wireless/mediatek/mt76/mt6653.h
++++ b/drivers/net/wireless/mediatek/mt76/mt6653.h
+@@ -11,6 +11,7 @@
+ };
+ 
+ extern const struct mt76_mcu_ops mt6653_rom_ops;
++extern const struct mt76_mcu_ops mt6653_mcu_ops;
+ 
+ int mt6653_rom_alloc_tx_queue(struct mt76_dev *dev, enum mt76_mcuq_id qid);
+ int mt6653_rom_alloc_rx_queue(struct mt76_dev *dev);
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_pci.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_pci.c
+@@ -74,6 +74,9 @@
+ 	if (ret)
+ 		goto out_free;
+ 
++	/* The WM firmware now answers the runtime command set. */
++	mdev->mcu_ops = &mt6653_mcu_ops;
++	dev_info(&pdev->dev, "runtime MCU ops installed\n");
+ 	return 0;
+ 
+ out_free:

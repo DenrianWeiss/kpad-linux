@@ -1,0 +1,118 @@
+Subject: [RFC PATCH] wifi: mt76: encode MT6653 running firmware NVRAM fragments
+
+Validate the complete board record before submitting its typed fragments
+over the runtime MCU transport. Preserve the prefix in the first fragment.
+
+diff --git a/drivers/net/wireless/mediatek/mt76/Makefile b/drivers/net/wireless/mediatek/mt76/Makefile
+index 90ec147..fd9687f 100644
+--- a/drivers/net/wireless/mediatek/mt76/Makefile
++++ b/drivers/net/wireless/mediatek/mt76/Makefile
+@@ -36,7 +36,7 @@ mt76x02-lib-y := mt76x02_util.o mt76x02_mac.o mt76x02_mcu.o \
+ mt76x02-usb-y := mt76x02_usb_mcu.o mt76x02_usb_core.o
+ 
+ mt76-connac-lib-y := mt76_connac_mcu.o mt76_connac_mac.o mt76_connac3_mac.o
+-mt76-connac-lib-$(CONFIG_PCI) += mt6653_rom.o
++mt76-connac-lib-$(CONFIG_PCI) += mt6653_rom.o mt6653_mcu.o
+ 
+ mt792x-lib-y := mt792x_core.o mt792x_mac.o mt792x_trace.o \
+ 		mt792x_debugfs.o mt792x_dma.o
+diff --git a/drivers/net/wireless/mediatek/mt76/mt6653_mcu.c b/drivers/net/wireless/mediatek/mt76/mt6653_mcu.c
+new file mode 100644
+index 0000000..f06bc19
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_mcu.c
+@@ -0,0 +1,74 @@
++// SPDX-License-Identifier: BSD-3-Clause-Clear
++#include <linux/unaligned.h>
++#include "mt76_connac_mcu.h"
++
++#define MT6653_NVRAM_PREFIX_SIZE	256
++#define MT6653_NVRAM_FRAGMENT_SIZE	1500
++
++struct mt6653_nvram_req {
++	u8 rsv[4];
++	__le16 tag;
++	__le16 len;
++	u8 data[MT6653_NVRAM_FRAGMENT_SIZE];
++} __packed;
++
++/* The first fragment includes the fixed header. Each fragment ends at
++ * the end of one type/u16-length/value record.
++ */
++static int mt6653_nvram_walk(struct mt76_dev *dev, const u8 *data, size_t len,
++			     struct mt6653_nvram_req *req)
++{
++	size_t start = 0, pos = MT6653_NVRAM_PREFIX_SIZE;
++
++	while (pos <= len && len - pos >= 3) {
++		u16 size = get_unaligned_le16(data + pos + 1);
++		size_t end = pos + 3 + size;
++		size_t count = end - start;
++		int ret;
++
++		if (!data[pos] && !size)
++			return start ? 0 : -EINVAL;
++		if (end > len || count > MT6653_NVRAM_FRAGMENT_SIZE)
++			return -EINVAL;
++
++		if (req) {
++			memcpy(req->data, data + start, count);
++			memset(req->data + count, 0, sizeof(req->data) - count);
++			ret = mt76_mcu_send_msg(dev, MCU_UNI_CMD(NVRAM), req,
++						sizeof(*req), false);
++			if (ret)
++				return ret;
++		}
++
++		start = end;
++		pos = end;
++	}
++
++	return -EINVAL;
++}
++
++/* Called with the running WM transport and the board's own NVRAM record. */
++int mt6653_mcu_set_nvram(struct mt76_dev *dev, const u8 *data, size_t len)
++{
++	struct mt6653_nvram_req *req;
++	int ret;
++
++	if (!data || len != 0x2c00)
++		return -EINVAL;
++
++	/* Reject malformed later fragments before submitting the first one. */
++	ret = mt6653_nvram_walk(dev, data, len, NULL);
++	if (ret)
++		return ret;
++
++	req = kzalloc(sizeof(*req), GFP_KERNEL);
++	if (!req)
++		return -ENOMEM;
++
++	req->len = cpu_to_le16(sizeof(*req) - sizeof(req->rsv));
++	ret = mt6653_nvram_walk(dev, data, len, req);
++	kfree(req);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt6653_mcu_set_nvram);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
+index d99b67b..b40babf 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
++++ b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
+@@ -1342,6 +1342,7 @@ enum {
+ 	MCU_UNI_CMD_TXPOWER = 0x2b,
+ 	MCU_UNI_CMD_SET_POWER_LIMIT = 0x2c,
+ 	MCU_UNI_CMD_EFUSE_CTRL = 0x2d,
++	MCU_UNI_CMD_NVRAM = 0x2e,
+ 	MCU_UNI_CMD_RA = 0x2f,
+ 	MCU_UNI_CMD_MURU = 0x31,
+ 	MCU_UNI_CMD_TESTMODE_RX_STAT = 0x32,
+@@ -2156,6 +2157,7 @@ void mt6653_rom_rx_skb(struct mt76_dev *dev, enum mt76_rxq_id qid,
+ 		       struct sk_buff *skb, u32 *info);
+ int mt6653_rom_load_wm(struct mt76_dev *dev, const struct firmware *fw);
+ int mt6653_rom_boot_ram(struct mt76_dev *dev);
++int mt6653_mcu_set_nvram(struct mt76_dev *dev, const u8 *data, size_t len);
+ int mt6653_pci_boot_ram(struct mt76_dev *dev);
+ int mt6653_rom_load_phy(struct mt76_dev *dev, const struct firmware *fw);
+ extern const struct mt76_mcu_ops mt6653_rom_ops;

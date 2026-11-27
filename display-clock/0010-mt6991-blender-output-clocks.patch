@@ -1,0 +1,51 @@
+Subject: [PATCH] clk: mediatek: expose MT6991 main blender and output processor gates
+
+--- a/drivers/clk/mediatek/clk-mt8196-ovl0.c
++++ b/drivers/clk/mediatek/clk-mt8196-ovl0.c
+@@ -150,6 +150,8 @@
+ 	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA9, "ovl_exdma9", "disp", 13),
+ 	GATE_HWV_OVL1(MT6991_CLK_OVL0_SMI, "ovl_smi", "disp", 30),
+ 	GATE_HWV_OVL1(MT6991_CLK_OVL0_DLO5, "ovl0_dlo_async5", "disp", 20),
++	GATE_HWV_OVL0(MT6991_CLK_OVL0_BLENDER1, "ovl0_blender1", "disp", 15),
++	GATE_HWV_OVL0(MT6991_CLK_OVL0_OUTPROC0, "ovl0_outproc0", "disp", 24),
+ };
+ 
+ static const struct mtk_clk_desc mt6991_ovl0_desc = {
+--- a/drivers/clk/mediatek/clk-mt8196-ovl1.c
++++ b/drivers/clk/mediatek/clk-mt8196-ovl1.c
+@@ -150,6 +150,8 @@
+ 	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA9, "ovl1_ovl_exdma9", "disp", 13),
+ 	GATE_HWV_OVL11(MT6991_CLK_OVL1_SMI, "ovl1_smi", "disp", 30),
+ 	GATE_HWV_OVL11(MT6991_CLK_OVL1_DLO5, "ovl1_dlo_async5", "disp", 20),
++	GATE_HWV_OVL10(MT6991_CLK_OVL1_BLENDER1, "ovl1_blender1", "disp", 15),
++	GATE_HWV_OVL10(MT6991_CLK_OVL1_OUTPROC0, "ovl1_outproc0", "disp", 24),
+ };
+ 
+ static const struct mtk_clk_desc mt6991_ovl1_desc = {
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -71,7 +71,11 @@
+ #define MT6991_CLK_MM0_DLI8                2
+ #define MT6991_CLK_MM0_DLO1                3
+ #define MT6991_CLK_MM0_DLO2                4
++#define MT6991_CLK_OVL0_BLENDER1           13
++#define MT6991_CLK_OVL0_OUTPROC0           14
+ #define MT6991_CLK_OVL0_DLO5               12
++#define MT6991_CLK_OVL1_BLENDER1           13
++#define MT6991_CLK_OVL1_OUTPROC0           14
+ #define MT6991_CLK_OVL1_DLO5               12
+ 
+ #define MT6991_CLK_MM0_MUTEX               0
+--- a/drivers/clk/mediatek/clk-mt6991-ovl.h
++++ b/drivers/clk/mediatek/clk-mt6991-ovl.h
+@@ -15,6 +15,10 @@
+ 	id = args->args[0];
+ 	if (id >= 6 && id <= 27)
+ 		return clks->hws[MT6991_CLK_OVL0_MUTEX + (id - 6) / 2];
++	if (id == 30 || id == 31)
++		return clks->hws[MT6991_CLK_OVL0_BLENDER1];
++	if (id == 48 || id == 49)
++		return clks->hws[MT6991_CLK_OVL0_OUTPROC0];
+ 	if (id == 104 || id == 105)
+ 		return clks->hws[MT6991_CLK_OVL0_DLO5];
+ 	if (id == 124 || id == 125)

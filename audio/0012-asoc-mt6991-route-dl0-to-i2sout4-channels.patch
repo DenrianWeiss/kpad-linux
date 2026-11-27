@@ -1,0 +1,37 @@
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -22,6 +22,8 @@
+ #define MT6991_AUDIO_PWR_CON	0xe4c
+ #define MT6991_AUDIO_PWR_ACK	GENMASK(31, 30)
+ 
++#define AFE_CONN116_1		0x2f04
++#define AFE_CONN117_1		0x2f24
+ #define AFE_DL0_CON0	0x4460
+ 
+ enum mt6991_bus_clock {
+@@ -313,7 +315,25 @@
+ 	return 0;
+ }
+ 
++/*
++ * Turner wires DL0 stereo to eTDM output 4. DAPM updates just the
++ * selected crossbar bits while the corresponding channel path is powered.
++ */
++static const struct snd_soc_dapm_widget mt6991_output_widgets[] = {
++	SND_SOC_DAPM_PGA("I2SOUT4_CH1", AFE_CONN116_1, 0, 0, NULL, 0),
++	SND_SOC_DAPM_PGA("I2SOUT4_CH2", AFE_CONN117_1, 1, 0, NULL, 0),
++};
++
++static const struct snd_soc_dapm_route mt6991_output_routes[] = {
++	{ "I2SOUT4_CH1", NULL, "DL0" },
++	{ "I2SOUT4_CH2", NULL, "DL0" },
++};
++
+ static const struct snd_soc_component_driver dl0_component = {
++	.dapm_widgets = mt6991_output_widgets,
++	.num_dapm_widgets = ARRAY_SIZE(mt6991_output_widgets),
++	.dapm_routes = mt6991_output_routes,
++	.num_dapm_routes = ARRAY_SIZE(mt6991_output_routes),
+ 	.name = "mt6991-afe",
+ 	.pointer = mtk_afe_pcm_pointer,
+ 	.pcm_new = mtk_afe_pcm_new,

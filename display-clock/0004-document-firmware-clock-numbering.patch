@@ -1,0 +1,47 @@
+Subject: [PATCH] dt-bindings: soc: mediatek: describe the firmware MMSYS1 voter
+
+--- a/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
++++ b/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
+@@ -80,6 +80,13 @@
+       for details.
+     $ref: /schemas/types.yaml#/definitions/phandle-array
+ 
++  mm-hw-ccf-regmap:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    deprecated: true
++    description:
++      Hardware voter on MT6991 MMSYS1 firmware nodes. These nodes use the
++      firmware clock specifier numbering, including gate and client aliases.
++
+   mediatek,hardware-voter:
+     $ref: /schemas/types.yaml#/definitions/phandle
+     description: Multimedia hardware voter used by the clock gates.
+@@ -144,11 +151,26 @@
+           - mediatek,mt6991-ovlsys0
+           - mediatek,mt6991-ovlsys1
+ then:
+-  required:
+-    - mediatek,hardware-voter
++  if:
++    properties:
++      compatible:
++        contains:
++          const: mediatek,mt6991-mmsys1
++  then:
++    oneOf:
++      - required:
++          - mediatek,hardware-voter
++      - required:
++          - mm-hw-ccf-regmap
++  else:
++    required:
++      - mediatek,hardware-voter
++    properties:
++      mm-hw-ccf-regmap: false
+ else:
+   properties:
+     mediatek,hardware-voter: false
++    mm-hw-ccf-regmap: false
+ 
+ additionalProperties: false
+ 

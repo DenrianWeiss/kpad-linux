@@ -1,0 +1,82 @@
+--- a/drivers/tty/serial/8250/8250_mtk.c
++++ b/drivers/tty/serial/8250/8250_mtk.c
+@@ -247,6 +247,8 @@
+ {
+ 	struct uart_port *port = &up->port;
+ 	int lcr = serial_in(up, UART_LCR);
++	u8 escape = of_device_is_compatible(port->dev->of_node, "mediatek,mt6985-uart") ?
++		    0xdb : MTK_UART_ESCAPE_CHAR;
+ 
+ 	/* Port locked to synchronize UART_IER access against the console. */
+ 	lockdep_assert_held_once(&port->lock);
+@@ -258,7 +260,7 @@
+ 
+ 	switch (mode) {
+ 	case MTK_UART_FC_NONE:
+-		serial_out(up, MTK_UART_ESCAPE_DAT, MTK_UART_ESCAPE_CHAR);
++		serial_out(up, MTK_UART_ESCAPE_DAT, escape);
+ 		serial_out(up, MTK_UART_ESCAPE_EN, 0x00);
+ 		serial_out(up, UART_LCR, UART_LCR_CONF_MODE_B);
+ 		serial_out(up, MTK_UART_EFR, serial_in(up, MTK_UART_EFR) &
+@@ -269,7 +271,7 @@
+ 		break;
+ 
+ 	case MTK_UART_FC_HW:
+-		serial_out(up, MTK_UART_ESCAPE_DAT, MTK_UART_ESCAPE_CHAR);
++		serial_out(up, MTK_UART_ESCAPE_DAT, escape);
+ 		serial_out(up, MTK_UART_ESCAPE_EN, 0x00);
+ 		serial_out(up, UART_MCR, UART_MCR_RTS);
+ 		serial_out(up, UART_LCR, UART_LCR_CONF_MODE_B);
+@@ -285,7 +287,7 @@
+ 		break;
+ 
+ 	case MTK_UART_FC_SW:	/*MTK software flow control */
+-		serial_out(up, MTK_UART_ESCAPE_DAT, MTK_UART_ESCAPE_CHAR);
++		serial_out(up, MTK_UART_ESCAPE_DAT, escape);
+ 		serial_out(up, MTK_UART_ESCAPE_EN, 0x01);
+ 		serial_out(up, UART_LCR, UART_LCR_CONF_MODE_B);
+ 
+@@ -518,6 +520,31 @@
+ 	return 0;
+ }
+ 
++/* MT6985-compatible ports expose separate divisor registers in feature mode. */
++#define MTK_UART_DIVISOR_LOW    0x24
++#define MTK_UART_DIVISOR_HIGH   0x25
++#define MTK_UART_FEATURE_SEL    0x27
++
++static u32 mtk8250_hub_dl_read(struct uart_8250_port *up)
++{
++	u32 value;
++
++	serial_out(up, MTK_UART_FEATURE_SEL, 1);
++	value = serial_in(up, MTK_UART_DIVISOR_LOW) & 0xff;
++	value |= (serial_in(up, MTK_UART_DIVISOR_HIGH) & 0xff) << 8;
++	serial_out(up, MTK_UART_FEATURE_SEL, 0);
++
++	return value;
++}
++
++static void mtk8250_hub_dl_write(struct uart_8250_port *up, u32 value)
++{
++	serial_out(up, MTK_UART_FEATURE_SEL, 1);
++	serial_out(up, MTK_UART_DIVISOR_LOW, value & 0xff);
++	serial_out(up, MTK_UART_DIVISOR_HIGH, (value >> 8) & 0xff);
++	serial_out(up, MTK_UART_FEATURE_SEL, 0);
++}
++
+ static int mtk8250_probe(struct platform_device *pdev)
+ {
+ 	struct uart_8250_port uart = {};
+@@ -559,6 +586,11 @@
+ 	uart.port.mapbase = regs->start;
+ 	uart.port.irq = irq;
+ 	uart.port.pm = mtk8250_do_pm;
++	if (of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6985-uart")) {
++		uart.dl_read = mtk8250_hub_dl_read;
++		uart.dl_write = mtk8250_hub_dl_write;
++	}
++
+ 	uart.port.type = PORT_16550;
+ 	uart.port.flags = UPF_BOOT_AUTOCONF | UPF_FIXED_PORT;
+ 	uart.port.dev = &pdev->dev;

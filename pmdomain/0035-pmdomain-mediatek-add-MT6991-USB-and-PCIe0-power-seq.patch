@@ -1,0 +1,210 @@
+From 8c00a10dddd1c06c4e2f270e9b4b32c90dfa2d15 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:21:00 +0800
+Subject: [PATCH] pmdomain: mediatek: add MT6991 USB and PCIe0 power sequencing
+
+Request the two power stages in order and wait for each acknowledgement in the domain control register. Allow 50 us between the first acknowledgement and the secondary power-up request. Configure SRAM, bus isolation and RTFF per domain.
+---
+ drivers/pmdomain/mediatek/mt6991-pm-domains.h | 81 +++++++++++++++++++
+ drivers/pmdomain/mediatek/mtk-pm-domains.c    | 56 +++++++++++--
+ drivers/pmdomain/mediatek/mtk-pm-domains.h    |  1 +
+ 3 files changed, 132 insertions(+), 6 deletions(-)
+ create mode 100644 drivers/pmdomain/mediatek/mt6991-pm-domains.h
+
+diff --git a/drivers/pmdomain/mediatek/mt6991-pm-domains.h b/drivers/pmdomain/mediatek/mt6991-pm-domains.h
+new file mode 100644
+index 0000000..3c0baa2
+--- /dev/null
++++ b/drivers/pmdomain/mediatek/mt6991-pm-domains.h
+@@ -0,0 +1,81 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __SOC_MEDIATEK_MT6991_PM_DOMAINS_H
++#define __SOC_MEDIATEK_MT6991_PM_DOMAINS_H
++
++#include <dt-bindings/power/mediatek,mt6991-power.h>
++#include "mtk-pm-domains.h"
++
++#define MT6991_SPM_BUS_PROT(_mask) BUS_PROT_WR_IGN(SPM, _mask, 0xdc, 0xe0, 0x208)
++
++static enum scpsys_bus_prot_block mt6991_prot_blocks[] = { BUS_PROT_BLOCK_SPM };
++
++static const struct scpsys_domain_data mt6991_domains[] = {
++	[MT6991_POWER_DOMAIN_SSUSB_P0] = {
++		.name = "ssusb-p0",
++		.ctl_offs = 0xe1c,
++		.pwr_sta_offs = 0xe1c,
++		.pwr_sta2nd_offs = 0xe1c,
++		.sta_mask = BIT(30),
++		.sta2nd_mask = BIT(31),
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.rtff_type = SCPSYS_RTFF_TYPE_GENERIC,
++		.caps = MTK_SCPD_STAGED_PWR_ACK,
++	},
++	[MT6991_POWER_DOMAIN_SSUSB_DP_PHY_P0] = {
++		.name = "ssusb-dp-phy-p0",
++		.ctl_offs = 0xe18,
++		.pwr_sta_offs = 0xe18,
++		.pwr_sta2nd_offs = 0xe18,
++		.sta_mask = BIT(30),
++		.sta2nd_mask = BIT(31),
++		.bp_cfg = { MT6991_SPM_BUS_PROT(BIT(6)) },
++		.rtff_type = SCPSYS_RTFF_TYPE_GENERIC,
++		.caps = MTK_SCPD_STAGED_PWR_ACK,
++	},
++	[MT6991_POWER_DOMAIN_SSUSB_P1] = {
++		.name = "ssusb-p1",
++		.ctl_offs = 0xe20,
++		.pwr_sta_offs = 0xe20,
++		.pwr_sta2nd_offs = 0xe20,
++		.sta_mask = BIT(30),
++		.sta2nd_mask = BIT(31),
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = { MT6991_SPM_BUS_PROT(BIT(8)) },
++		.rtff_type = SCPSYS_RTFF_TYPE_GENERIC,
++		.caps = MTK_SCPD_STAGED_PWR_ACK,
++	},
++	[MT6991_POWER_DOMAIN_PEXTP_MAC0] = {
++		.name = "pextp-mac0",
++		.ctl_offs = 0xe34,
++		.pwr_sta_offs = 0xe34,
++		.pwr_sta2nd_offs = 0xe34,
++		.sta_mask = BIT(30),
++		.sta2nd_mask = BIT(31),
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = { MT6991_SPM_BUS_PROT(BIT(13)) },
++		.caps = MTK_SCPD_STAGED_PWR_ACK,
++	},
++	[MT6991_POWER_DOMAIN_PEXTP_PHY0] = {
++		.name = "pextp-phy0",
++		.ctl_offs = 0xe40,
++		.pwr_sta_offs = 0xe40,
++		.pwr_sta2nd_offs = 0xe40,
++		.sta_mask = BIT(30),
++		.sta2nd_mask = BIT(31),
++		.bp_cfg = { MT6991_SPM_BUS_PROT(BIT(16)) },
++		.caps = MTK_SCPD_STAGED_PWR_ACK,
++	},
++};
++
++static const struct scpsys_soc_data mt6991_scpsys_data = {
++	.domains_data = mt6991_domains,
++	.num_domains = ARRAY_SIZE(mt6991_domains),
++	.bus_prot_blocks = mt6991_prot_blocks,
++	.num_bus_prot_blocks = ARRAY_SIZE(mt6991_prot_blocks),
++	.type = SCPSYS_MTCMOS_TYPE_DIRECT_CTL,
++};
++
++#endif
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.c b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+index f0fa79e..63cc897 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.c
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+@@ -22,6 +22,7 @@
+ #include "mt6795-pm-domains.h"
+ #include "mt6858-pm-domains.h"
+ #include "mt6893-pm-domains.h"
++#include "mt6991-pm-domains.h"
+ #include "mt8167-pm-domains.h"
+ #include "mt8173-pm-domains.h"
+ #include "mt8183-pm-domains.h"
+@@ -475,6 +476,37 @@ static int scpsys_hwv_power_off(struct generic_pm_domain *genpd)
+ 	return scpsys_hwv_power_off_internal(pd);
+ }
+ 
++/* MT6991 requires acknowledgement of each request before the next write. */
++static int scpsys_staged_pwr_ack(struct scpsys_domain *pd, bool on)
++{
++	struct regmap *map = pd->scpsys->base;
++	const struct scpsys_domain_data *data = pd->data;
++	u32 val;
++	int ret;
++
++	ret = regmap_update_bits(map, data->ctl_offs, PWR_ON_BIT, on ? PWR_ON_BIT : 0);
++	if (ret)
++		return ret;
++
++	ret = regmap_read_poll_timeout(map, data->pwr_sta_offs, val,
++				       !!(val & data->sta_mask) == on,
++				       MTK_POLL_DELAY_US, MTK_POLL_TIMEOUT);
++	if (ret)
++		return ret;
++
++	if (on)
++		udelay(50);
++
++	ret = regmap_update_bits(map, data->ctl_offs, PWR_ON_2ND_BIT,
++				 on ? PWR_ON_2ND_BIT : 0);
++	if (ret)
++		return ret;
++
++	return regmap_read_poll_timeout(map, data->pwr_sta2nd_offs, val,
++					!!(val & data->sta2nd_mask) == on,
++					MTK_POLL_DELAY_US, MTK_POLL_TIMEOUT);
++}
++
+ static int scpsys_ctl_pwrseq_on(struct scpsys_domain *pd)
+ {
+ 	struct scpsys *scpsys = pd->scpsys;
+@@ -482,12 +514,14 @@ static int scpsys_ctl_pwrseq_on(struct scpsys_domain *pd)
+ 	int ret;
+ 
+ 	/* subsys power on */
+-	regmap_set_bits(scpsys->base, pd->data->ctl_offs, PWR_ON_BIT);
+-	regmap_set_bits(scpsys->base, pd->data->ctl_offs, PWR_ON_2ND_BIT);
+-
+-	/* wait until PWR_ACK = 1 */
+-	ret = readx_poll_timeout(scpsys_domain_is_on, pd, tmp, tmp, MTK_POLL_DELAY_US,
+-				 MTK_POLL_TIMEOUT);
++	if (MTK_SCPD_CAPS(pd, MTK_SCPD_STAGED_PWR_ACK)) {
++		ret = scpsys_staged_pwr_ack(pd, true);
++	} else {
++		regmap_set_bits(scpsys->base, pd->data->ctl_offs, PWR_ON_BIT);
++		regmap_set_bits(scpsys->base, pd->data->ctl_offs, PWR_ON_2ND_BIT);
++		ret = readx_poll_timeout(scpsys_domain_is_on, pd, tmp, tmp,
++					 MTK_POLL_DELAY_US, MTK_POLL_TIMEOUT);
++	}
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -584,6 +618,12 @@ static int scpsys_ctl_pwrseq_off(struct scpsys_domain *pd)
+ 	if (pd->data->rtff_type == SCPSYS_RTFF_TYPE_PCIE_PHY)
+ 		udelay(1);
+ 
++	if (MTK_SCPD_CAPS(pd, MTK_SCPD_STAGED_PWR_ACK)) {
++		regmap_clear_bits(scpsys->base, pd->data->ctl_offs, PWR_RST_B_BIT);
++		regmap_set_bits(scpsys->base, pd->data->ctl_offs, PWR_CLK_DIS_BIT);
++		return scpsys_staged_pwr_ack(pd, false);
++	}
++
+ 	regmap_set_bits(scpsys->base, pd->data->ctl_offs, PWR_CLK_DIS_BIT);
+ 	regmap_clear_bits(scpsys->base, pd->data->ctl_offs, PWR_RST_B_BIT);
+ 	regmap_clear_bits(scpsys->base, pd->data->ctl_offs, PWR_ON_2ND_BIT);
+@@ -1297,6 +1337,10 @@ static const struct of_device_id scpsys_of_match[] = {
+ 		.compatible = "mediatek,mt6893-power-controller",
+ 		.data = &mt6893_scpsys_data,
+ 	},
++	{
++		.compatible = "mediatek,mt6991-power-controller",
++		.data = &mt6991_scpsys_data,
++	},
+ 	{
+ 		.compatible = "mediatek,mt8167-power-controller",
+ 		.data = &mt8167_scpsys_data,
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.h b/drivers/pmdomain/mediatek/mtk-pm-domains.h
+index 45da83e..d2e8220 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.h
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.h
+@@ -19,6 +19,7 @@
+ #define MTK_SCPD_INFRA_PWR_CTL		BIT(12)
+ #define MTK_SCPD_SIMPLE_PWRSEQ		BIT(13)
+ #define MTK_SCPD_MODEM_SECURE_PWRSEQ	BIT(14)
++#define MTK_SCPD_STAGED_PWR_ACK		BIT(15)
+ #define MTK_SCPD_CAPS(_scpd, _x)	((_scpd)->data ?		\
+ 					 (_scpd)->data->caps & (_x) :	\
+ 					 (_scpd)->hwv_data->caps & (_x))
+-- 
+2.50.1 (Apple Git-155)
+

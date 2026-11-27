@@ -1,0 +1,18 @@
+Subject: [RFC PATCH] arm64: dts: mediatek: describe the Turner GenieZone hypervisor
+
+Preserve the two compatible strings from the stock OS3.0.310 device
+tree. No IRQs or memory windows are described by the firmware.
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+--- a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
++++ b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+@@ -255,3 +255,9 @@
+ &uart0 {
+ 	status = "okay";
+ };
++
++/ {
++	hypervisor {
++		compatible = "mediatek,geniezone-hyp", "mediatek,geniezone";
++	};
++};

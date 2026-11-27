@@ -1,0 +1,24 @@
+--- a/drivers/misc/mediatek/connectivity/bt/linux_v2/uart/btmtktty.c
++++ b/drivers/misc/mediatek/connectivity/bt/linux_v2/uart/btmtktty.c
+@@ -1824,6 +1824,8 @@
+ 			break;
+ 		}
+ 		ret = cif_dev->tty->ops->write(cif_dev->tty, cmd + len, cmd_len - len);
++		if (ret < 0)
++			break;
+ 		if (ret == 0)
+ 			udelay(500);
+ 		len += ret;
+@@ -1831,9 +1833,9 @@
+ 	}
+ 	up(&cif_dev->tty_flush_sem);
+ 
+-	if (count == BTMTK_MAX_SEND_RETRY) {
+-		BTMTK_ERR("%s: retry[%d] fail", __func__, count);
+-		ret = -1;
++	if (ret >= 0 && len != cmd_len) {
++		BTMTK_ERR("%s: incomplete UART write (%u/%d bytes)", __func__, len, cmd_len);
++		ret = count == BTMTK_MAX_SEND_RETRY ? -ETIMEDOUT : -ENODEV;
+ 	}
+ #if (USE_DEVICE_NODE == 1)
+ 	/* use HCI_SNOOP_TYPE_TX_ISO_HIF to record data sended to tty */

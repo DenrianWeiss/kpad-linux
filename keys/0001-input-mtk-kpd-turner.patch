@@ -1,0 +1,192 @@
+Subject: [PATCH] Input: add the MediaTek keypad driver for the Turner keys
+
+The power and volume-down keys are lines of the SoC keypad block, which the
+PMIC key driver does not cover. Program the keypad from the stock
+mediatek,hw-init-map / hw-pwrkey description and report KEY_POWER and
+KEY_VOLUMEDOWN.
+
+--- /dev/null
++++ b/drivers/input/keyboard/mtk-kpd.c
+@@ -0,0 +1,182 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * MediaTek keypad (KP) block: the Turner power and volume-down keys.
++ * Adapted from drivers/input/keyboard/mtk-kpd.c (MediaTek).
++ */
++#include <linux/clk.h>
++#include <linux/input.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#define KP_STA		0x00
++#define KP_MEM1		0x04
++#define KP_MEM2		0x08
++#define KP_MEM3		0x0c
++#define KP_MEM4		0x10
++#define KP_MEM5		0x14
++#define KP_DEBOUNCE	0x18
++#define KP_SEL		0x20
++#define KP_EN		0x24
++
++#define KP_MEMS		5
++#define KP_MEM5_BITS	8
++#define KP_KEYS		(4 * 16 + KP_MEM5_BITS)
++#define KP_DEBOUNCE_MASK ((1U << 14) - 1)
++
++struct turner_kpd {
++	void __iomem *base;
++	struct clk *clk;
++	struct input_dev *input;
++	u32 keymap[KP_KEYS];
++	u16 state[KP_MEMS];
++	int irq;
++};
++
++/* Bits are active low: zero means the key is down. */
++static void turner_kpd_report(struct turner_kpd *kpd)
++{
++	u16 now[KP_MEMS];
++	unsigned int i, bit;
++
++	now[0] = readw(kpd->base + KP_MEM1);
++	now[1] = readw(kpd->base + KP_MEM2);
++	now[2] = readw(kpd->base + KP_MEM3);
++	now[3] = readw(kpd->base + KP_MEM4);
++	now[4] = readw(kpd->base + KP_MEM5);
++
++	for (i = 0; i < KP_MEMS; i++) {
++		u16 change = now[i] ^ kpd->state[i];
++
++		for (bit = 0; bit < 16; bit++) {
++			unsigned int hw = i * 16 + bit;
++			bool down;
++
++			if (!(change & BIT(bit)) || hw >= KP_KEYS)
++				continue;
++			down = !(now[i] & BIT(bit));
++			if (!kpd->keymap[hw])
++				continue;
++			dev_notice(kpd->input->dev.parent, "hw=%u key=%u %s\n", hw,
++				   kpd->keymap[hw], down ? "down" : "up");
++			input_report_key(kpd->input, kpd->keymap[hw], down);
++			input_sync(kpd->input);
++		}
++	}
++	memcpy(kpd->state, now, sizeof(kpd->state));
++}
++
++static irqreturn_t turner_kpd_thread(int irq, void *data)
++{
++	turner_kpd_report(data);
++	return IRQ_HANDLED;
++}
++
++static int turner_kpd_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct turner_kpd *kpd;
++	unsigned int i, num;
++	u32 pwr_hw, pwr_code;
++	int ret;
++
++	kpd = devm_kzalloc(dev, sizeof(*kpd), GFP_KERNEL);
++	if (!kpd)
++		return -ENOMEM;
++	kpd->base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(kpd->base))
++		return PTR_ERR(kpd->base);
++
++	kpd->clk = devm_clk_get_optional(dev, "kpd");
++	if (IS_ERR(kpd->clk))
++		return PTR_ERR(kpd->clk);
++	ret = clk_prepare_enable(kpd->clk);
++	if (ret)
++		return ret;
++
++	ret = of_property_read_u32(dev->of_node, "mediatek,hw-map-num", &num);
++	if (!ret) {
++		if (num > KP_KEYS)
++			num = KP_KEYS;
++		of_property_read_u32_array(dev->of_node, "mediatek,hw-init-map",
++					   kpd->keymap, num);
++	}
++	/* The power key sits on its own hardware line, outside the map. */
++	if (!of_property_read_u32(dev->of_node, "mediatek,hw-pwrkey", &pwr_hw) &&
++	    !of_property_read_u32(dev->of_node, "mediatek,sw-pwrkey", &pwr_code) &&
++	    pwr_hw < KP_KEYS)
++		kpd->keymap[pwr_hw] = pwr_code;
++
++	kpd->input = devm_input_allocate_device(dev);
++	if (!kpd->input) {
++		ret = -ENOMEM;
++		goto out_clk;
++	}
++	kpd->input->name = "turner-kpd";
++	kpd->input->phys = "turner-kpd/input0";
++	kpd->input->id.bustype = BUS_HOST;
++	__set_bit(EV_KEY, kpd->input->evbit);
++	for (i = 0; i < KP_KEYS; i++)
++		if (kpd->keymap[i])
++			__set_bit(kpd->keymap[i], kpd->input->keybit);
++	ret = input_register_device(kpd->input);
++	if (ret)
++		goto out_clk;
++
++	kpd->irq = platform_get_irq(pdev, 0);
++	if (kpd->irq < 0) {
++		ret = kpd->irq;
++		goto out_clk;
++	}
++
++	/* Start from the idle level so the first press is reported. */
++	memset(kpd->state, 0xff, sizeof(kpd->state));
++	of_property_read_u32(dev->of_node, "mediatek,key-debounce-ms", &i);
++	if (i)
++		writew(i & KP_DEBOUNCE_MASK, kpd->base + KP_DEBOUNCE);
++	writew(1, kpd->base + KP_EN);
++
++	ret = devm_request_threaded_irq(dev, kpd->irq, NULL, turner_kpd_thread,
++					IRQF_ONESHOT | IRQF_TRIGGER_NONE,
++					"turner-kpd", kpd);
++	if (ret)
++		goto out_clk;
++
++	platform_set_drvdata(pdev, kpd);
++	dev_notice(dev, "keypad ready irq=%d keys=%u/%u/%u\n", kpd->irq,
++		   kpd->keymap[0], kpd->keymap[8], kpd->keymap[17]);
++	return 0;
++out_clk:
++	clk_disable_unprepare(kpd->clk);
++	return ret;
++}
++
++static void turner_kpd_remove(struct platform_device *pdev)
++{
++	struct turner_kpd *kpd = platform_get_drvdata(pdev);
++
++	writew(0, kpd->base + KP_EN);
++	clk_disable_unprepare(kpd->clk);
++}
++
++static const struct of_device_id turner_kpd_of_match[] = {
++	{ .compatible = "mediatek,kp" },
++	{ .compatible = "mediatek,mt6779-keypad" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, turner_kpd_of_match);
++
++static struct platform_driver turner_kpd_driver = {
++	.probe = turner_kpd_probe,
++	.remove = turner_kpd_remove,
++	.driver = {
++		.name = "turner-kpd",
++		.of_match_table = turner_kpd_of_match,
++	},
++};
++module_platform_driver(turner_kpd_driver);
++
++MODULE_DESCRIPTION("Turner MediaTek keypad");
++MODULE_LICENSE("GPL");

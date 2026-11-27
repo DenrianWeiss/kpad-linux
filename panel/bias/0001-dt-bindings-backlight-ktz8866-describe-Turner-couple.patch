@@ -1,0 +1,73 @@
+From 653b670f4b0c4ab720a431fa27979f02a1917388 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 08:59:05 +0800
+Subject: [RFC PATCH 1/2] dt-bindings: backlight: ktz8866: describe Turner
+ coupled LCD bias
+
+---
+ .../leds/backlight/kinetic,ktz8866.yaml       | 32 +++++++++++++++++--
+ 1 file changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml b/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
+index c914e12..4d63dfa 100644
+--- a/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
++++ b/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
+@@ -16,10 +16,32 @@ description: |
+ 
+ allOf:
+   - $ref: common.yaml#
++  - if:
++      properties:
++        compatible:
++          const: xiaomi,turner-ktz8866
++    then:
++      required:
++        - lcd-bias
++      properties:
++        kinetic,enable-lcd-bias: false
++        kinetic,current-ramp-delay-ms: false
++        kinetic,led-enable-ramp-delay-ms: false
++        current-num-sinks: false
++        vddpos-supply: false
++        vddneg-supply: false
++    else:
++      properties:
++        lcd-bias: false
++      required:
++        - vddpos-supply
++        - vddneg-supply
+ 
+ properties:
+   compatible:
+-    const: kinetic,ktz8866
++    enum:
++      - kinetic,ktz8866
++      - xiaomi,turner-ktz8866
+ 
+   reg:
+     maxItems: 1
+@@ -51,6 +73,12 @@ properties:
+       mapped to 512μs because ktz8866 can't ramp faster than it.
+     enum: [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+ 
++  lcd-bias:
++    type: object
++    description: Coupled positive and negative LCD bias outputs for the Turner CSOT panel.
++    $ref: /schemas/regulator/regulator.yaml#
++    unevaluatedProperties: false
++
+   kinetic,enable-lcd-bias:
+     description: Set if we want to output bias power supply for LCD.
+     type: boolean
+@@ -58,8 +86,6 @@ properties:
+ required:
+   - compatible
+   - reg
+-  - vddpos-supply
+-  - vddneg-supply
+   - enable-gpios
+ 
+ unevaluatedProperties: false
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,11 @@
+--- a/drivers/misc/mediatek/connectivity/bt/linux_v2/btmtk_main.c
++++ b/drivers/misc/mediatek/connectivity/bt/linux_v2/btmtk_main.c
+@@ -5514,6 +5514,8 @@
+ 	 * never registers the adapter ("No Bluetooth address for index 0").
+ 	 */
+ 	flush_work(&hdev->power_on);
++	/* Subsequent management power-on requests explicitly enable the radio. */
++	hci_dev_clear_flag(hdev, HCI_AUTO_OFF);
+ 	if (!(hdev->bdaddr.b[0] | hdev->bdaddr.b[1] | hdev->bdaddr.b[2] |
+ 	      hdev->bdaddr.b[3] | hdev->bdaddr.b[4] | hdev->bdaddr.b[5])) {
+ 		hdev->bdaddr.b[0] = 0x02;

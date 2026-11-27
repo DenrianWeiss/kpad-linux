@@ -1,0 +1,143 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -503,10 +503,110 @@
+ static struct device_attribute dev_attr_firmware_timestamps =
+ 	__ATTR(firmware_timestamps, 0400, firmware_timestamps_show, NULL);
+ 
++struct mt6991_logger_attribute {
++	struct device_attribute attr;
++	unsigned int core;
++	bool position;
++};
++
++static int mt6991_adsp_log_access(struct device *dev, struct device_attribute *attr,
++				  int enable, u32 *value)
++{
++	struct mt6991_logger_attribute *log = container_of(attr, struct mt6991_logger_attribute, attr);
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	struct mt6991_adsp_block blocks[ARRAY_SIZE(adsp_block_names)];
++	struct device_node *sys __free(device_node) = of_parse_phandle(dev->of_node, "mboxes", 0);
++	struct mt6991_adsp_block *block = &blocks[log->core ? 4 : 0];
++	void __iomem *mem;
++	u64 range[2];
++	int ret;
++
++	guard(mutex)(&a->boot_lock);
++	if (!a->pair_ready)
++		return -EHOSTDOWN;
++	if (!sys)
++		return -ENODEV;
++	ret = mt6991_adsp_layout(sys, range, blocks);
++	if (ret)
++		return ret;
++	if (block->size < SZ_64K)
++		return -EINVAL;
++	mem = ioremap_wc(block->address, SZ_4K);
++	if (!mem)
++		return -ENOMEM;
++	if (readl(mem) != 0x504c5402 || readl(mem + 4) != 0x18 ||
++	    readl(mem + 12) != 0x80 || readl(mem + 16) != 0x180 ||
++	    readl(mem + 20) != block->size - 0x180) {
++		ret = -EIO;
++		goto out;
++	}
++	if (enable >= 0) {
++		struct mt6991_adsp_tx msg = { .id = 2, .len = sizeof(u32) };
++		struct mbox_client client = {
++			.dev = log->core ? a->peer : dev, .tx_block = true, .tx_tout = 200,
++		};
++		struct mbox_chan *tx = mbox_request_channel(&client, 0);
++
++		if (IS_ERR(tx)) {
++			ret = PTR_ERR(tx);
++			goto out;
++		}
++		put_unaligned_le32(enable, msg.payload);
++		ret = mbox_send_message(tx, &msg);
++		mbox_free_channel(tx);
++		if (ret < 0)
++			goto out;
++		writel(enable, mem + 8);
++		wmb();
++		ret = 0;
++	} else if (log->position) {
++		*value = readl(mem + 0x100);
++		if (*value >= block->size - 0x180)
++			ret = -EIO;
++	} else {
++		*value = readl(mem + 8);
++	}
++out:
++	iounmap(mem);
++	return ret;
++}
++
++static ssize_t mt6991_log_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	u32 value;
++	int ret = mt6991_adsp_log_access(dev, attr, -1, &value);
++
++	return ret ? ret : sysfs_emit(buf, "%u\n", value);
++}
++
++static ssize_t mt6991_log_store(struct device *dev, struct device_attribute *attr,
++				const char *buf, size_t count)
++{
++	bool enable;
++	int ret = kstrtobool(buf, &enable);
++
++	if (ret)
++		return ret;
++	ret = mt6991_adsp_log_access(dev, attr, enable, NULL);
++	return ret ? ret : count;
++}
++
++static struct mt6991_logger_attribute logger_attrs[] = {
++	{ .attr = __ATTR(logger_a_enable, 0600, mt6991_log_show, mt6991_log_store) },
++	{ .attr = __ATTR(logger_b_enable, 0600, mt6991_log_show, mt6991_log_store), .core = 1 },
++	{ .attr = __ATTR(logger_a_position, 0400, mt6991_log_show, NULL), .position = true },
++	{ .attr = __ATTR(logger_b_position, 0400, mt6991_log_show, NULL), .core = 1, .position = true },
++};
++
+ static umode_t mt6991_pair_visible(struct kobject *kobj, struct attribute *attr, int index)
+ {
+ 	struct mt6991_adsp_core *core = dev_get_drvdata(kobj_to_dev(kobj));
+ 
++	int i;
++
++	for (i = 0; !core->peer && i < ARRAY_SIZE(logger_attrs); i++)
++		if (attr == &logger_attrs[i].attr.attr)
++			return 0;
+ 	if (!core->peer && (attr == &dev_attr_firmware_state.attr ||
+ 			    attr == &dev_attr_firmware_timestamps.attr))
+ 		return 0;
+@@ -514,6 +614,11 @@
+ }
+ 
+ static struct attribute *mt6991_adsp_attrs[] = {
++	&logger_attrs[0].attr.attr,
++	&logger_attrs[1].attr.attr,
++	&logger_attrs[2].attr.attr,
++	&logger_attrs[3].attr.attr,
++
+ 	&dev_attr_firmware_timestamps.attr,
+ 	&dev_attr_firmware_state.attr,
+ 	&dev_attr_boot_records_match.attr,
+--- a/Documentation/ABI/testing/sysfs-platform-mt6991-adsp
++++ b/Documentation/ABI/testing/sysfs-platform-mt6991-adsp
+@@ -32,1 +32,15 @@
+ 		as the firmware reply carries no sequence identifier.
++
++What:		/sys/bus/platform/devices/.../logger_{a,b}_enable
++Date:		November 2026
++Description:
++		On core A, control firmware logging independently for each running
++		core. A boolean write sends the stock logger command. The control
++		header is updated only on TX completion. Read returns that flag.
++		Both flags reset to zero on the next firmware boot.
++
++What:		/sys/bus/platform/devices/.../logger_{a,b}_position
++Date:		November 2026
++Description:
++		Read the running core's firmware producer index in bytes relative
++		to the start of the circular log data. Reading leaves both indices alone.

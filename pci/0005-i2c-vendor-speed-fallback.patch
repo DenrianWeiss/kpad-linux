@@ -1,0 +1,28 @@
+Subject: [RFC PATCH] i2c: mt65xx: fall back to 400 kHz for the vendor bus speed
+
+The vendor tree configures several buses at 700 kHz, which the MT6991
+timing calculation rejects, so those controllers never probe. Retry at
+the standard fast-mode rate and only fail if that also cannot be timed.
+
+--- a/drivers/i2c/busses/i2c-mt65xx.c
++++ b/drivers/i2c/busses/i2c-mt65xx.c
+@@ -1620,8 +1620,17 @@
+ 
+ 	if (i2c->dev_comp->dma_v2) {
+ 		ret = mt6991_i2c_set_speed(i2c, clk_get_rate(i2c->clocks[speed_clk].clk));
+-		if (ret)
+-			return dev_err_probe(i2c->dev, ret, "unsupported bus timing\n");
++		if (ret) {
++			/* The vendor tree asks for 700 kHz on some buses. */
++			dev_warn(i2c->dev, "%u Hz unsupported, falling back to 400 kHz\n",
++				 i2c->speed_hz);
++			i2c->speed_hz = I2C_MAX_FAST_MODE_FREQ;
++			ret = mt6991_i2c_set_speed(i2c,
++						   clk_get_rate(i2c->clocks[speed_clk].clk));
++			if (ret)
++				return dev_err_probe(i2c->dev, ret,
++						     "unsupported bus timing\n");
++		}
+ 	} else {
+ 		mtk_i2c_set_speed(i2c, clk_get_rate(i2c->clocks[speed_clk].clk));
+ 	}

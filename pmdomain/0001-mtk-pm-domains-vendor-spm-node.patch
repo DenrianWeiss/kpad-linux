@@ -1,0 +1,97 @@
+Subject: [RFC PATCH] pmdomain: mediatek: accept the vendor SPM node layout
+
+The vendor device tree exposes the SPM as a single syscon node with
+compatible "mediatek,mt6991-scpsys-hwv" and #power-domain-cells on that
+same node, while mainline always has a power-controller child below a
+syscon parent. Without a driver, every consumer of a PEXTP/SSUSB power
+domain (PCIe0, its PHY, USB1) defers until the fw_devlink timeout.
+Register the domains directly for that layout and take the bus
+protection regmap from the separate mt6991-scpsys-bus syscon.
+
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.c
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+@@ -1399,6 +1399,9 @@
+ 	}, {
+ 		.compatible = "mediatek,mt6991-power-controller",
+ 		.data = &mt6991_scpsys_data,
++	}, {
++		.compatible = "mediatek,mt6991-scpsys-hwv",
++		.data = &mt6991_scpsys_data,
+ 	},
+ 	{
+ 		.compatible = "mediatek,mt8167-power-controller",
+@@ -1498,25 +1501,55 @@
+ 	scpsys->pd_data.domains = scpsys->domains;
+ 	scpsys->pd_data.num_domains = num_domains;
+ 
+-	parent = dev->parent;
+-	if (!parent) {
+-		dev_err(dev, "no parent for syscon devices\n");
+-		return -ENODEV;
+-	}
+-
+-	scpsys->base = syscon_node_to_regmap(parent->of_node);
+-	if (IS_ERR(scpsys->base)) {
+-		dev_err(dev, "no regmap available\n");
+-		return PTR_ERR(scpsys->base);
+-	}
+-
+-	if (of_find_property(np, "access-controllers", NULL))
+-		ret = scpsys_get_bus_protection(dev, scpsys);
+-	else
+-		ret = scpsys_get_bus_protection_legacy(dev, scpsys);
+-
+-	if (ret)
+-		return ret;
++	/*
++	 * The vendor device tree describes the SPM as a single syscon node that
++	 * is itself the power controller, while mainline uses a child node below
++	 * a syscon parent. Accept both layouts so boards booted with the vendor
++	 * tree can still use the domain controller.
++	 */
++	if (of_device_is_compatible(np, "mediatek,mt6991-scpsys-hwv")) {
++		struct device_node *bus;
++		struct regmap *bus_rm;
++
++		scpsys->base = syscon_node_to_regmap(np);
++		if (IS_ERR(scpsys->base))
++			return dev_err_probe(dev, PTR_ERR(scpsys->base),
++					     "no regmap available\n");
++
++		bus = of_find_compatible_node(NULL, NULL, "mediatek,mt6991-scpsys-bus");
++		bus_rm = bus ? syscon_node_to_regmap(bus) : ERR_PTR(-ENODEV);
++		of_node_put(bus);
++		if (IS_ERR(bus_rm))
++			return dev_err_probe(dev, PTR_ERR(bus_rm),
++					     "no bus protection regmap\n");
++
++		scpsys->bus_prot = devm_kmalloc_array(dev, 1, sizeof(*scpsys->bus_prot),
++						      GFP_KERNEL);
++		if (!scpsys->bus_prot)
++			return -ENOMEM;
++		scpsys->bus_prot[0] = bus_rm;
++		scpsys->bus_prot_index[BUS_PROT_BLOCK_SPM] = 0;
++	} else {
++		parent = dev->parent;
++		if (!parent) {
++			dev_err(dev, "no parent for syscon devices\n");
++			return -ENODEV;
++		}
++
++		scpsys->base = syscon_node_to_regmap(parent->of_node);
++		if (IS_ERR(scpsys->base)) {
++			dev_err(dev, "no regmap available\n");
++			return PTR_ERR(scpsys->base);
++		}
++
++		if (of_find_property(np, "access-controllers", NULL))
++			ret = scpsys_get_bus_protection(dev, scpsys);
++		else
++			ret = scpsys_get_bus_protection_legacy(dev, scpsys);
++
++		if (ret)
++			return ret;
++	}
+ 
+ 	/* Keep the parent on while initializing domains and installing their links. */
+ 	if (external_parent) {

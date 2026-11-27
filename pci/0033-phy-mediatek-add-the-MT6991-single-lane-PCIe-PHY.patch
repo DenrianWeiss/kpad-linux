@@ -1,0 +1,272 @@
+From f937bf415bf65b2c6ef6d1187655191a2f1eff77 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:11:51 +0800
+Subject: [PATCH] phy: mediatek: add the MT6991 single-lane PCIe PHY
+
+Initialize the SIF and CKM banks, apply board-specific short-reach settings and load single-lane NVMEM trims when provided. Keep the clocks prepared and the parent runtime-active across PHY init and exit.
+---
+ drivers/phy/mediatek/Makefile          |   1 +
+ drivers/phy/mediatek/phy-mt6991-pcie.c | 239 +++++++++++++++++++++++++
+ 2 files changed, 240 insertions(+)
+ create mode 100644 drivers/phy/mediatek/phy-mt6991-pcie.c
+
+diff --git a/drivers/phy/mediatek/Makefile b/drivers/phy/mediatek/Makefile
+index ed0da70..121c7de 100644
+--- a/drivers/phy/mediatek/Makefile
++++ b/drivers/phy/mediatek/Makefile
+@@ -5,6 +5,7 @@
+ 
+ obj-$(CONFIG_PHY_MTK_DP)		+= phy-mtk-dp.o
+ obj-$(CONFIG_PHY_MTK_PCIE)		+= phy-mtk-pcie.o
++obj-$(CONFIG_PHY_MTK_PCIE)		+= phy-mt6991-pcie.o
+ obj-$(CONFIG_PHY_MTK_TPHY)		+= phy-mtk-tphy.o
+ obj-$(CONFIG_PHY_MTK_UFS)		+= phy-mtk-ufs.o
+ obj-$(CONFIG_PHY_MTK_XSPHY)		+= phy-mtk-xsphy.o
+diff --git a/drivers/phy/mediatek/phy-mt6991-pcie.c b/drivers/phy/mediatek/phy-mt6991-pcie.c
+new file mode 100644
+index 0000000..4963ec2
+--- /dev/null
++++ b/drivers/phy/mediatek/phy-mt6991-pcie.c
+@@ -0,0 +1,239 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MediaTek MT6991 single-lane PCIe PHY. */
++#include <linux/clk.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/nvmem-consumer.h>
++#include <linux/of.h>
++#include <linux/phy/phy.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/unaligned.h>
++
++struct mt6991_pcie_phy {
++	void __iomem *sif;
++	void __iomem *ckm;
++	struct clk_bulk_data clocks[2];
++	u32 trim[2];
++	bool short_reach;
++};
++
++struct reg_update {
++	u16 offset;
++	u32 mask;
++	u32 value;
++};
++
++/* Keep successive writes to the same register in hardware order. */
++static const struct reg_update default_sif[] = {
++	{ 0x0038, 0x000000fc, 0x000000fc },
++	{ 0x0038, 0x00000300, 0x00000300 },
++	{ 0x00f4, 0x00003000, 0x00003000 },
++	{ 0x0030, 0x03ff0000, 0x00000000 },
++	{ 0x0050, 0x00004000, 0x00000000 },
++	{ 0x0020, 0x00020000, 0x00000000 },
++};
++
++static const struct reg_update pcie_mode_sif[] = {
++	{ 0x0028, 0x00000008, 0x00000008 },
++	{ 0x9010, 0x00000030, 0x00000020 },
++	{ 0x1078, 0x00300000, 0x00000000 },
++	{ 0x1078, 0x00c00000, 0x00000000 },
++};
++
++static const struct reg_update lane_setup[] = {
++	{ 0x902c, 0x000000ff, 0x000000f1 },
++	{ 0xa06c, 0x00006000, 0x00002000 },
++	{ 0xa034, 0x00008000, 0x00008000 },
++	{ 0x30e8, 0x00007000, 0x00001000 },
++	{ 0x50f0, 0x0000000f, 0x0000000d },
++	{ 0x50f0, 0x000000f0, 0x000000d0 },
++	{ 0x50f0, 0x00000f00, 0x00000d00 },
++	{ 0x6004, 0x003f0000, 0x00160000 },
++	{ 0x6004, 0x3f000000, 0x16000000 },
++	{ 0xb004, 0x00003f00, 0x00000a00 },
++	{ 0xb004, 0x003f0000, 0x00020000 },
++	{ 0xb008, 0x00003f00, 0x00000b00 },
++	{ 0xb008, 0x003f0000, 0x00010000 },
++	{ 0xb00c, 0x00003f00, 0x00000c00 },
++	{ 0xb010, 0x00003f00, 0x00000b00 },
++	{ 0xb010, 0x0000003f, 0x00000001 },
++	{ 0xb014, 0x00003f00, 0x00000b00 },
++	{ 0xb014, 0x0000003f, 0x00000001 },
++	{ 0xb018, 0x00003f00, 0x00000a00 },
++	{ 0xb018, 0x0000003f, 0x00000002 },
++};
++
++static const struct reg_update short_reach_setup[] = {
++	{ 0xa000, 0xffff0000, 0x00080000 },
++	{ 0xa06c, 0x00006000, 0x00000000 },
++	{ 0x60a4, 0x000000fe, 0x000000fe },
++	{ 0x60a4, 0x000fe000, 0x000fe000 },
++	{ 0x3074, 0x00800000, 0x00800000 },
++	{ 0x3074, 0x00004000, 0x00004000 },
++	{ 0x3074, 0x00000040, 0x00000040 },
++	{ 0x3070, 0x20000000, 0x20000000 },
++	{ 0x3070, 0x00200000, 0x00200000 },
++	{ 0x6094, 0x00000040, 0x00000040 },
++	{ 0x6094, 0x00000080, 0x00000080 },
++};
++
++static void update(void __iomem *reg, u32 mask, u32 value)
++{
++	writel((readl(reg) & ~mask) | (value & mask), reg);
++}
++
++static void apply_updates(void __iomem *base, const struct reg_update *regs, size_t count)
++{
++	size_t i;
++
++	for (i = 0; i < count; i++)
++		update(base + regs[i].offset, regs[i].mask, regs[i].value);
++}
++
++static void calibrate(struct mt6991_pcie_phy *p)
++{
++	u32 glb = p->trim[0], lane = p->trim[1];
++
++	if (!glb) {
++		update(p->sif + 0xa0a0, GENMASK(4, 0), 10);
++		update(p->sif + 0xa0a0, GENMASK(11, 7), 9 << 7);
++		return;
++	}
++
++	update(p->sif + 0x9060, GENMASK(5, 0), glb);
++	update(p->sif + 0x90c0, GENMASK(9, 6), glb);
++	update(p->ckm + 0xd4, GENMASK(19, 16), glb << 6);
++	update(p->ckm + 0xd4, GENMASK(23, 20), glb << 6);
++	update(p->ckm + 0xd4, GENMASK(27, 24), glb << 6);
++	update(p->sif + 0xa00c, GENMASK(20, 16), glb >> 6);
++	update(p->sif + 0xa0a8, GENMASK(6, 2), lane << 2);
++	update(p->sif + 0xa0a8, GENMASK(11, 7), lane << 2);
++	update(p->sif + 0xa0a8, GENMASK(23, 19), lane << 9);
++	update(p->sif + 0xa0a0, GENMASK(15, 12), lane >> 3);
++	update(p->sif + 0xa0a0, GENMASK(4, 0), lane >> 20);
++	update(p->sif + 0xa0a0, GENMASK(11, 7), lane >> 18);
++}
++
++static void initialize_lane(struct mt6991_pcie_phy *p, enum phy_mode mode)
++{
++	if (mode == PHY_MODE_PCIE) {
++		apply_updates(p->sif, pcie_mode_sif, ARRAY_SIZE(pcie_mode_sif));
++	} else {
++		update(p->ckm + 0x38, GENMASK(21, 16), 4 << 16);
++		apply_updates(p->sif, default_sif, ARRAY_SIZE(default_sif));
++	}
++	apply_updates(p->sif, lane_setup, ARRAY_SIZE(lane_setup));
++	calibrate(p);
++	if (p->short_reach)
++		apply_updates(p->sif, short_reach_setup, ARRAY_SIZE(short_reach_setup));
++}
++
++static int mt6991_init(struct phy *phy)
++{
++	struct mt6991_pcie_phy *p = phy_get_drvdata(phy);
++	struct device *dev = phy->dev.parent;
++	int ret;
++
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return ret;
++	ret = clk_bulk_prepare_enable(ARRAY_SIZE(p->clocks), p->clocks);
++	if (ret) {
++		pm_runtime_put(dev);
++		return ret;
++	}
++	initialize_lane(p, phy_get_mode(phy));
++	return 0;
++}
++
++static int mt6991_exit(struct phy *phy)
++{
++	struct mt6991_pcie_phy *p = phy_get_drvdata(phy);
++
++	clk_bulk_disable_unprepare(ARRAY_SIZE(p->clocks), p->clocks);
++	pm_runtime_put(phy->dev.parent);
++	return 0;
++}
++
++static int mt6991_set_mode(struct phy *phy, enum phy_mode mode, int submode)
++{
++	return mode == PHY_MODE_PCIE && !submode ? 0 : -EINVAL;
++}
++
++static const struct phy_ops mt6991_ops = {
++	.init = mt6991_init,
++	.exit = mt6991_exit,
++	.set_mode = mt6991_set_mode,
++	.owner = THIS_MODULE,
++};
++
++static int mt6991_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct phy_provider *provider;
++	struct mt6991_pcie_phy *p;
++	struct phy *phy;
++	u32 lanes;
++	int ret;
++
++	if (device_property_read_u32(dev, "num-lanes", &lanes) || lanes != 1)
++		return dev_err_probe(dev, -EINVAL, "expected a single PCIe lane\n");
++	p = devm_kzalloc(dev, sizeof(*p), GFP_KERNEL);
++	if (!p)
++		return -ENOMEM;
++	p->sif = devm_platform_ioremap_resource_byname(pdev, "sif");
++	if (IS_ERR(p->sif))
++		return PTR_ERR(p->sif);
++	p->ckm = devm_platform_ioremap_resource_byname(pdev, "ckm");
++	if (IS_ERR(p->ckm))
++		return PTR_ERR(p->ckm);
++	p->clocks[0].id = "ref";
++	p->clocks[1].id = "mcu";
++	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(p->clocks), p->clocks);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot get PHY clocks\n");
++	p->short_reach = device_property_read_bool(dev, "mediatek,short-reach");
++	if (device_property_present(dev, "nvmem-cells")) {
++		struct nvmem_cell *cell;
++		size_t len;
++		u8 *buf;
++
++		cell = devm_nvmem_cell_get(dev, "calibration");
++		if (IS_ERR(cell))
++			return dev_err_probe(dev, PTR_ERR(cell), "cannot get calibration\n");
++		buf = nvmem_cell_read(cell, &len);
++		if (IS_ERR(buf))
++			return PTR_ERR(buf);
++		if (len == sizeof(p->trim)) {
++			p->trim[0] = get_unaligned_le32(buf);
++			p->trim[1] = get_unaligned_le32(buf + 4);
++		}
++		kfree(buf);
++		if (len != sizeof(p->trim))
++			return dev_err_probe(dev, -EINVAL, "invalid calibration length\n");
++	}
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++	phy = devm_phy_create(dev, dev->of_node, &mt6991_ops);
++	if (IS_ERR(phy))
++		return PTR_ERR(phy);
++	phy_set_drvdata(phy, p);
++	provider = devm_of_phy_provider_register(dev, of_phy_simple_xlate);
++	return PTR_ERR_OR_ZERO(provider);
++}
++
++static const struct of_device_id mt6991_match[] = {
++	{ .compatible = "mediatek,mt6991-pcie-phy" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, mt6991_match);
++
++static struct platform_driver mt6991_driver = {
++	.probe = mt6991_probe,
++	.driver = { .name = "mt6991-pcie-phy", .of_match_table = mt6991_match },
++};
++module_platform_driver(mt6991_driver);
++MODULE_DESCRIPTION("MediaTek MT6991 single-lane PCIe PHY");
++MODULE_LICENSE("GPL");
+-- 
+2.50.1 (Apple Git-155)
+

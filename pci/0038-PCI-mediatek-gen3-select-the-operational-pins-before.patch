@@ -1,0 +1,38 @@
+From 95edf1920e9d834f95eb0725f914a81138acca23 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:30:28 +0800
+Subject: [PATCH] PCI: mediatek-gen3: select the operational pins before link
+ training
+
+A board can hold endpoint reset through GPIO in its init pin state. Waiting for the driver core to select default after probe keeps PERST# asserted during link training. Switch pins after powering the controller and propagate pinctrl errors through the existing unwind path.
+---
+ drivers/pci/controller/pcie-mediatek-gen3.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/pci/controller/pcie-mediatek-gen3.c b/drivers/pci/controller/pcie-mediatek-gen3.c
+index bcbd08c..1ad4b7d 100644
+--- a/drivers/pci/controller/pcie-mediatek-gen3.c
++++ b/drivers/pci/controller/pcie-mediatek-gen3.c
+@@ -24,6 +24,7 @@
+ #include <linux/pci.h>
+ #include <linux/pci-pwrctrl.h>
+ #include <linux/phy/phy.h>
++#include <linux/pinctrl/consumer.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
+ #include <linux/pm_runtime.h>
+@@ -1208,6 +1209,11 @@ static int mtk_pcie_setup(struct mtk_gen3_pcie *pcie)
+ 		}
+ 	}
+ 
++	/* An init state may hold PERST# low until the controller is powered. */
++	err = pinctrl_select_default_state(pcie->dev);
++	if (err)
++		goto err_setup;
++
+ 	/* Try link up */
+ 	err = mtk_pcie_startup_port(pcie);
+ 	if (err)
+-- 
+2.50.1 (Apple Git-155)
+

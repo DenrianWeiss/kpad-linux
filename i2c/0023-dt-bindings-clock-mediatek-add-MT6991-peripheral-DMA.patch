@@ -1,0 +1,35 @@
+From c6f82ce1614a988d5aea148444dca311f6789dc6 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:33:32 +0800
+Subject: [PATCH 23/25] dt-bindings: clock: mediatek: add MT6991 peripheral DMA
+ clock IDs
+
+---
+ include/dt-bindings/clock/mediatek,mt6991-clock.h | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/include/dt-bindings/clock/mediatek,mt6991-clock.h b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+index c3b4f70..f49901c 100644
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -19,7 +19,17 @@
+ #define MT6991_CLK_TOP_UNIVPLL_D5_D2      11
+ #define MT6991_CLK_TOP_I2C_P              12
+ 
++#define MT6991_CLK_TOP_MAINPLL_D7_D8         13
++#define MT6991_CLK_TOP_MAINPLL_D5_D8         14
++#define MT6991_CLK_TOP_OSC_D8                15
++#define MT6991_CLK_TOP_MAINPLL_D7_D4         16
++#define MT6991_CLK_TOP_MAINPLL_D5_D4         17
++#define MT6991_CLK_TOP_MAINPLL_D7_D2         18
++#define MT6991_CLK_TOP_P_AXI                 19
++
+ #define MT6991_CLK_PERI_UART0_BCLK         0
+ #define MT6991_CLK_PERI_SPI6_BCLK          1
+ 
++#define MT6991_CLK_PERI_AP_DMA_X32W_BCLK   2
++
+ #endif
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,65 @@
+From dd2d8c1f195adb9ebb6c93c57fd6a789b4bd32f4 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 00:00:00 +0000
+Subject: [RFC PATCH 1/2] dt-bindings: display: panel: describe the Turner CSOT
+ O88 panel
+
+---
+ .../display/panel/xiaomi,turner-csot-o88.yaml | 45 +++++++++++++++++++
+ 1 file changed, 45 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/display/panel/xiaomi,turner-csot-o88.yaml
+
+diff --git a/Documentation/devicetree/bindings/display/panel/xiaomi,turner-csot-o88.yaml b/Documentation/devicetree/bindings/display/panel/xiaomi,turner-csot-o88.yaml
+new file mode 100644
+index 0000000..59950d0
+--- /dev/null
++++ b/Documentation/devicetree/bindings/display/panel/xiaomi,turner-csot-o88.yaml
+@@ -0,0 +1,45 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/display/panel/xiaomi,turner-csot-o88.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Xiaomi Redmi K Pad CSOT O88 1880x3008 DSI panel
++
++maintainers:
++  - Turner Linux Port <turner@localhost.localdomain>
++
++allOf:
++  - $ref: panel-common.yaml#
++
++properties:
++  compatible:
++    const: xiaomi,turner-csot-o88
++
++  reg:
++    maxItems: 1
++
++  vddi-supply:
++    description: 1.9 V panel I/O supply.
++
++  bias-supply:
++    description:
++      Coupled positive and negative LCD bias outputs. The supplier sequences
++      both outputs during enable and disable.
++
++  reset-gpios:
++    description: Active-low reset shared with the integrated digitizer.
++    maxItems: 1
++
++  backlight: true
++  port: true
++
++required:
++  - compatible
++  - reg
++  - vddi-supply
++  - bias-supply
++  - reset-gpios
++  - backlight
++
++unevaluatedProperties: false
+-- 
+2.50.1 (Apple Git-155)
+

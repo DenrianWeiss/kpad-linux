@@ -1,0 +1,574 @@
+Subject: [RFC PATCH] power: supply: add the MT6379 battery gauge
+
+Read the battery through the MT6379 NAG ADC (register 0x918, bit 15 data
+ready, vendor conversion to 0.1 mV) and derive capacity from the OCV
+table the boot firmware publishes for 25 C (battery0-profile-t1,
+temperature-t1).
+
+The FGADC coulomb counter (0x778, 1.28 uAh LSB) is read and exposed, and
+is used for capacity/current only once it reports a real rate: the
+counter needs the vendor R_FG/gain initialization, which is not ported,
+so the OCV table stays the fallback.
+
+---
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -716,6 +716,16 @@ config CHARGER_MT6360
+ 	  Average Input Current Regulation, Battery Temperature Sensing,
+ 	  Over-Temperature Protection, DPDM Detection for BC1.2.
+ 
++config MT6379_GAUGE
++	tristate "MediaTek MT6379 battery gauge"
++	depends on SPMI
++	help
++	  Say Y here to read the MT6379 fuel gauge (NAG ADC battery
++	  voltage, FGADC coulomb counter) and expose battery capacity,
++	  voltage and status through the power supply class. Capacity is
++	  derived from the battery OCV tables in the device tree, with
++	  coulomb counting used once the counter reports a real rate.
++
+ config MT6379_CHARGER
+ 	tristate "MediaTek MT6379 charger"
+ 	depends on SPMI
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -94,6 +94,7 @@ obj-$(CONFIG_CHARGER_MAX8998)	+= max8998_charger.o
+ obj-$(CONFIG_CHARGER_MP2629)	+= mp2629_charger.o
+ obj-$(CONFIG_CHARGER_MT6360)	+= mt6360_charger.o
+ obj-$(CONFIG_MT6379_CHARGER)	+= mt6379_charger.o
++obj-$(CONFIG_MT6379_GAUGE)	+= mt6379_gauge.o
+ obj-$(CONFIG_CHARGER_MT6370)	+= mt6370-charger.o
+ obj-$(CONFIG_CHARGER_QCOM_SMBB)	+= qcom_smbb.o
+ obj-$(CONFIG_BATTERY_PM8916_BMS_VM)	+= pm8916_bms_vm.o
+new file mode 100644
+--- /dev/null
++++ b/drivers/power/supply/mt6379_gauge.c
+@@ -0,0 +1,528 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * MT6379 fuel gauge (battery 0) for MT6991.
++ *
++ * The MT6379 measures the battery with its NAG ADC; the capacity curve is
++ * the OCV table the boot firmware publishes in the device tree
++ * (battery0-profile-tN / temperature-tN).  Register map, conversion and
++ * the table layout follow the vendor mt6379-gauge.c as used by the realme
++ * GT7 (MT6991) port.
++ *
++ * Only the read-only status path is implemented: voltage, capacity from
++ * the OCV table at the fixed battery temperature the firmware configured,
++ * and charge state from the charger block.
++ */
++
++#include <linux/delay.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/power_supply.h>
++#include <linux/regmap.h>
++#include <linux/spmi.h>
++#include <linux/slab.h>
++
++#define MT6379_REG_CHG_STAT0		0x70
++#define MT6379_REG_CHG_STAT		0x121
++
++/* Battery 0 NAG ADC: 16-bit little-endian, bit 15 = data ready. */
++#define MT6379_NAG_ADC_BAT0		0x918
++#define MT6379_NAG_ADC_CTRL		0x9d2
++/* Coulomb counter: 32-bit little-endian at 0x778, bit 31 = discharge. */
++#define MT6379_CAR_CON0			0x778
++#define MT6379_CAR_DIR			BIT(31)
++#define MT6379_CAR_MASK			GENMASK(30, 0)
++#define MT6379_NAG_ADC_READY		BIT(15)
++#define MT6379_NAG_ADC_MASK		GENMASK(14, 0)
++
++/* Vendor conversion: value * 1840 mV * 40 / 32768, rounded. */
++#define MT6379_VOLTAGE_FULL_RANGES	1840
++#define MT6379_R_VAL_TEMP_3		40
++#define MT6379_ADC_PRECISE		32768
++
++#define MT6379_PROFILE_COL		3
++
++struct mt6379_gauge {
++	struct device *dev;
++	struct regmap *regmap;
++	struct power_supply *psy;
++	struct mutex lock;
++	u32 *profile;		/* mah, voltage (0.1 mV), resistance triples */
++	unsigned int profile_len;
++	u32 qmax;		/* 0.1 mAh, taken from the last table entry */
++	ktime_t last_update;
++	int vbat_mv;
++	int capacity;
++	int status;
++	/* coulomb counting */
++	u32 car_mag;
++	bool car_dir;
++	bool car_seen;
++	ktime_t car_time;
++	ktime_t car_last_change;
++	s64 soc_uah;		/* integrated charge, microamp-hours */
++	bool anchored;
++	u32 qmax_uah;
++	int current_ua;
++};
++
++static int mt6379_gauge_read_vbat(struct mt6379_gauge *g)
++{
++	unsigned int lo, hi;
++	u16 val;
++	int i, ret;
++
++	/* regmap-spmi does not do raw reads; the value is 8-bit registers. */
++	for (i = 0; i < 6; i++) {
++		ret = regmap_read(g->regmap, MT6379_NAG_ADC_BAT0, &lo);
++		if (!ret)
++			ret = regmap_read(g->regmap, MT6379_NAG_ADC_BAT0 + 1, &hi);
++		if (ret) {
++			dev_err_once(g->dev, "NAG ADC read failed: %d\n", ret);
++			return ret;
++		}
++		val = lo | hi << 8;
++		if (val & MT6379_NAG_ADC_READY) {
++			u64 mv = (u64)(val & MT6379_NAG_ADC_MASK) *
++				 MT6379_VOLTAGE_FULL_RANGES *
++				 MT6379_R_VAL_TEMP_3;
++
++			/* vendor reg_to_mv_value() yields 0.1 mV */
++			g->vbat_mv = div_u64(mv, MT6379_ADC_PRECISE * 10);
++			return 0;
++		}
++		msleep(30);
++	}
++
++	dev_err_once(g->dev, "NAG ADC not ready: last %#x\n", lo | hi << 8);
++	return -ETIMEDOUT;
++}
++
++/* Coulomb counter: the low 31 bits accumulate charge, bit 31 marks discharge.
++ * The vendor converts with a 1.28 uAh LSB (mt6379 unit_charge 128 / 1000 / 10
++ * in 0.1 mAh units); a module parameter allows calibrating on hardware.
++ */
++static int car_lsb_uah = 1280;	/* 1.28 uAh, scaled by 1000 */
++module_param(car_lsb_uah, int, 0644);
++MODULE_PARM_DESC(car_lsb_uah, "Coulomb counter LSB in nAh");
++
++static int mt6379_gauge_read_car(struct mt6379_gauge *g, u32 *raw)
++{
++	unsigned int b[4];
++	int i, ret;
++
++	for (i = 0; i < 4; i++) {
++		ret = regmap_read(g->regmap, MT6379_CAR_CON0 + i, &b[i]);
++		if (ret)
++			return ret;
++	}
++	*raw = b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24;
++
++	return 0;
++}
++
++
++static void mt6379_gauge_update_coulomb(struct mt6379_gauge *g)
++{
++	ktime_t now = ktime_get();
++	s64 dt_us;
++	u32 raw, mag, dmag;
++	bool dir;
++	int ret;
++
++	ret = mt6379_gauge_read_car(g, &raw);
++	if (ret)
++		return;
++
++	mag = raw & MT6379_CAR_MASK;
++	dir = raw & MT6379_CAR_DIR;
++
++	if (!g->car_time || dir != g->car_dir) {
++		/* Re-anchor at boot and whenever the counter switches side. */
++		g->car_mag = mag;
++		g->car_dir = dir;
++		g->car_time = now;
++		return;
++	}
++
++	dmag = (mag - g->car_mag) & MT6379_CAR_MASK;
++	dt_us = ktime_us_delta(now, g->car_time);
++	if (!dt_us)
++		return;
++	if (dmag) {
++		g->car_seen = true;
++		g->car_last_change = now;
++	}
++	if (dmag > 1000000) {
++		/* implausible jump (reset or read glitch): re-anchor */
++		g->car_mag = mag;
++		g->car_time = now;
++		return;
++	}
++
++	g->car_mag = mag;
++	g->car_time = now;
++
++	/* dmag * LSB(nAh) / 1000 = uAh */
++	g->soc_uah += dir ? -(s64)dmag * car_lsb_uah / 1000 :
++			    (s64)dmag * car_lsb_uah / 1000;
++	if (g->soc_uah < 0)
++		g->soc_uah = 0;
++	if (g->qmax_uah && g->soc_uah > g->qmax_uah)
++		g->soc_uah = g->qmax_uah;
++
++	/* uA = uAh * 3600e6 / us */
++	g->current_ua = div_s64((s64)dmag * car_lsb_uah / 1000 * 3600000000LL,
++				dt_us);
++	if (dir)
++		g->current_ua = -g->current_ua;
++}
++
++/* Entries run from full to empty, voltages in 0.1 mV, capacities in 0.1 mAh. */
++static int mt6379_gauge_profile_capacity(struct mt6379_gauge *g)
++{
++	u32 uv = g->vbat_mv * 10;
++	u32 mah = 0;
++	unsigned int i;
++
++	if (!g->profile || g->profile_len < 2 || !g->qmax)
++		return -ENODATA;
++
++	if (uv >= g->profile[1])
++		return 100;
++	if (uv <= g->profile[(g->profile_len - 1) * MT6379_PROFILE_COL + 1])
++		return 0;
++
++	for (i = 0; i + 1 < g->profile_len; i++) {
++		u32 v0 = g->profile[i * MT6379_PROFILE_COL + 1];
++		u32 v1 = g->profile[(i + 1) * MT6379_PROFILE_COL + 1];
++		u32 m0, m1;
++
++		if (uv > v0 || uv < v1)
++			continue;
++		m0 = g->profile[i * MT6379_PROFILE_COL];
++		m1 = g->profile[(i + 1) * MT6379_PROFILE_COL];
++		if (v0 != v1)
++			mah = m0 + (u64)(m1 - m0) * (v0 - uv) / (v0 - v1);
++		else
++			mah = m1;
++		break;
++	}
++
++	if (mah >= g->qmax)
++		return 0;
++
++	return DIV_ROUND_CLOSEST((g->qmax - mah) * 100, g->qmax);
++}
++
++/* The counter only reports a usable rate once the vendor FG initialization
++ * has run; until it actually moves, fall back to the OCV table.
++ */
++static bool mt6379_gauge_car_live(struct mt6379_gauge *g)
++{
++	return g->car_seen &&
++	       ktime_before(ktime_get(), ktime_add_ms(g->car_last_change, 15000));
++}
++
++static int mt6379_gauge_capacity(struct mt6379_gauge *g)
++{
++	int ocv;
++
++	if (g->qmax_uah && g->soc_uah && mt6379_gauge_car_live(g))
++		return clamp_t(int, DIV_ROUND_CLOSEST(g->soc_uah * 100,
++						      g->qmax_uah), 0, 100);
++
++	ocv = mt6379_gauge_profile_capacity(g);
++	return ocv < 0 ? 0 : ocv;
++}
++
++static int mt6379_gauge_read_status(struct mt6379_gauge *g)
++{
++	unsigned int stat0 = 0, stat = 0;
++
++	regmap_read(g->regmap, MT6379_REG_CHG_STAT0, &stat0);
++	if (!(stat0 & BIT(0)))
++		return POWER_SUPPLY_STATUS_DISCHARGING;
++
++	if (!regmap_read(g->regmap, MT6379_REG_CHG_STAT, &stat) &&
++	    (stat & 0xf) == 7)
++		return POWER_SUPPLY_STATUS_FULL;
++
++	return POWER_SUPPLY_STATUS_CHARGING;
++}
++
++static void mt6379_gauge_refresh(struct mt6379_gauge *g)
++{
++	int ret;
++
++	lockdep_assert_held(&g->lock);
++
++	if (ktime_before(ktime_get(), ktime_add_ms(g->last_update, 2000)) &&
++	    g->vbat_mv)
++		return;
++
++	ret = mt6379_gauge_read_vbat(g);
++	if (!ret) {
++		int ocv = mt6379_gauge_profile_capacity(g);
++		int status = mt6379_gauge_read_status(g);
++
++		mt6379_gauge_update_coulomb(g);
++		if (!g->anchored && ocv >= 0 && g->qmax_uah) {
++			/* First sample: anchor the coulomb count to OCV. */
++			g->soc_uah = (s64)ocv * g->qmax_uah / 100;
++			g->anchored = true;
++		} else if (ocv >= 0 && g->qmax_uah &&
++			   status == POWER_SUPPLY_STATUS_DISCHARGING &&
++			   abs(g->current_ua) < 50000) {
++			/* At rest the OCV is trustworthy: pull slowly towards it. */
++			s64 target = (s64)ocv * g->qmax_uah / 100;
++
++			g->soc_uah += (target - g->soc_uah) / 64;
++		}
++		g->status = status;
++		g->capacity = mt6379_gauge_capacity(g);
++		g->last_update = ktime_get();
++	}
++}
++
++static int mt6379_gauge_get_property(struct power_supply *psy,
++				     enum power_supply_property psp,
++				     union power_supply_propval *val)
++{
++	struct mt6379_gauge *g = power_supply_get_drvdata(psy);
++
++	mutex_lock(&g->lock);
++	mt6379_gauge_refresh(g);
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_STATUS:
++		val->intval = g->status;
++		break;
++	case POWER_SUPPLY_PROP_PRESENT:
++		val->intval = 1;
++		break;
++	case POWER_SUPPLY_PROP_TECHNOLOGY:
++		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
++		break;
++	case POWER_SUPPLY_PROP_CAPACITY:
++		val->intval = max(g->capacity, 0);
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		val->intval = g->vbat_mv * 1000;
++		break;
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		val->intval = mt6379_gauge_car_live(g) ? g->current_ua : 0;
++		break;
++	default:
++		mutex_unlock(&g->lock);
++		return -EINVAL;
++	}
++	mutex_unlock(&g->lock);
++
++	return 0;
++}
++
++static enum power_supply_property mt6379_gauge_props[] = {
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_PRESENT,
++	POWER_SUPPLY_PROP_TECHNOLOGY,
++	POWER_SUPPLY_PROP_CAPACITY,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++};
++
++static const struct power_supply_desc mt6379_gauge_desc = {
++	.name		= "battery",
++	.type		= POWER_SUPPLY_TYPE_BATTERY,
++	.properties	= mt6379_gauge_props,
++	.num_properties	= ARRAY_SIZE(mt6379_gauge_props),
++	.get_property	= mt6379_gauge_get_property,
++};
++
++/* Find the OCV table for the temperature the firmware fixed the gauge at. */
++static int mt6379_gauge_pick_table(struct device *dev, int *index)
++{
++	struct device_node *np = dev->of_node;
++	u32 temp = 25;
++	int ret, i;
++
++	if (!of_property_read_u32(np, "FIXED_BATTERY_TEMPERATURE", &temp)) {
++		for (i = 0; i < 6; i++) {
++			char name[24];
++			u32 value;
++
++			snprintf(name, sizeof(name), "temperature-t%d", i);
++			if (of_property_read_u32(np, name, &value))
++				continue;
++			if (value == temp) {
++				*index = i;
++				return 0;
++			}
++		}
++	}
++
++	/* No usable mapping: use the room-temperature bin MTK calls t1. */
++	ret = of_property_read_u32(np, "temperature-t1", &temp);
++	*index = ret ? 0 : 1;
++
++	return 0;
++}
++
++static int mt6379_gauge_load_profile(struct mt6379_gauge *g)
++{
++	struct device_node *np = g->dev->of_node;
++	char name[40];
++	const void *prop;
++	int col = MT6379_PROFILE_COL;
++	int index, count, ret, i;
++	u32 *values;
++
++	mt6379_gauge_pick_table(g->dev, &index);
++
++	snprintf(name, sizeof(name), "battery0-profile-t%d", index);
++	prop = of_get_property(np, name, &count);
++	if (!prop) {
++		snprintf(name, sizeof(name), "battery0_profile_t%d", index);
++		prop = of_get_property(np, name, &count);
++	}
++	if (!prop)
++		return -ENOENT;
++
++	snprintf(name, sizeof(name), "battery0-profile-t%d-num", index);
++	if (of_property_read_u32(np, name, &g->profile_len))
++		g->profile_len = count / sizeof(u32) / col;
++
++	snprintf(name, sizeof(name), "battery0-profile-t%d-col", index);
++	if (!of_property_read_u32(np, name, &col) && col >= 3 && col <= 8)
++		;	/* keep the leading three columns of a wider table */
++	else
++		col = MT6379_PROFILE_COL;
++
++	count = g->profile_len * col;
++	values = kcalloc(count, sizeof(*values), GFP_KERNEL);
++	if (!values)
++		return -ENOMEM;
++
++	snprintf(name, sizeof(name), "battery0-profile-t%d", index);
++	ret = of_property_read_u32_array(np, name, values, count);
++	if (ret) {
++		snprintf(name, sizeof(name), "battery0_profile_t%d", index);
++		ret = of_property_read_u32_array(np, name, values, count);
++	}
++	if (ret) {
++		kfree(values);
++		return ret;
++	}
++
++	g->profile = kcalloc(g->profile_len * MT6379_PROFILE_COL,
++			     sizeof(*g->profile), GFP_KERNEL);
++	if (!g->profile) {
++		kfree(values);
++		return -ENOMEM;
++	}
++
++	for (i = 0; i < g->profile_len; i++) {
++		g->profile[i * MT6379_PROFILE_COL] = values[i * col];
++		g->profile[i * MT6379_PROFILE_COL + 1] = values[i * col + 1];
++		g->profile[i * MT6379_PROFILE_COL + 2] = values[i * col + 2];
++	}
++	kfree(values);
++
++	g->qmax = g->profile[(g->profile_len - 1) * MT6379_PROFILE_COL];
++	dev_info(g->dev, "OCV table t%d: %u points, Qmax %u.%u mAh\n", index,
++		 g->profile_len, g->qmax / 10, g->qmax % 10);
++
++	return 0;
++}
++
++static ssize_t car_show(struct device *dev, struct device_attribute *attr,
++			char *buf)
++{
++	struct mt6379_gauge *g = dev_get_drvdata(dev);
++	u32 raw = 0;
++
++	mt6379_gauge_read_car(g, &raw);
++
++	return sysfs_emit(buf, "%u dir=%u soc_uah=%lld current_ua=%d\n",
++			  (u32)(raw & MT6379_CAR_MASK), !!(raw & MT6379_CAR_DIR),
++			  g->soc_uah, g->current_ua);
++}
++static DEVICE_ATTR_RO(car);
++
++static int mt6379_gauge_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct power_supply_config cfg = {};
++	struct mt6379_gauge *g;
++	int ret;
++
++	g = devm_kzalloc(dev, sizeof(*g), GFP_KERNEL);
++	if (!g)
++		return -ENOMEM;
++
++	g->dev = dev;
++	g->regmap = dev_get_regmap(dev->parent, NULL);
++	if (!g->regmap)
++		return dev_err_probe(dev, -EPROBE_DEFER,
++				     "waiting for the MT6379 regmap\n");
++
++	ret = mt6379_gauge_load_profile(g);
++	if (ret)
++		return dev_err_probe(dev, ret, "no battery OCV table\n");
++
++	/* The gauge block needs its NAG channel enabled before it converts. */
++	{
++		unsigned int nag = 0, out = 0;
++
++		regmap_update_bits(g->regmap, MT6379_NAG_ADC_CTRL, BIT(0), BIT(0));
++		msleep(120);
++		regmap_read(g->regmap, MT6379_NAG_ADC_CTRL, &nag);
++		regmap_read(g->regmap, MT6379_NAG_ADC_BAT0, &out);
++		dev_info(dev, "NAG ctrl=%#x out=%#x\n", nag, out);
++	}
++
++	mutex_init(&g->lock);
++	g->capacity = -1;
++
++	cfg.drv_data = g;
++	cfg.fwnode = dev_fwnode(dev);
++	g->psy = devm_power_supply_register(dev, &mt6379_gauge_desc, &cfg);
++	if (IS_ERR(g->psy))
++		return dev_err_probe(dev, PTR_ERR(g->psy),
++				     "failed to register battery\n");
++
++	g->qmax_uah = g->qmax * 100;	/* 0.1 mAh -> uAh */
++	platform_set_drvdata(pdev, g);
++	device_create_file(dev, &dev_attr_car);
++
++	return 0;
++}
++
++static void mt6379_gauge_remove(struct platform_device *pdev)
++{
++	struct mt6379_gauge *g = platform_get_drvdata(pdev);
++
++	device_remove_file(&pdev->dev, &dev_attr_car);
++	kfree(g->profile);
++}
++
++static const struct of_device_id mt6379_gauge_of_match[] = {
++	{ .compatible = "mediatek,mt6379-gauge-1" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, mt6379_gauge_of_match);
++
++static struct platform_driver mt6379_gauge_driver = {
++	.probe = mt6379_gauge_probe,
++	.remove = mt6379_gauge_remove,
++	.driver = {
++		.name = "mt6379-gauge",
++		.of_match_table = mt6379_gauge_of_match,
++	},
++};
++module_platform_driver(mt6379_gauge_driver);
++
++MODULE_AUTHOR("Turner Linux port");
++MODULE_DESCRIPTION("MediaTek MT6379 battery gauge (OCV table)");
++MODULE_LICENSE("GPL");

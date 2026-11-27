@@ -1,0 +1,31 @@
+From aff66d118501fa0d0a81c9aa8122c1f3b01f6a12 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:29:47 +0800
+Subject: [PATCH 22/22] arm64: dts: mediatek: add MT6991 central I2C clock
+ controller
+
+---
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index 0d48106..6d560ba 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -130,6 +130,13 @@ soc {
+ 		#size-cells = <2>;
+ 		ranges;
+ 
++		impc: clock-controller@16300000 {
++			compatible = "mediatek,mt6991-imp-iic-wrap-c",
++				     "mediatek,mt8196-imp-iic-wrap-c", "syscon";
++			reg = <0 0x16300000 0 0x1000>;
++			#clock-cells = <1>;
++		};
++
+ 		xs-phy@16730000 {
+ 			compatible = "mediatek,mt6991-xsphy", "mediatek,xsphy";
+ 			#address-cells = <2>;
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,165 @@
+--- a/sound/soc/mediatek/mt6991/Makefile
++++ b/sound/soc/mediatek/mt6991/Makefile
+@@ -1,2 +1,3 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ obj-$(CONFIG_SND_SOC_MT6991_TURNER) += turner.o
++obj-$(CONFIG_SND_SOC_MT6991_TURNER) += mt6991-afe.o
+--- /dev/null
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -0,0 +1,156 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MediaTek MT6991 audio front end */
++#include <linux/arm-smccc.h>
++#include <linux/clk.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <sound/soc.h>
++
++#include "../common/mtk-base-afe.h"
++
++#define AFE_DL0_CON0	0x4460
++
++enum mt6991_bus_clock {
++	ADSP, INTBUS, AUDIO_H, HOPPING, F26M, NUM_BUS_CLKS,
++};
++
++struct mt6991_afe {
++	struct clk_bulk_data bus[NUM_BUS_CLKS];
++	struct clk *clksq;
++	void __iomem *base;
++};
++
++static int mt6991_audio_smc(unsigned int op)
++{
++	struct arm_smccc_res res;
++
++	arm_smccc_smc(MTK_SIP_AUDIO_CONTROL, op, 0, 0, 0, 0, 0, 0, &res);
++	return res.a0 ? -EIO : 0;
++}
++
++static int mt6991_afe_runtime_resume(struct device *dev)
++{
++	struct mt6991_afe *afe = dev_get_drvdata(dev);
++	int i, ret;
++
++	for (i = 0; i < NUM_BUS_CLKS; i++) {
++		ret = clk_prepare_enable(afe->bus[i].clk);
++		if (ret)
++			goto disable;
++		if (i == INTBUS || i == AUDIO_H) {
++			ret = clk_set_parent(afe->bus[i].clk, afe->clksq);
++			if (ret) {
++				clk_disable_unprepare(afe->bus[i].clk);
++				goto disable;
++			}
++		}
++	}
++	ret = mt6991_audio_smc(MTK_AUDIO_SMC_OP_DOMAIN_SIDEBANDS);
++	if (!ret)
++		ret = mt6991_audio_smc(MTK_AUDIO_SMC_OP_SRAM_REQUEST);
++	if (!ret)
++		return 0;
++disable:
++	clk_bulk_disable_unprepare(i, afe->bus);
++	return ret;
++}
++
++static int mt6991_afe_runtime_suspend(struct device *dev)
++{
++	struct mt6991_afe *afe = dev_get_drvdata(dev);
++	int ret;
++
++	ret = mt6991_audio_smc(MTK_AUDIO_SMC_OP_SRAM_RELEASE);
++	if (ret)
++		return ret;
++	clk_bulk_disable_unprepare(NUM_BUS_CLKS, afe->bus);
++	return 0;
++}
++
++static int mt6991_afe_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct mt6991_afe *afe;
++	struct resource *res;
++	u32 dl0;
++	int ret;
++
++	afe = devm_kzalloc(dev, sizeof(*afe), GFP_KERNEL);
++	if (!afe)
++		return -ENOMEM;
++	afe->bus[ADSP].id = "ck_adsp_sel";
++	afe->bus[INTBUS].id = "vlp_mux_audio_int";
++	afe->bus[AUDIO_H].id = "vlp_mux_audio_h";
++	afe->bus[HOPPING].id = "aud_hopping_clk";
++	afe->bus[F26M].id = "aud_f26m_clk";
++	ret = devm_clk_bulk_get(dev, NUM_BUS_CLKS, afe->bus);
++	if (ret)
++		return dev_err_probe(dev, ret, "getting AFE bus clocks\n");
++	afe->clksq = devm_clk_get(dev, "vlp_clk26m_clk");
++	if (IS_ERR(afe->clksq))
++		return dev_err_probe(dev, PTR_ERR(afe->clksq), "getting VLP clock parent\n");
++
++	/* The first page is also mapped by the audiosys clock provider. */
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res || resource_size(res) < AFE_DL0_CON0 + sizeof(u32))
++		return -EINVAL;
++	afe->base = devm_ioremap(dev, res->start, resource_size(res));
++	if (!afe->base)
++		return -ENOMEM;
++	platform_set_drvdata(pdev, afe);
++	pm_runtime_enable(dev);
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0) {
++		pm_runtime_disable(dev);
++		return dev_err_probe(dev, ret, "resuming AFE register interface\n");
++	}
++	dl0 = readl(afe->base + AFE_DL0_CON0);
++	dev_dbg(dev, "DL0 control at probe %#x\n", dl0);
++	ret = pm_runtime_put_sync_suspend(dev);
++	if (ret < 0)
++		dev_warn(dev, "AFE remains active after probe: %d\n", ret);
++	return 0;
++}
++
++static void mt6991_afe_remove(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct mt6991_afe *afe = dev_get_drvdata(dev);
++
++	pm_runtime_disable(dev);
++	if (!pm_runtime_status_suspended(dev)) {
++		if (mt6991_afe_runtime_suspend(dev)) {
++			dev_warn(dev, "firmware did not release audio SRAM\n");
++			clk_bulk_disable_unprepare(NUM_BUS_CLKS, afe->bus);
++		}
++		pm_runtime_set_suspended(dev);
++	}
++}
++
++static const struct dev_pm_ops mt6991_afe_pm = {
++	RUNTIME_PM_OPS(mt6991_afe_runtime_suspend, mt6991_afe_runtime_resume, NULL)
++	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
++};
++
++static const struct of_device_id mt6991_afe_match[] = {
++	{ .compatible = "mediatek,mt6991-sound" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, mt6991_afe_match);
++
++static struct platform_driver mt6991_afe_driver = {
++	.probe = mt6991_afe_probe,
++	.remove = mt6991_afe_remove,
++	.driver = {
++		.name = "mt6991-afe",
++		.of_match_table = mt6991_afe_match,
++		.pm = pm_ptr(&mt6991_afe_pm),
++	},
++};
++module_platform_driver(mt6991_afe_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6991 audio front end");
++MODULE_LICENSE("GPL");

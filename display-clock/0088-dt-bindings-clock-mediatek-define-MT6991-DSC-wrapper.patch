@@ -1,0 +1,28 @@
+From 25273f9baa733778a0426161fa4c9b288a18cc42 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 09:55:35 +0800
+Subject: [PATCH 88/89] dt-bindings: clock: mediatek: define MT6991 DSC wrapper
+ clock IDs
+
+---
+ include/dt-bindings/clock/mediatek,mt6991-clock.h | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/include/dt-bindings/clock/mediatek,mt6991-clock.h b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+index 64f3b693a..b608de383 100644
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -60,6 +60,10 @@
+ #define MT6991_CLK_MM1_DSI1_DIGITAL        3
+ 
+ #define MT6991_CLK_MM1_MUTEX               4
++#define MT6991_CLK_MM1_DSC_WRAP0           5
++#define MT6991_CLK_MM1_DSC_WRAP1           6
++#define MT6991_CLK_MM1_DSC_WRAP2           7
++#define MT6991_CLK_MM1_DSC_WRAP3           8
+ #define MT6991_CLK_MM0_MUTEX               0
+ #define MT6991_CLK_OVL0_MUTEX              0
+ #define MT6991_CLK_OVL1_MUTEX              0
+-- 
+2.50.1 (Apple Git-155)
+

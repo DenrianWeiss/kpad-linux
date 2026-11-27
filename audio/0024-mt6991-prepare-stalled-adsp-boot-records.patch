@@ -1,0 +1,254 @@
+--- a/drivers/mailbox/mt6991-adsp-mailbox.c
++++ b/drivers/mailbox/mt6991-adsp-mailbox.c
+@@ -12,6 +12,7 @@
+ 
+ #define MT6991_ADSP_SPM_WAKEUPSRC(core) (0x5c + 4 * (core))
+ #define MT6991_ADSP_WAKEUP_SPM BIT(0)
++#define MT6991_ADSP_CORE_CONTROL 0x108
+ 
+ struct mt6991_rx {
+ 	void __iomem *base;
+@@ -22,6 +23,7 @@
+ 
+ struct mt6991_adsp_mailbox {
+ 	struct mbox_controller controller;
++	void __iomem *core_control;
+ 	struct clk *clk;
+ 	struct mbox_chan chan[2];
+ 	struct mt6991_rx rx[2];
+@@ -88,6 +90,24 @@
+ 	.send_data = mt6991_adsp_rx_send,
+ };
+ 
++/* The caller holds the RX channel and hence the ADSP clock and power domain. */
++int mt6991_adsp_require_stall(struct mbox_chan *chan, unsigned int id)
++{
++	struct mt6991_adsp_mailbox *mb;
++	u32 control;
++
++	if (!chan || chan->mbox->ops != &mt6991_adsp_ops)
++		return -EINVAL;
++	mb = dev_get_drvdata(chan->mbox->dev);
++	if (id >= ARRAY_SIZE(mb->chan) || chan != &mb->chan[id])
++		return -EINVAL;
++	control = readl(mb->core_control);
++	if (control == U32_MAX)
++		return -ENXIO;
++	return control & BIT(12 + id) ? 0 : -EBUSY;
++}
++EXPORT_SYMBOL_GPL(mt6991_adsp_require_stall);
++
+ static struct mbox_chan *mt6991_adsp_xlate(struct mbox_controller *controller,
+ 					  const struct of_phandle_args *spec)
+ {
+@@ -110,12 +130,13 @@
+ 		return -ENOMEM;
+ 
+ 	cfg_res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "cfg");
+-	if (!cfg_res || resource_size(cfg_res) < MT6991_ADSP_SPM_WAKEUPSRC(1) + sizeof(u32))
++	if (!cfg_res || resource_size(cfg_res) < MT6991_ADSP_CORE_CONTROL + sizeof(u32))
+ 		return dev_err_probe(dev, -EINVAL, "invalid ADSP config window\n");
+ 	cfg = devm_ioremap_resource(dev, cfg_res);
+ 	if (IS_ERR(cfg))
+ 		return PTR_ERR(cfg);
+ 
++	mb->core_control = cfg + MT6991_ADSP_CORE_CONTROL;
+ 	mb->clk = devm_clk_get(dev, "clk_top_adsp_sel");
+ 	if (IS_ERR(mb->clk))
+ 		return dev_err_probe(dev, PTR_ERR(mb->clk), "getting ADSP clock\n");
+--- a/include/linux/soc/mediatek/mt6991-adsp-ipi.h
++++ b/include/linux/soc/mediatek/mt6991-adsp-ipi.h
+@@ -13,4 +13,7 @@
+ 	u8 payload[224];
+ };
+ 
++struct mbox_chan;
++int mt6991_adsp_require_stall(struct mbox_chan *chan, unsigned int id);
++
+ #endif
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -1,7 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* MT6991 ADSP core firmware notifications */
++#include <linux/ctype.h>
+ #include <linux/io.h>
+ #include <linux/mailbox_client.h>
++#include <linux/of_address.h>
+ #include <linux/overflow.h>
+ #include <linux/sizes.h>
+ #include <linux/module.h>
+@@ -18,6 +20,7 @@
+ 	void __iomem *l2_end;
+ 	u32 id;
+ 	atomic_t ready_count;
++	struct mutex records_lock;
+ };
+ 
+ static void mt6991_adsp_receive(struct mbox_client *client, void *data)
+@@ -93,37 +96,120 @@
+ 	return readl(slot) == record->address && readl(slot + 4) == record->size;
+ }
+ 
++static bool mt6991_adsp_lk_pool(const char *name)
++{
++	size_t prefix = str_has_prefix(name, "mblock-");
++	size_t suffix;
++
++	if (!prefix || !isdigit(name[prefix]))
++		return false;
++	name += prefix;
++	while (isdigit(*name))
++		name++;
++	suffix = str_has_prefix(name, "-adsp_shared_reserved");
++	return suffix && (!name[suffix] || name[suffix] == '@');
++}
++
++static bool mt6991_adsp_pool_owned(struct device_node *sys)
++{
++	struct device_node *reserved __free(device_node) = of_find_node_by_path("/reserved-memory");
++	u64 range[2], start, size;
++	bool found = false;
++
++	if (!reserved || of_property_read_u64_array(sys, "shared_memory", range, 2))
++		return false;
++	for_each_available_child_of_node_scoped(reserved, node) {
++		const char *name = kbasename(of_node_full_name(node));
++
++		if (!mt6991_adsp_lk_pool(name) &&
++		    !of_device_is_compatible(node, "mediatek,reserve-memory-adsp_share"))
++			continue;
++		if (found || !of_property_present(node, "no-map") ||
++		    of_property_present(node, "reusable") ||
++		    of_property_count_u64_elems(node, "reg") != 2 ||
++		    of_property_read_reg(node, 0, &start, &size) ||
++		    start != range[0] || size != range[1])
++			return false;
++		found = true;
++	}
++	return found;
++}
++
++static void mt6991_adsp_write_record(void __iomem *slot,
++				     const struct mt6991_adsp_record *record)
++{
++	writel(record->address, slot);
++	writel(record->size, slot + 4);
++}
++
++static int mt6991_adsp_boot_records(struct device *dev, bool prepare)
++{
++	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
++	void __iomem *mpu_slot = core->l2_end - 0x28;
++	struct mt6991_adsp_record pool, c2c;
++	struct of_phandle_args rx;
++	int ret;
++
++	ret = of_parse_phandle_with_args(dev->of_node, "mboxes", "#mbox-cells", 1, &rx);
++	if (ret)
++		return ret;
++	ret = mt6991_adsp_records(rx.np, &pool, &c2c);
++	if (!ret && prepare && !mt6991_adsp_pool_owned(rx.np))
++		ret = -ENODATA;
++	of_node_put(rx.np);
++	if (ret)
++		return ret;
++
++	guard(mutex)(&core->records_lock);
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return ret;
++	if (prepare) {
++		ret = mt6991_adsp_require_stall(core->rx, core->id);
++		if (ret)
++			goto out;
++		mt6991_adsp_write_record(mpu_slot, &pool);
++		if (!core->id)
++			mt6991_adsp_write_record(core->l2_end - 0x2510, &c2c);
++	}
++	ret = mt6991_adsp_record_matches(mpu_slot, &pool);
++	if (!core->id)
++		ret &= mt6991_adsp_record_matches(core->l2_end - 0x2510, &c2c);
++out:
++	pm_runtime_put_sync(dev);
++	return ret;
++}
++
+ static ssize_t boot_records_match_show(struct device *dev, struct device_attribute *attr,
+ 				       char *buf)
+ {
+-	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
+-	struct mt6991_adsp_record pool, c2c;
+-	struct of_phandle_args rx;
+-	bool match;
++	int ret = mt6991_adsp_boot_records(dev, false);
++
++	if (ret < 0)
++		return ret;
++	return sysfs_emit(buf, "%d\n", ret);
++}
++static DEVICE_ATTR_RO(boot_records_match);
++
++static ssize_t prepare_boot_records_store(struct device *dev, struct device_attribute *attr,
++					  const char *buf, size_t count)
++{
+ 	int ret;
+ 
+-	ret = of_parse_phandle_with_args(dev->of_node, "mboxes", "#mbox-cells", 1, &rx);
+-	if (ret)
+-		return ret;
+-	ret = mt6991_adsp_records(rx.np, &pool, &c2c);
+-	of_node_put(rx.np);
+-	if (ret)
+-		return ret;
+-
+-	ret = pm_runtime_resume_and_get(dev);
++	if (!sysfs_streq(buf, "1"))
++		return -EINVAL;
++	ret = mt6991_adsp_boot_records(dev, true);
+ 	if (ret < 0)
+ 		return ret;
+-	match = mt6991_adsp_record_matches(core->l2_end - 0x28, &pool);
+-	if (!core->id)
+-		match &= mt6991_adsp_record_matches(core->l2_end - 0x2510, &c2c);
+-	pm_runtime_put_sync(dev);
+-
+-	return sysfs_emit(buf, "%u\n", match);
+-}
+-static DEVICE_ATTR_RO(boot_records_match);
++	if (!ret)
++		return -EIO;
++	return count;
++}
++static DEVICE_ATTR_WO(prepare_boot_records);
+ 
+ static struct attribute *mt6991_adsp_attrs[] = {
+ 	&dev_attr_boot_records_match.attr,
++	&dev_attr_prepare_boot_records.attr,
+ 	&dev_attr_ready_count.attr,
+ 	NULL,
+ };
+@@ -172,6 +258,7 @@
+ 	core->l2_end = l2 + resource_size(res);
+ 	core->client.dev = dev;
+ 	core->client.rx_callback = mt6991_adsp_receive;
++	mutex_init(&core->records_lock);
+ 	platform_set_drvdata(pdev, core);
+ 	pm_runtime_enable(dev);
+ 	return 0;
+--- /dev/null
++++ b/Documentation/ABI/testing/sysfs-platform-mt6991-adsp
+@@ -0,0 +1,13 @@
++What:		/sys/bus/platform/devices/.../prepare_boot_records
++Date:		November 2026
++Description:
++		Writing 1 prepares the MT6991 audio DSP core's L2 boot records.
++		The kernel uses the bootloader's verified shared memory range.
++		It checks the core's stall bit with its RX channel powered, writes
++		the MPU record and (on core A) the inter-core record, then reads
++		the records back before releasing the runtime power reference.
++		An active core returns EBUSY, a missing allocation returns ENODATA,
++		an inaccessible control register returns ENXIO, and a failed L2
++		readback returns EIO. Repeating a successful request
++		while the core is stalled writes the same records. Retention across
++		a later power transition is platform dependent.

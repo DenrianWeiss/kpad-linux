@@ -1,0 +1,74 @@
+diff --git a/drivers/misc/mediatek/connectivity/bt/linux_v2/Kbuild b/drivers/misc/mediatek/connectivity/bt/linux_v2/Kbuild
+index 5ef7300..8321d6c 100644
+--- a/drivers/misc/mediatek/connectivity/bt/linux_v2/Kbuild
++++ b/drivers/misc/mediatek/connectivity/bt/linux_v2/Kbuild
+@@ -60,7 +60,7 @@ ccflags-y += -DBTMTK_ISOC_TEST=0
+ ccflags-y += -DBTMTK_LOG_LVL=0
+ ccflags-y += -D_FORTIFY_SOURCE=2
+ 
+-obj-y += btmtk_bt.o
++obj-m += btmtk_bt.o
+ btmtk_bt-objs := \
+ 	btmtk_main.o \
+ 	btmtk_fw_log.o \
+@@ -79,3 +79,4 @@ btmtk_bt-objs := \
+ 	chip/btmtk_chip_7922.o \
+ 	chip/btmtk_chip_7961.o \
+ 	chip/btmtk_chip_connac3.o
++btmtk_bt-objs += btmtk_uarthub_compat.o
+diff --git a/drivers/misc/mediatek/uarthub/common/platform/6991/mt6991_debug.c b/drivers/misc/mediatek/uarthub/common/platform/6991/mt6991_debug.c
+index 33a6cbb..884ba2a 100644
+--- a/drivers/misc/mediatek/uarthub/common/platform/6991/mt6991_debug.c
++++ b/drivers/misc/mediatek/uarthub/common/platform/6991/mt6991_debug.c
+@@ -448,12 +448,6 @@ int uarthub_dump_intfhub_debug_info_mt6991(const char *tag)
+ 			len += ret;
+ 	}
+ 
+-	ret = snprintf(dmp_info_buf + len, DBG_LOG_LEN - len, ",HUB/UART/ADSP_CLK=[%d-%d-%d]",
+-		mt_get_fmeter_freq(FM_UARTHUB_B_CK, CKGEN),
+-		mt_get_fmeter_freq(FM_UART_CK, CKGEN),
+-		mt_get_fmeter_freq(FM_ADSP_UARTHUB_B_CK, CKGEN));
+-	if (ret > 0)
+-		len += ret;
+ 
+ 	val = DBG_CTRL_GET_intfhub_dbg_sel(DBG_CTRL_ADDR);
+ 	ret = snprintf(dmp_info_buf + len, DBG_LOG_LEN - len,
+@@ -1408,12 +1402,6 @@ int uarthub_dump_debug_clk_info_mt6991(const char *tag)
+ 			len += ret;
+ 	}
+ 
+-	ret = snprintf(dmp_info_buf + len, DBG_LOG_LEN - len, ",HUB/UART/ADSP_CLK=[%d-%d-%d]",
+-		mt_get_fmeter_freq(FM_UARTHUB_B_CK, CKGEN),
+-		mt_get_fmeter_freq(FM_UART_CK, CKGEN),
+-		mt_get_fmeter_freq(FM_ADSP_UARTHUB_B_CK, CKGEN));
+-	if (ret > 0)
+-		len += ret;
+ 
+ 	val = uarthub_get_spm_sys_timer_mt6991(&timer_h, &timer_l);
+ 	if (val == 1) {
+@@ -1588,12 +1576,6 @@ int uarthub_dump_debug_byte_cnt_info_mt6991(const char *tag)
+ 			len += ret;
+ 	}
+ 
+-	ret = snprintf(dmp_info_buf + len, DBG_LOG_LEN - len, ",HUB/UART/ADSP_CLK=[%d-%d-%d]",
+-		mt_get_fmeter_freq(FM_UARTHUB_B_CK, CKGEN),
+-		mt_get_fmeter_freq(FM_UART_CK, CKGEN),
+-		mt_get_fmeter_freq(FM_ADSP_UARTHUB_B_CK, CKGEN));
+-	if (ret > 0)
+-		len += ret;
+ 
+ 	val = uarthub_get_spm_sys_timer_mt6991(&timer_h, &timer_l);
+ 	if (val == 1) {
+diff --git a/drivers/misc/mediatek/uarthub/common/platform/6991/mt6991.c b/drivers/misc/mediatek/uarthub/common/platform/6991/mt6991.c
+index 0d3c74a..743409a 100644
+--- a/drivers/misc/mediatek/uarthub/common/platform/6991/mt6991.c
++++ b/drivers/misc/mediatek/uarthub/common/platform/6991/mt6991.c
+@@ -2085,7 +2085,7 @@ int uarthub_get_host_awake_sta_mt6991(int dev_index)
+ 
+ int uarthub_host_awake_sta_ctrl_mt6991(int dev_index, int set, const char *tag)
+ {
+-#define DUMP_HOST_AWAKE_STA_DEBUG_INFO 1
++#define DUMP_HOST_AWAKE_STA_DEBUG_INFO 0 /* Debug registers may be gated during wake transitions. */
+ 
+ #if DUMP_HOST_AWAKE_STA_DEBUG_INFO
+ 	int dev_host_awake_sta[2] = {0};

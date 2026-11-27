@@ -1,0 +1,37 @@
+Subject: [RFC PATCH] PCI: mediatek-gen3: clear turn-off request on L2 timeout
+
+If the link fails to reach L2.Idle, suspend returns with the port still
+powered. Clear the outstanding request as the MT6991 platform driver does
+so a subsequent suspend can issue a fresh request.
+
+--- a/drivers/pci/controller/pcie-mediatek-gen3.c
++++ b/drivers/pci/controller/pcie-mediatek-gen3.c
+@@ -1341,16 +1341,23 @@
+ static int mtk_pcie_turn_off_link(struct mtk_gen3_pcie *pcie)
+ {
+ 	u32 val;
++	int ret;
+ 
+ 	val = readl_relaxed(pcie->base + PCIE_ICMD_PM_REG);
+ 	val |= PCIE_TURN_OFF_LINK;
+ 	writel_relaxed(val, pcie->base + PCIE_ICMD_PM_REG);
+ 
+-	/* Check the link is L2 */
+-	return readl_poll_timeout(pcie->base + PCIE_LTSSM_STATUS_REG, val,
+-				  (PCIE_LTSSM_STATE(val) ==
+-				   PCIE_LTSSM_STATE_L2_IDLE), 20,
+-				   50 * USEC_PER_MSEC);
++	ret = readl_poll_timeout(pcie->base + PCIE_LTSSM_STATUS_REG, val,
++				 PCIE_LTSSM_STATE(val) == PCIE_LTSSM_STATE_L2_IDLE,
++				 20, 50 * USEC_PER_MSEC);
++	if (ret) {
++		/* Suspend was aborted. Cancel the outstanding PME_Turn_Off. */
++		val = readl_relaxed(pcie->base + PCIE_ICMD_PM_REG);
++		val &= ~PCIE_TURN_OFF_LINK;
++		writel_relaxed(val, pcie->base + PCIE_ICMD_PM_REG);
++	}
++
++	return ret;
+ }
+ 
+ static int mtk_pcie_suspend_noirq(struct device *dev)

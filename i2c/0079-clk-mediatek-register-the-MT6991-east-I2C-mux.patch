@@ -1,0 +1,27 @@
+From 3a91b33cd8272f4f904d1002e566c032e391f331 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 07:34:49 +0800
+Subject: [PATCH 79/80] clk: mediatek: register the MT6991 east I2C mux
+
+---
+ drivers/clk/mediatek/clk-mt8196-topckgen.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-topckgen.c b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+index 3b60715..9f186b3 100644
+--- a/drivers/clk/mediatek/clk-mt8196-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+@@ -1010,6 +1010,10 @@ static const struct mtk_mux mt6991_muxes[] = {
+ 		CLK_CFG_10, CLK_CFG_10_SET, CLK_CFG_10_CLR,
+ 		24, 1, 31, CLK_CFG_UPDATE1, TOP_MUX_SSUSB_FMCNT_P1_SHIFT,
+ 		CLK_FENC_STATUS_MON_1, 20),
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_I2C_EAST, "i2c_east", i2c_parents,
++		CLK_CFG_11, CLK_CFG_11_SET, CLK_CFG_11_CLR,
++		8, 3, 15, CLK_CFG_UPDATE1, TOP_MUX_I2C_EAST_SHIFT,
++		CLK_FENC_STATUS_MON_1, 18),
+ 	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_I2C_WEST, "i2c_west", i2c_parents,
+ 		CLK_CFG_11, CLK_CFG_11_SET, CLK_CFG_11_CLR,
+ 		16, 3, 23, CLK_CFG_UPDATE1, TOP_MUX_I2C_WEST_SHIFT,
+-- 
+2.50.1 (Apple Git-155)
+

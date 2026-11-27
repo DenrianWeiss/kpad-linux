@@ -1,0 +1,116 @@
+diff --git a/drivers/misc/mediatek/connectivity/connadp/Kbuild b/drivers/misc/mediatek/connectivity/connadp/Kbuild
+index 22ad017..544c153 100644
+--- a/drivers/misc/mediatek/connectivity/connadp/Kbuild
++++ b/drivers/misc/mediatek/connectivity/connadp/Kbuild
+@@ -17,7 +17,7 @@ ccflags-y += -I$(srctree)/drivers/misc/mediatek/include
+ ccflags-y += -I$(srctree)/drivers/misc/mediatek/include/mt-plat
+ ccflags-y += -include $(src)/../compat/conninfra_compat.h
+ 
+-obj-y += connadp.o
++obj-m += connadp.o
+ connadp-objs := common/connectivity_build_in_adapter.o
+ connadp-objs += common/wmt_build_in_adapter.o
+ connadp-objs += power_throttling/adapter.o
+diff --git a/drivers/misc/mediatek/connectivity/connfem/Kbuild b/drivers/misc/mediatek/connectivity/connfem/Kbuild
+index 76fa445..d1189c5 100644
+--- a/drivers/misc/mediatek/connectivity/connfem/Kbuild
++++ b/drivers/misc/mediatek/connectivity/connfem/Kbuild
+@@ -58,7 +58,7 @@ ccflags-y += -I$(KO_CODE_PATH)/../compat/include
+ # ConnFem Module
+ ###############################################################################
+ MODULE_NAME := connfem
+-obj-y += $(MODULE_NAME).o
++obj-m += $(MODULE_NAME).o
+ 
+ $(MODULE_NAME)-objs += connfem_module.o
+ $(MODULE_NAME)-objs += connfem_api.o
+diff --git a/drivers/misc/mediatek/connectivity/connfem/connfem_module.c b/drivers/misc/mediatek/connectivity/connfem/connfem_module.c
+index 2a42899..787775c 100644
+--- a/drivers/misc/mediatek/connectivity/connfem/connfem_module.c
++++ b/drivers/misc/mediatek/connectivity/connfem/connfem_module.c
+@@ -1065,6 +1065,7 @@ module_init(connfem_mod_init);
+ module_exit(connfem_mod_exit);
+ 
+ MODULE_LICENSE("GPL");
++MODULE_IMPORT_NS("IIO_CONSUMER");
+ MODULE_DESCRIPTION("Connsys FEM (Front-End-Module) Driver");
+ MODULE_AUTHOR("Dennis Lin <dennis.lin@mediatek.com>");
+ MODULE_AUTHOR("Brad Chou <brad.chou@mediatek.com>");
+diff --git a/drivers/misc/mediatek/connectivity/conninfra/adaptor/conninfra_dev.c b/drivers/misc/mediatek/connectivity/conninfra/adaptor/conninfra_dev.c
+index 72c53de..5b959ab 100644
+--- a/drivers/misc/mediatek/connectivity/conninfra/adaptor/conninfra_dev.c
++++ b/drivers/misc/mediatek/connectivity/conninfra/adaptor/conninfra_dev.c
+@@ -534,11 +534,7 @@ static int conn_adaptor_dev_do_drv_init(void)
+ 	if (iret)
+ 		pr_warn("init conf fail\n");
+ 
+-	/* connv2 (conninfra init) */
+-	iret = connv2_drv_init();
+-	if (iret)
+-		pr_err("[%s] connv2 init fail %d", __func__, iret);
+-
++	/* Turner MT6653 is wired to the connv3 controller. */
+ 	pr_info("[%s] ========================== start connv3", __func__);
+ 	/* connv3 */
+ 	iret = connv3_drv_init();
+@@ -662,7 +658,7 @@ static void conninfra_dev_deinit(void)
+ 	g_conn_adaptor_init_status = CONN_ADAPTOR_INIT_NOT_START;
+ 
+ 	/* deinit connv2 */
+-	connv2_drv_deinit();
++
+ 
+ 	/* deinit connv3 */
+ 	connv3_drv_deinit();
+diff --git a/drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/hif/common/hif_mem.c b/drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/hif/common/hif_mem.c
+index 88417d0..fd6a497 100644
+--- a/drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/hif/common/hif_mem.c
++++ b/drivers/misc/mediatek/connectivity/wlan/core/gen4m/os/linux/hif/common/hif_mem.c
+@@ -230,6 +230,13 @@ static bool halGetRsvMemSizeRsvedByKernel(struct platform_device *pdev,
+ 	}
+ 	ret = of_property_read_u64_array(np, "size",
+ 					 &gWifiRsvMemSize[u4RsvMemIdx], 1);
++	if (ret) {
++		struct resource resource;
++
++		ret = of_address_to_resource(np, 0, &resource);
++		if (!ret)
++			gWifiRsvMemSize[u4RsvMemIdx] = resource_size(&resource);
++	}
+ 	of_node_put(np);
+ 	if (ret != 0) {
+ 		DBGLOG(INIT, ERROR, "get rsrv mem size failed(%d).\n", ret);
+diff --git a/drivers/misc/mediatek/connectivity/conninfra/conn_drv/connv3/core/connv3_core.c b/drivers/misc/mediatek/connectivity/conninfra/conn_drv/connv3/core/connv3_core.c
+index 211e6c5..56dfaf9 100644
+--- a/drivers/misc/mediatek/connectivity/conninfra/conn_drv/connv3/core/connv3_core.c
++++ b/drivers/misc/mediatek/connectivity/conninfra/conn_drv/connv3/core/connv3_core.c
+@@ -5,6 +5,7 @@
+ 
+ #define pr_fmt(fmt) KBUILD_MODNAME "@(%s:%d) " fmt, __func__, __LINE__
+ 
++#include <linux/moduleparam.h>
+ #include "conninfra_conf.h"
+ #include "connv3.h"
+ #include "connv3_hw.h"
+@@ -191,6 +192,21 @@ enum pre_cal_type {
+ 
+ static unsigned int g_pre_cal_mode = PRE_CAL_SCREEN_ON_DISABLED;
+ 
++static int pre_cal_ready_get(char *buf, const struct kernel_param *kp)
++{
++	bool ready = READ_ONCE(g_pre_cal_mode) == PRE_CAL_ALL_DISABLED ||
++		     READ_ONCE(g_connv3_ctx.cal_info.status) == PRE_CAL_DONE;
++
++	return sysfs_emit(buf, "%u\n", ready);
++}
++
++static const struct kernel_param_ops pre_cal_ready_ops = {
++	.get = pre_cal_ready_get,
++};
++module_param_cb(pre_cal_ready, &pre_cal_ready_ops, NULL, 0444);
++MODULE_PARM_DESC(pre_cal_ready, "Initial shared-radio pre-calibration has finished or is disabled");
++
++
+ /*******************************************************************************
+ *                              F U N C T I O N S
+ ********************************************************************************

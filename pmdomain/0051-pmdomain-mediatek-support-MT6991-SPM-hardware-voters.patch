@@ -1,0 +1,102 @@
+From 614b047711daa76f4264792943e934c722094d94 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 05:59:42 +0800
+Subject: [PATCH] pmdomain: mediatek: support MT6991 SPM hardware voters
+
+---
+ drivers/pmdomain/mediatek/mt6991-pm-domains.h | 32 +++++++++++++++++++
+ drivers/pmdomain/mediatek/mtk-pm-domains.c    |  7 ++--
+ drivers/pmdomain/mediatek/mtk-pm-domains.h    |  2 ++
+ 3 files changed, 39 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/pmdomain/mediatek/mt6991-pm-domains.h b/drivers/pmdomain/mediatek/mt6991-pm-domains.h
+index 3c0baa2..a9ffd49 100644
+--- a/drivers/pmdomain/mediatek/mt6991-pm-domains.h
++++ b/drivers/pmdomain/mediatek/mt6991-pm-domains.h
+@@ -70,6 +70,38 @@ static const struct scpsys_domain_data mt6991_domains[] = {
+ 	},
+ };
+ 
++static const struct scpsys_hwv_domain_data mt6991_spm_voters[] = {
++	[MT6991_POWER_DOMAIN_MM_PROC_DORMANT] = {
++		.name = "mm-proc-dormant",
++		.set = 0x218,
++		.clr = 0x21c,
++		.done = 0x141c,
++		.en = 0x1410,
++		.set_sta = 0x146c,
++		.clr_sta = 0x1470,
++		.setclr_bit = 0,
++		.caps = MTK_SCPD_INFRA_PWR_CTL,
++	},
++	[MT6991_POWER_DOMAIN_SSR] = {
++		.name = "ssrsys",
++		.set = 0x218,
++		.clr = 0x21c,
++		.done = 0x141c,
++		.en = 0x1410,
++		.set_sta = 0x146c,
++		.clr_sta = 0x1470,
++		.setclr_bit = 1,
++		.caps = MTK_SCPD_INFRA_PWR_CTL,
++		.sleepable = true,
++	},
++};
++
++static const struct scpsys_soc_data mt6991_spm_hwv_data = {
++	.hwv_domains_data = mt6991_spm_voters,
++	.num_hwv_domains = ARRAY_SIZE(mt6991_spm_voters),
++	.type = SCPSYS_MTCMOS_TYPE_HW_VOTER,
++};
++
+ static const struct scpsys_soc_data mt6991_scpsys_data = {
+ 	.domains_data = mt6991_domains,
+ 	.num_domains = ARRAY_SIZE(mt6991_domains),
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.c b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+index b13d58f..08ef5c4 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.c
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+@@ -1067,8 +1067,8 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
+ 		pd->genpd.power_off = scpsys_hwv_power_off;
+ 		pd->genpd.power_on = scpsys_hwv_power_on;
+ 
+-		/* HW-Voter code can be invoked in atomic context */
+-		pd->genpd.flags |= GENPD_FLAG_IRQ_SAFE;
++		if (!pd->hwv_data->sleepable)
++			pd->genpd.flags |= GENPD_FLAG_IRQ_SAFE;
+ 	}
+ 
+ 	/*
+@@ -1387,6 +1387,9 @@ static const struct of_device_id scpsys_of_match[] = {
+ 		.data = &mt6893_scpsys_data,
+ 	},
+ 	{
++		.compatible = "mediatek,mt6991-hwv-scp-power-controller",
++		.data = &mt6991_spm_hwv_data,
++	}, {
+ 		.compatible = "mediatek,mt6991-power-controller",
+ 		.data = &mt6991_scpsys_data,
+ 	},
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.h b/drivers/pmdomain/mediatek/mtk-pm-domains.h
+index d2e8220..7389ac3 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.h
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.h
+@@ -195,6 +195,7 @@ struct scpsys_domain_data {
+  * @setclr_bit: The SET/CLR bit to enable/disable the power domain
+  * @sta_bit:    The SET/CLR STA bit to check for on/off ACK
+  * @caps:       The flag for active wake-up action
++ * @sleepable: Domain transitions use the sleepable genpd lock.
+  */
+ struct scpsys_hwv_domain_data {
+ 	const char *name;
+@@ -207,6 +208,7 @@ struct scpsys_hwv_domain_data {
+ 	u8 setclr_bit;
+ 	u8 sta_bit;
+ 	u16 caps;
++	bool sleepable;
+ };
+ 
+ struct scpsys_soc_data {
+-- 
+2.50.1 (Apple Git-155)
+

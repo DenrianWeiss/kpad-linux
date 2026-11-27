@@ -1,0 +1,14 @@
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -107,6 +107,11 @@
+ 	afe->base = devm_ioremap(dev, res->start, resource_size(res));
+ 	if (!afe->base)
+ 		return -ENOMEM;
++	/* The firmware requires INIT before accepting any runtime operation. */
++	ret = mt6991_audio_smc(dev, MTK_AUDIO_SMC_OP_INIT);
++	if (ret)
++		return dev_err_probe(dev, ret, "initializing audio firmware service\n");
++
+ 	platform_set_drvdata(pdev, afe);
+ 	pm_runtime_enable(dev);
+ 	ret = pm_runtime_resume_and_get(dev);

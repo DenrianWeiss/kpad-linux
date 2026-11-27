@@ -1,0 +1,42 @@
+Subject: [RFC PATCH] wifi: mt76: wait for MT6653 ROM download ring space
+
+A WM image contains more chunks than the firmware download ring has slots.
+Keep the next scatter skb while older descriptors are being consumed.
+Return a timeout if the device makes no progress. Allocation and mapping
+errors still propagate from the normal enqueue path.
+
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
+@@ -74,6 +74,12 @@
+ }
+ EXPORT_SYMBOL_GPL(mt6653_rom_rx_skb);
+ 
++static bool mt6653_fwdl_has_room(struct mt76_dev *dev, struct mt76_queue *q)
++{
++	dev->queue_ops->tx_cleanup(dev, q, false);
++	return READ_ONCE(q->queued) + 2 < q->ndesc;
++}
++
+ /* The probe path supplies the WM and FWDL queues before entering ROM mode. */
+ static int mt6653_rom_send(struct mt76_dev *dev, struct sk_buff *skb,
+ 			   int cmd, int *seq)
+@@ -82,6 +88,19 @@
+ 	enum mt76_mcuq_id q = MT_MCUQ_WM;
+ 
+ 	if (cmd == MCU_CMD(FW_SCATTER)) {
++		struct mt76_queue *fwdl = dev->q_mcu[MT_MCUQ_FWDL];
++		bool room;
++
++		/* Poll the device consumer only if the ring has run out of room.
++		 * The MCU mutex serializes scatter producers.
++		 */
++		if (dev->queue_ops->tx_cleanup &&
++		    READ_ONCE(fwdl->queued) + 2 >= fwdl->ndesc &&
++		    read_poll_timeout(mt6653_fwdl_has_room, room, room, 1000,
++				      3000000, false, dev, fwdl)) {
++			dev_kfree_skb(skb);
++			return -ETIMEDOUT;
++		}
+ 		q = MT_MCUQ_FWDL;
+ 	} else if (cmd == MCU_CMD(TARGET_ADDRESS_LEN_REQ) ||
+ 		   cmd == MCU_CMD(FW_START_REQ) ||

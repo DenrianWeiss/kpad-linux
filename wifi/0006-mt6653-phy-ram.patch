@@ -1,0 +1,177 @@
+Subject: [RFC PATCH] wifi: mt76: load the MT6653 PHY DSP RAM image
+
+Use the ROM-selected entry and DSP start option after the four PHY regions.
+Share the Connac RAM transfer loop with WM and WA.
+
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.c b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.c
+index 61be3c0..3073710 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.c
+@@ -3063,10 +3063,10 @@ EXPORT_SYMBOL_GPL(mt76_connac_get_rate_power_limit);
+ static int
+ mt76_connac_mcu_send_ram_firmware(struct mt76_dev *dev,
+ 				  const struct mt76_connac2_fw_trailer *hdr,
+-				  const u8 *data, bool is_wa, int max_len)
++				  const u8 *data, u32 processor, int max_len)
+ {
+ 	int i, offset = 0;
+-	u32 override = 0, option = 0;
++	u32 override = 0, option = processor;
+ 
+ 	for (i = 0; i < hdr->n_region; i++) {
+ 		const struct mt76_connac2_fw_region *region;
+@@ -3076,7 +3076,7 @@ mt76_connac_mcu_send_ram_firmware(struct mt76_dev *dev,
+ 		region = (const void *)((const u8 *)hdr -
+ 					(hdr->n_region - i) * sizeof(*region));
+ 		mode = mt76_connac_mcu_gen_dl_mode(dev, region->feature_set,
+-						   is_wa);
++						   processor != 0);
+ 		len = le32_to_cpu(region->len);
+ 		addr = le32_to_cpu(region->addr);
+ 
+@@ -3105,14 +3105,12 @@ next:
+ 
+ 	if (override)
+ 		option |= FW_START_OVERRIDE;
+-	if (is_wa)
+-		option |= FW_START_WORKING_PDA_CR4;
+ 
+ 	return mt76_connac_mcu_start_firmware(dev, override, option);
+ }
+ 
+-/* The MT6653 WM loader accepts the uncompressed Connac v2 image. */
+-int mt6653_rom_load_wm(struct mt76_dev *dev, const struct firmware *fw)
++/* Both MT6653 processors accept uncompressed Connac v2 images. */
++static int mt6653_rom_load_ram(struct mt76_dev *dev, const struct firmware *fw, bool phy)
+ {
+ 	const struct mt76_connac2_fw_trailer *hdr;
+ 	const struct mt76_connac2_fw_region *regions;
+@@ -3124,7 +3122,7 @@ int mt6653_rom_load_wm(struct mt76_dev *dev, const struct firmware *fw)
+ 
+ 	payload = fw->size - sizeof(*hdr);
+ 	hdr = (const void *)(fw->data + payload);
+-	if (hdr->format_ver != 2 || hdr->chip_id != 0x19 || !hdr->n_region ||
++	if (hdr->format_ver != 2 || hdr->chip_id != (phy ? 0 : 0x19) || !hdr->n_region ||
+ 	    hdr->n_region > payload / sizeof(*regions))
+ 		return -EINVAL;
+ 	if ((crc32_le(~0U, fw->data, fw->size - sizeof(hdr->crc)) ^ ~0U) !=
+@@ -3139,66 +3137,30 @@ int mt6653_rom_load_wm(struct mt76_dev *dev, const struct firmware *fw)
+ 
+ 		if (!len || len > payload || len - 1 > U32_MAX - addr)
+ 			return -EINVAL;
++		/* MT6653 starts the PHY DSP at its ROM-selected address. */
++		if (phy && (r->feature_set & FW_FEATURE_OVERRIDE_ADDR))
++			return -EOPNOTSUPP;
+ 		if (r->decomp_blk_sz || r->decomp_len || r->type ||
+ 		    r->feature_set & ~(FW_FEATURE_SET_ENCRYPT | FW_FEATURE_OVERRIDE_ADDR))
+ 			return -EOPNOTSUPP;
+ 		payload -= len;
+ 	}
+ 
+-	return mt76_connac_mcu_send_ram_firmware(dev, hdr, fw->data, false, 2048);
++	return mt76_connac_mcu_send_ram_firmware(dev, hdr, fw->data,
++						phy ? FW_START_WORKING_PDA_DSP : 0, 2048);
+ }
+-EXPORT_SYMBOL_GPL(mt6653_rom_load_wm);
+ 
+-static int
+-mt76_connac_mcu_send_phy_ram_firmware(struct mt76_dev *dev,
+-				      const struct mt76_connac2_fw_trailer *hdr,
+-				      const u8 *data)
++int mt6653_rom_load_wm(struct mt76_dev *dev, const struct firmware *fw)
+ {
+-	int i, offset = 0, max_len = mt76_is_sdio(dev) ? 2048 : 4096;
+-	u32 override = 0, option = 0;
+-
+-	for (i = 0; i < hdr->n_region; i++) {
+-		const struct mt76_connac2_fw_region *region;
+-		u32 len, addr, mode;
+-		int err;
+-
+-		region = (const void *)((const u8 *)hdr -
+-					(hdr->n_region - i) * sizeof(*region));
+-		mode = mt76_connac_mcu_gen_dl_mode(dev, region->feature_set,
+-						   true);
+-		len = le32_to_cpu(region->len);
+-		addr = le32_to_cpu(region->addr);
+-
+-		if (region->feature_set & FW_FEATURE_NON_DL)
+-			goto next;
+-
+-		if (region->feature_set & FW_FEATURE_OVERRIDE_ADDR)
+-			override = addr;
+-
+-		err = mt76_connac_mcu_init_download(dev, addr, len, mode);
+-		if (err) {
+-			dev_err(dev->dev,
+-				"The request to dowload PHY firmware failed.\n");
+-			return err;
+-		}
+-
+-		err = __mt76_mcu_send_firmware(dev, MCU_CMD(FW_SCATTER),
+-					       data + offset, len, max_len);
+-		if (err) {
+-			dev_err(dev->dev, "Failed to send PHY firmware.\n");
+-			return err;
+-		}
+-
+-next:
+-		offset += len;
+-	}
+-
+-	if (override)
+-		option |= FW_START_OVERRIDE;
+-	option |= FW_START_WORKING_PDA_DSP;
++	return mt6653_rom_load_ram(dev, fw, false);
++}
++EXPORT_SYMBOL_GPL(mt6653_rom_load_wm);
+ 
+-	return mt76_connac_mcu_start_firmware(dev, override, option);
++int mt6653_rom_load_phy(struct mt76_dev *dev, const struct firmware *fw)
++{
++	return mt6653_rom_load_ram(dev, fw, true);
+ }
++EXPORT_SYMBOL_GPL(mt6653_rom_load_phy);
+ 
+ int mt76_connac2_load_ram(struct mt76_dev *dev, const char *fw_wm,
+ 			  const char *fw_wa)
+@@ -3221,7 +3183,7 @@ int mt76_connac2_load_ram(struct mt76_dev *dev, const char *fw_wm,
+ 	dev_info(dev->dev, "WM Firmware Version: %.10s, Build Time: %.15s",
+ 		 hdr->fw_ver, hdr->build_date);
+ 
+-	ret = mt76_connac_mcu_send_ram_firmware(dev, hdr, fw->data, false,
++	ret = mt76_connac_mcu_send_ram_firmware(dev, hdr, fw->data, 0,
+ 					      mt76_is_sdio(dev) ? 2048 : 4096);
+ 	if (ret) {
+ 		dev_err(dev->dev, "Failed to start WM firmware\n");
+@@ -3251,7 +3213,7 @@ int mt76_connac2_load_ram(struct mt76_dev *dev, const char *fw_wm,
+ 	dev_info(dev->dev, "WA Firmware Version: %.10s, Build Time: %.15s",
+ 		 hdr->fw_ver, hdr->build_date);
+ 
+-	ret = mt76_connac_mcu_send_ram_firmware(dev, hdr, fw->data, true,
++	ret = mt76_connac_mcu_send_ram_firmware(dev, hdr, fw->data, FW_START_WORKING_PDA_CR4,
+ 					      mt76_is_sdio(dev) ? 2048 : 4096);
+ 	if (ret) {
+ 		dev_err(dev->dev, "Failed to start WA firmware\n");
+@@ -3289,7 +3251,8 @@ int mt76_connac3_load_phy_ram(struct mt76_dev *dev, const char *fw_name)
+ 	dev_info(dev->dev, "PHY Firmware Version: %.10s, Build Time: %.15s\n",
+ 		 hdr->fw_ver, hdr->build_date);
+ 
+-	ret = mt76_connac_mcu_send_phy_ram_firmware(dev, hdr, fw->data);
++	ret = mt76_connac_mcu_send_ram_firmware(dev, hdr, fw->data, FW_START_WORKING_PDA_DSP,
++					      mt76_is_sdio(dev) ? 2048 : 4096);
+ 	if (ret) {
+ 		dev_err(dev->dev, "Failed to start PHY firmware\n");
+ 		goto out;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
+index 5817cee..1c844a7 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
++++ b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
+@@ -2155,6 +2155,7 @@ int mt6653_rom_alloc_rx_queue(struct mt76_dev *dev);
+ void mt6653_rom_rx_skb(struct mt76_dev *dev, enum mt76_rxq_id qid,
+ 		       struct sk_buff *skb, u32 *info);
+ int mt6653_rom_load_wm(struct mt76_dev *dev, const struct firmware *fw);
++int mt6653_rom_load_phy(struct mt76_dev *dev, const struct firmware *fw);
+ extern const struct mt76_mcu_ops mt6653_rom_ops;
+ int mt76_connac_mcu_send_mt6653_patch(struct mt76_dev *dev,
+ 				      const struct firmware *fw);

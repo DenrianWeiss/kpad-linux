@@ -1,0 +1,30 @@
+From a00dbb44eef0731cb9c8f5d1f4cce6829136dd1b Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:22:18 +0800
+Subject: [PATCH 18/19] dt-bindings: phy: mediatek: describe optional USB2 port
+ repeater
+
+An individual XS-PHY USB2 port can be wired through an external eUSB2
+repeater. Describe it with a PHY phandle on the port node.
+---
+ Documentation/devicetree/bindings/phy/mediatek,xsphy.yaml | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/phy/mediatek,xsphy.yaml b/Documentation/devicetree/bindings/phy/mediatek,xsphy.yaml
+index 570a35b..7e8f9ce 100644
+--- a/Documentation/devicetree/bindings/phy/mediatek,xsphy.yaml
++++ b/Documentation/devicetree/bindings/phy/mediatek,xsphy.yaml
+@@ -109,6 +109,10 @@ patternProperties:
+                 - PHY_TYPE_USB2
+                 - PHY_TYPE_USB3
+ 
++      phys:
++        maxItems: 1
++        description: External repeater on this USB2 port.
++
+       nvmem-cells:
+         items:
+           - description: USB2 HS receiver termination calibration
+-- 
+2.50.1 (Apple Git-155)
+

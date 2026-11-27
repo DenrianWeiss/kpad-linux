@@ -1,0 +1,37 @@
+Subject: [PATCH] wifi: mt76: acquire MT6653 host ownership before ROM DMA
+
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_pci.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_pci.c
+@@ -1,4 +1,5 @@
+ // SPDX-License-Identifier: BSD-3-Clause-Clear
+ /* MT6653 PCIe glue: bind the device and bring up the ROM MCU transport. */
++#include <linux/iopoll.h>
+ #include <linux/module.h>
+ #include <linux/pci.h>
+@@ -103,4 +104,5 @@
+ 
+ 	struct mt6653_dev *dev;
++	u32 owner;
+ 	struct mt76_dev *mdev;
+ 	void __iomem *regs;
+@@ -129,6 +131,18 @@
+ 
+ 	regs = pcim_iomap_region(pdev, 0, pci_name(pdev));
+-	if (IS_ERR(regs))
+-		return PTR_ERR(regs);
++	if (IS_ERR(regs)) {
++		ret = PTR_ERR(regs);
++		goto out_free;
++	}
++	/* The always-on HOST_CSR window maps 0x20060000 at BAR0+0xe0000.
++	 * Obtain AP ownership before touching WFDMA or its ring registers.
++	 */
++	writel(BIT(1), regs + 0xe0010);
++	ret = readl_poll_timeout(regs + 0xe0010, owner,
++				 owner != U32_MAX && !(owner & BIT(2)), 1000, 1000000);
++	if (ret) {
++		dev_err(&pdev->dev, "firmware ownership timed out: %#x\n", owner);
++		goto out_free;
++	}
+ 
+ 	mt76_mmio_init(mdev, regs);

@@ -1,0 +1,4052 @@
+Subject: [PATCH] media: mediatek: add Turner OV13B10 and OV08F10 V4L2 capture modules
+
+diff --git a/drivers/media/platform/mediatek/turner/Makefile b/drivers/media/platform/mediatek/turner/Makefile
+new file mode 100644
+index 0000000..fa38871
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/Makefile
+@@ -0,0 +1,28 @@
++# External modules for the #156 Turner camera bring-up.
++obj-m += turner-camera-domains.o
++turner-camera-domains-y := isp8/turner-camera-domains.o
++turner-ov08f10-y := front/turner-ov08f10.o
++obj-m += turner-ov08f10.o turner-ov13b10.o turner-seninf.o
++turner-ov13b10-y := rear/turner-ov13b10.o
++turner-seninf-y := isp8/turner-seninf.o isp8/turner-receiver-clocks.o isp8/turner-csi-packets.o isp8/turner-sv-dma.o isp8/turner-still.o
++
++ccflags-y += -I$(obj)/rear
++ifeq ($(TURNER_LIVE_CLOCK),1)
++ccflags-y += -DTURNER_LIVE_CLOCK -I$(srctree)/drivers/clk/mediatek
++endif
++
++quiet_cmd_turner_mode = GEN     $@
++      cmd_turner_mode = $(PYTHON3) $(src)/rear/mode-header.py $(src)/stock > $@.tmp && mv $@.tmp $@
++
++targets += rear/turner-preview.h
++$(obj)/rear/turner-preview.h: $(src)/rear/mode-header.py $(src)/stock/turnerov13b10wide_init_setting.tsv $(src)/stock/turnerov13b10wide_preview_setting.tsv $(src)/stock/turnerov13b10wide_custom1_setting.tsv FORCE
++	$(call if_changed,turner_mode)
++
++$(obj)/rear/turner-ov13b10.o: $(obj)/rear/turner-preview.h
++
++obj-m += north.o aw37004.o drive-fix.o front-pins.o
++north-y := clocks/north.o
++aw37004-y := regulators/aw37004.o
++drive-fix-y := rear/drive-fix.o
++front-pins-y := front/front-pins.o
++ccflags-y += -I$(srctree)/drivers/clk/mediatek
+diff --git a/drivers/media/platform/mediatek/turner/clocks/north.c b/drivers/media/platform/mediatek/turner/clocks/north.c
+new file mode 100644
+index 0000000..106116b
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/clocks/north.c
+@@ -0,0 +1,177 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (c) 2025 MediaTek Inc.
++ *                    Guangjie Song <guangjie.song@mediatek.com>
++ * Copyright (c) 2025 Collabora Ltd.
++ *                    Laura Nao <laura.nao@collabora.com>
++ */
++#include <dt-bindings/clock/mediatek,mt8196-clock.h>
++
++#include <linux/clk-provider.h>
++#include <linux/module.h>
++#include <linux/of_device.h>
++#include <linux/platform_device.h>
++
++#include "clk-gate.h"
++#include "clk-mtk.h"
++
++static const struct mtk_gate_regs imp_cg_regs = {
++	.set_ofs = 0xe08,
++	.clr_ofs = 0xe04,
++	.sta_ofs = 0xe00,
++};
++
++#define GATE_IMP(_id, _name, _parent, _shift) {	\
++		.id = _id,				\
++		.name = _name,				\
++		.parent_name = _parent,			\
++		.regs = &imp_cg_regs,			\
++		.shift = _shift,			\
++		.flags = CLK_OPS_PARENT_ENABLE,		\
++		.ops = &mtk_clk_gate_ops_setclr,	\
++	}
++
++static const struct mtk_gate impc_clks[] = {
++	GATE_IMP(CLK_IMPC_I2C11, "impc_i2c11", "i2c_p", 0),
++	GATE_IMP(CLK_IMPC_I2C12, "impc_i2c12", "i2c_p", 1),
++	GATE_IMP(CLK_IMPC_I2C13, "impc_i2c13", "i2c_p", 2),
++	GATE_IMP(CLK_IMPC_I2C14, "impc_i2c14", "i2c_p", 3),
++};
++
++static const struct mtk_clk_desc impc_mcd = {
++	.clks = impc_clks,
++	.num_clks = ARRAY_SIZE(impc_clks),
++};
++
++static const struct mtk_gate impe_clks[] = {
++	GATE_IMP(CLK_IMPE_I2C5, "impe_i2c5", "i2c_east", 0),
++};
++
++static const struct mtk_clk_desc impe_mcd = {
++	.clks = impe_clks,
++	.num_clks = ARRAY_SIZE(impe_clks),
++};
++
++static const struct mtk_gate_regs impn_hwv_regs = {
++	.set_ofs = 0x0000,
++	.clr_ofs = 0x0004,
++	.sta_ofs = 0x2c00,
++};
++
++#define GATE_HWV_IMPN(_id, _name, _parent, _shift) {	\
++		.id = _id,				\
++		.name = _name,				\
++		.parent_name = _parent,			\
++		.regs = &imp_cg_regs,			\
++		.hwv_regs = &impn_hwv_regs,		\
++		.shift = _shift,			\
++		.ops = &mtk_clk_gate_hwv_ops_setclr,	\
++		.flags = CLK_OPS_PARENT_ENABLE,		\
++	}
++
++static const struct mtk_gate impn_clks[] = {
++	GATE_IMP(CLK_IMPN_I2C1, "impn_i2c1", "i2c_north", 0),
++	GATE_IMP(CLK_IMPN_I2C2, "impn_i2c2", "i2c_north", 1),
++	GATE_IMP(CLK_IMPN_I2C4, "impn_i2c4", "i2c_north", 2),
++	GATE_HWV_IMPN(CLK_IMPN_I2C7, "impn_i2c7", "i2c_north", 3),
++	GATE_IMP(CLK_IMPN_I2C8, "impn_i2c8", "i2c_north", 4),
++	GATE_IMP(CLK_IMPN_I2C9, "impn_i2c9", "i2c_north", 5),
++};
++
++static const struct mtk_clk_desc impn_mcd = {
++	.clks = impn_clks,
++	.num_clks = ARRAY_SIZE(impn_clks),
++};
++
++/* The camera provider owns the three verified direct gates on MT6991.
++ * Other consumers need their respective voter and power-domain support.
++ */
++static const struct mtk_gate mt6991_north_clks[] = {
++	GATE_IMP(0, "impn_i2c2", "i2c_north", 1),
++	GATE_IMP(1, "impn_i2c8", "i2c_north", 4),
++	GATE_IMP(2, "impn_i2c9", "i2c_north", 5),
++};
++
++static const struct mtk_clk_desc mt6991_north_desc = {
++	.clks = mt6991_north_clks,
++	.num_clks = ARRAY_SIZE(mt6991_north_clks),
++};
++
++static struct clk_hw *mt6991_north_get(struct of_phandle_args *spec, void *data)
++{
++	struct clk_hw_onecell_data *clks = data;
++
++	if (spec->args_count != 1)
++		return ERR_PTR(-EINVAL);
++	switch (spec->args[0] / 2) {
++	case 1:
++		return clks->hws[0];
++	case 4:
++		return clks->hws[1];
++	case 5:
++		return clks->hws[2];
++	default:
++		return ERR_PTR(-ENOENT);
++	}
++}
++
++static const struct mtk_gate impw_clks[] = {
++	GATE_IMP(CLK_IMPW_I2C0, "impw_i2c0", "i2c_west", 0),
++	GATE_IMP(CLK_IMPW_I2C3, "impw_i2c3", "i2c_west", 1),
++	GATE_IMP(CLK_IMPW_I2C6, "impw_i2c6", "i2c_west", 2),
++	GATE_IMP(CLK_IMPW_I2C10, "impw_i2c10", "i2c_west", 3),
++};
++
++static const struct mtk_clk_desc impw_mcd = {
++	.clks = impw_clks,
++	.num_clks = ARRAY_SIZE(impw_clks),
++};
++
++static struct clk_hw *mt6991_fw_get(struct of_phandle_args *spec, void *data)
++{
++	struct clk_hw_onecell_data *clks = data;
++
++	if (spec->args_count != 1)
++		return ERR_PTR(-EINVAL);
++	/* Each gate is followed by its I2C client alias. */
++	if (spec->args[0] / 2 >= clks->num)
++		return ERR_PTR(-ENOENT);
++	return clks->hws[spec->args[0] / 2];
++}
++
++static int mt6991_fw_probe(struct platform_device *pdev)
++{
++	if (of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-imp_iic_wrap_n"))
++		return mtk_clk_simple_probe_with_get(pdev, mt6991_north_get);
++	if (of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-imp_iic_wrap_w") ||
++	    of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-imp_iic_wrap_e") ||
++	    of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-imp_iic_wrap_c"))
++		return mtk_clk_simple_probe_with_get(pdev, mt6991_fw_get);
++	return mtk_clk_simple_probe(pdev);
++}
++
++static const struct of_device_id of_match_clk_mt8196_imp_iic_wrap[] = {
++	{ .compatible = "mediatek,mt6991-imp_iic_wrap_c", .data = &impc_mcd },
++	{ .compatible = "mediatek,mt6991-imp_iic_wrap_e", .data = &impe_mcd },
++	{ .compatible = "mediatek,mt6991-imp_iic_wrap_n", .data = &mt6991_north_desc },
++	{ .compatible = "mediatek,mt6991-imp_iic_wrap_w", .data = &impw_mcd },
++	{ .compatible = "mediatek,mt8196-imp-iic-wrap-c", .data = &impc_mcd },
++	{ .compatible = "mediatek,mt8196-imp-iic-wrap-e", .data = &impe_mcd },
++	{ .compatible = "mediatek,mt8196-imp-iic-wrap-n", .data = &impn_mcd },
++	{ .compatible = "mediatek,mt8196-imp-iic-wrap-w", .data = &impw_mcd },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, of_match_clk_mt8196_imp_iic_wrap);
++
++static struct platform_driver clk_mt8196_imp_iic_wrap_drv = {
++	.probe = mt6991_fw_probe,
++	.remove = mtk_clk_simple_remove,
++	.driver = {
++		.name = "turner-camera-north",
++		.of_match_table = of_match_clk_mt8196_imp_iic_wrap,
++	},
++};
++module_platform_driver(clk_mt8196_imp_iic_wrap_drv);
++
++MODULE_DESCRIPTION("MediaTek MT8196 I2C Wrapper clocks driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/media/platform/mediatek/turner/front/front-pins.c b/drivers/media/platform/mediatek/turner/front/front-pins.c
+new file mode 100644
+index 0000000..1ff5963
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/front/front-pins.c
+@@ -0,0 +1,57 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/module.h>
++#include <linux/of.h>
++static struct of_changeset pins;
++static int __init setup(void)
++{
++	static const u32 raw[] = { 1, 0, 1, 2, 3 };
++	struct device_node *sensor, *state, *group;
++	struct property *prop;
++	int ret = 0;
++	u32 val;
++	unsigned int i;
++	char key[16];
++
++	sensor = of_find_node_by_path("/soc/i2c@139b0000/sensor1@11");
++	if (!sensor)
++		return -ENODEV;
++	of_changeset_init(&pins);
++	for (i = 0; i < ARRAY_SIZE(raw) + 2; i++) {
++		snprintf(key, sizeof(key), "pinctrl-%u", i);
++		state = of_parse_phandle(sensor, key, 0);
++		group = of_get_child_by_name(state, "pins-cmd-dat");
++		of_node_put(state);
++		if (!group) { ret = -EINVAL; break; }
++		if (i >= ARRAY_SIZE(raw)) {
++			/* The Paris pin table has no slew control for GPIO186. */
++			prop = of_find_property(group, "slew-rate", NULL);
++			ret = prop ? of_changeset_remove_property(&pins, group, prop) : -EINVAL;
++		} else {
++			prop = of_find_property(group, "drive-strength", NULL);
++			if (!prop || of_property_read_u32(group, "drive-strength", &val) || val != raw[i])
++				ret = -EINVAL;
++			else
++				ret = of_changeset_remove_property(&pins, group, prop);
++			if (!ret)
++				ret = of_changeset_add_prop_u32(&pins, group, "drive-strength", (val + 1) * 2);
++		}
++		of_node_put(group);
++		if (ret)
++			break;
++	}
++	of_node_put(sensor);
++	if (!ret)
++		ret = of_changeset_apply(&pins);
++	if (ret)
++		of_changeset_destroy(&pins);
++	return ret;
++}
++static void __exit cleanup(void)
++{
++	of_changeset_revert(&pins);
++	of_changeset_destroy(&pins);
++}
++module_init(setup);
++module_exit(cleanup);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("Apply front camera pin drive units to running Turner DT");
+diff --git a/drivers/media/platform/mediatek/turner/front/front-preview.h b/drivers/media/platform/mediatek/turner/front/front-preview.h
+new file mode 100644
+index 0000000..bf869de
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/front/front-preview.h
+@@ -0,0 +1,141 @@
++/* Turner factory preview register sequence, preserving bank changes. */
++static const u8 preview[][2] = {
++	{ 0x20, 0x0b },
++	{ 0xfd, 0x00 },
++	{ 0x10, 0x08 },
++	{ 0x11, 0x5e },
++	{ 0x12, 0x01 },
++	{ 0x13, 0x15 },
++	{ 0x14, 0x24 },
++	{ 0x1b, 0xea },
++	{ 0x1e, 0x10 },
++	{ 0xfd, 0x01 },
++	{ 0x12, 0x00 },
++	{ 0x03, 0x05 },
++	{ 0x04, 0x08 },
++	{ 0x06, 0x56 },
++	{ 0x07, 0x05 },
++	{ 0x24, 0x20 },
++	{ 0x33, 0x03 },
++	{ 0x01, 0x03 },
++	{ 0x19, 0x40 },
++	{ 0xc0, 0x00 },
++	{ 0x42, 0x5d },
++	{ 0x44, 0x81 },
++	{ 0x46, 0x3f },
++	{ 0x47, 0x0f },
++	{ 0x48, 0x0c },
++	{ 0x4c, 0x38 },
++	{ 0xb2, 0x1e },
++	{ 0xb3, 0x1b },
++	{ 0xc3, 0x2c },
++	{ 0xd2, 0xfc },
++	{ 0xfd, 0x01 },
++	{ 0x50, 0x1c },
++	{ 0x53, 0x1c },
++	{ 0x54, 0x04 },
++	{ 0x55, 0x04 },
++	{ 0x57, 0x87 },
++	{ 0x5e, 0x10 },
++	{ 0x67, 0x05 },
++	{ 0x7a, 0x02 },
++	{ 0x7c, 0x0a },
++	{ 0x90, 0x3a },
++	{ 0x91, 0x12 },
++	{ 0x92, 0x16 },
++	{ 0x94, 0x12 },
++	{ 0x95, 0x40 },
++	{ 0x97, 0x03 },
++	{ 0x98, 0x48 },
++	{ 0x9a, 0x02 },
++	{ 0x9c, 0x0c },
++	{ 0x9e, 0x2d },
++	{ 0xa5, 0x01 },
++	{ 0xa7, 0x00 },
++	{ 0xca, 0x0d },
++	{ 0xcb, 0x12 },
++	{ 0xcc, 0x0f },
++	{ 0xcd, 0x16 },
++	{ 0xce, 0x0d },
++	{ 0xcf, 0x10 },
++	{ 0xd0, 0x0b },
++	{ 0xd1, 0x14 },
++	{ 0xfd, 0x07 },
++	{ 0x2c, 0x02 },
++	{ 0x2d, 0x00 },
++	{ 0x00, 0xf8 },
++	{ 0x01, 0x2b },
++	{ 0x05, 0x40 },
++	{ 0x08, 0x06 },
++	{ 0x09, 0x11 },
++	{ 0x28, 0x6f },
++	{ 0x2a, 0x20 },
++	{ 0x2b, 0x05 },
++	{ 0x5e, 0x10 },
++	{ 0x52, 0x00 },
++	{ 0x53, 0x78 },
++	{ 0x54, 0x00 },
++	{ 0x55, 0x78 },
++	{ 0x56, 0x00 },
++	{ 0x57, 0x78 },
++	{ 0x58, 0x00 },
++	{ 0x59, 0x78 },
++	{ 0x5c, 0x3f },
++	{ 0xfd, 0x0f },
++	{ 0x00, 0x27 },
++	{ 0x01, 0x34 },
++	{ 0x02, 0x88 },
++	{ 0x1a, 0x21 },
++	{ 0x1b, 0x4b },
++	{ 0x1c, 0xd5 },
++	{ 0x1d, 0xdb },
++	{ 0x1f, 0x31 },
++	{ 0x20, 0xcc },
++	{ 0xfd, 0x0f },
++	{ 0x03, 0x07 },
++	{ 0x05, 0x0a },
++	{ 0x12, 0x00 },
++	{ 0x13, 0x00 },
++	{ 0x14, 0x13 },
++	{ 0x08, 0x28 },
++	{ 0x16, 0x0c },
++	{ 0x17, 0x0c },
++	{ 0x18, 0x0c },
++	{ 0x19, 0x0c },
++	{ 0xfd, 0x02 },
++	{ 0x9a, 0x30 },
++	{ 0xfd, 0x04 },
++	{ 0x00, 0x1b },
++	{ 0x12, 0x01 },
++	{ 0x0a, 0x10 },
++	{ 0x0b, 0x11 },
++	{ 0x0c, 0x12 },
++	{ 0x0d, 0xaf },
++	{ 0xfd, 0x03 },
++	{ 0x9d, 0x0f },
++	{ 0x9f, 0x20 },
++	{ 0xfd, 0x05 },
++	{ 0x00, 0x00 },
++	{ 0x01, 0x1c },
++	{ 0x02, 0x01 },
++	{ 0x03, 0xff },
++	{ 0x1a, 0x20 },
++	{ 0xfd, 0x02 },
++	{ 0xa0, 0x00 },
++	{ 0xa1, 0x08 },
++	{ 0xa2, 0x09 },
++	{ 0xa3, 0x90 },
++	{ 0xa5, 0x08 },
++	{ 0xa6, 0x0c },
++	{ 0xa7, 0xc0 },
++	{ 0xfd, 0x00 },
++	{ 0x24, 0x01 },
++	{ 0xc0, 0x1f },
++	{ 0xc1, 0x08 },
++	{ 0xc2, 0x38 },
++	{ 0x8e, 0x0c },
++	{ 0x8f, 0xc0 },
++	{ 0x90, 0x09 },
++	{ 0x91, 0x90 },
++	{ 0xb7, 0x02 },
++};
+diff --git a/drivers/media/platform/mediatek/turner/front/live-camtg0.h b/drivers/media/platform/mediatek/turner/front/live-camtg0.h
+new file mode 100644
+index 0000000..7b26257
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/front/live-camtg0.h
+@@ -0,0 +1,76 @@
++#include "clk-mtk.h"
++#include "clk-mux.h"
++
++static const char * const tg0_parents[] = {
++	"clk26m", "univpll_192m_d32", "univpll_192m_d16", "clk26m_d2",
++	"osc_d40", "osc_d32", "univpll_192m_d10", "turner_front_24m",
++	"univpll_d6_d16", "osc_d20", "tvdpll1_d16", "univpll_d6_d8",
++};
++static const struct mtk_mux tg0[] = {
++	MUX_GATE_HWV_FENC_CLR_SET_UPD(0, "turner_camtg0", tg0_parents,
++		0x50, 0x54, 0x58, 0x2c24, 0x48, 0x4c,
++		0, 4, 7, 0x4, 16, 0x39c, 15),
++};
++static DEFINE_SPINLOCK(tg0_lock);
++
++static void unregister_tg0(void *data)
++{
++	mtk_clk_unregister_muxes(tg0, ARRAY_SIZE(tg0), data);
++}
++
++static struct clk *live_camtg0(struct device *dev)
++{
++	struct of_phandle_args spec;
++	struct of_changeset cs;
++	struct clk_hw_onecell_data *data;
++	struct clk_hw *factor;
++	struct clk *parent, *mclk;
++	u32 voter;
++	int ret;
++
++	ret = of_parse_phandle_with_args(dev->of_node, "clocks", "#clock-cells", 8, &spec);
++	if (ret)
++		return ERR_PTR(ret);
++	if (spec.args_count != 1 || spec.args[0] != 18 ||
++	    !of_device_is_compatible(spec.np, "mediatek,mt6991-vlp_cksys")) {
++		ret = -EINVAL;
++		goto put;
++	}
++	ret = of_property_read_u32(spec.np, "hw-voter-regmap", &voter);
++	if (ret)
++		goto put;
++	data = mtk_devm_alloc_clk_data(dev, 1);
++	if (!data) {
++		ret = -ENOMEM;
++		goto put;
++	}
++	factor = devm_clk_hw_register_fixed_factor(dev, "turner_front_24m",
++		"univpll_192m", 0, 1, 8);
++	if (IS_ERR(factor)) {
++		ret = PTR_ERR(factor);
++		goto put;
++	}
++	of_changeset_init(&cs);
++	ret = of_changeset_add_prop_u32(&cs, spec.np, "mediatek,hardware-voter", voter);
++	if (!ret)
++		ret = of_changeset_apply(&cs);
++	if (!ret) {
++		ret = mtk_clk_register_muxes(dev, tg0, ARRAY_SIZE(tg0), spec.np, &tg0_lock, data);
++		of_changeset_revert(&cs);
++	}
++	of_changeset_destroy(&cs);
++	if (ret)
++		goto put;
++	ret = devm_add_action_or_reset(dev, unregister_tg0, data);
++	if (ret)
++		goto put;
++	mclk = devm_clk_hw_get_clk(dev, data->hws[0], NULL);
++	parent = devm_clk_hw_get_clk(dev, factor, NULL);
++	if (IS_ERR(mclk) || IS_ERR(parent))
++		ret = IS_ERR(mclk) ? PTR_ERR(mclk) : PTR_ERR(parent);
++	else
++		ret = clk_set_parent(mclk, parent);
++put:
++	of_node_put(spec.np);
++	return ret ? ERR_PTR(ret) : mclk;
++}
+diff --git a/drivers/media/platform/mediatek/turner/front/turner-ov08f10.c b/drivers/media/platform/mediatek/turner/front/turner-ov08f10.c
+new file mode 100644
+index 0000000..ad2d73e
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/front/turner-ov08f10.c
+@@ -0,0 +1,360 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Turner OV08F10 front sensor, 24 MHz stock preview mode. */
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/regmap.h>
++#include <linux/regulator/consumer.h>
++#include <media/mipi-csi2.h>
++#include <media/v4l2-async.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-subdev.h>
++#include "front-preview.h"
++
++struct rail_setting {
++	const char *name;
++	int uv;
++	int delay_us;
++};
++static const struct rail_setting rails[] = {
++	{ "dovdd", 1800000, 1000 }, { "avdd1", 3200000, 6000 },
++	{ "dvdd", 1450000, 1000 }, { "avdd", 2800000, 1000 },
++	{ "dvdd1", 1200000, 6000 },
++};
++
++struct turner_sensor {
++	struct v4l2_subdev sd;
++	struct media_pad pad;
++	struct i2c_client *client;
++	struct device *dev;
++	struct clk *clk;
++	struct pinctrl *pins;
++	struct pinctrl_state *low, *high, *drive, *off;
++	struct regulator *supplies[ARRAY_SIZE(rails)];
++	unsigned int nrails;
++	bool clock_on;
++};
++
++/* #156 has no CAMTG0 clock provider; the trial build supplies the clock. */
++#ifdef TURNER_LIVE_CLOCK
++#include "live-camtg0.h"
++#endif
++
++static void power_down(struct turner_sensor *s)
++{
++	pinctrl_select_state(s->pins, s->low);
++	pinctrl_select_state(s->pins, s->off);
++	if (s->clock_on) {
++		clk_disable_unprepare(s->clk);
++		s->clock_on = false;
++	}
++	while (s->nrails) {
++		unsigned int i = --s->nrails;
++		/* RT6160 enable pin is tied high on Turner. */
++		if (i != 1 && regulator_disable(s->supplies[i]))
++			dev_warn(s->dev, "could not disable %s\n", rails[i].name);
++		else
++			regulator_set_voltage(s->supplies[i], 0, INT_MAX);
++	}
++}
++
++static int power_up(struct turner_sensor *s)
++{
++	unsigned int i;
++	int ret;
++
++	for (i = 0; i < ARRAY_SIZE(rails); i++) {
++		if (i == 1) {
++			ret = pinctrl_select_state(s->pins, s->low);
++			if (ret)
++				goto fail;
++			usleep_range(1000, 1200);
++		}
++		ret = regulator_set_voltage(s->supplies[i], rails[i].uv, rails[i].uv);
++		if (ret)
++			goto fail;
++		if (i != 1) {
++			ret = regulator_enable(s->supplies[i]);
++			if (ret) {
++				regulator_set_voltage(s->supplies[i], 0, INT_MAX);
++				goto fail;
++			}
++		}
++		s->nrails++;
++		usleep_range(rails[i].delay_us, rails[i].delay_us + 200);
++	}
++	ret = pinctrl_select_state(s->pins, s->high);
++	if (ret)
++		goto fail;
++	usleep_range(1000, 1200);
++	ret = clk_prepare_enable(s->clk);
++	if (ret)
++		goto fail;
++	s->clock_on = true;
++	ret = pinctrl_select_state(s->pins, s->drive);
++	if (ret)
++		goto fail;
++	usleep_range(6000, 6500);
++	return 0;
++fail:
++	power_down(s);
++	return ret;
++}
++
++static int write_table(struct i2c_adapter *adap, const u8 (*table)[2], size_t count)
++{
++	for (size_t i = 0; i < count; i++) {
++		u8 pair[2] = { table[i][0], table[i][1] };
++		struct i2c_msg msg = { .addr = 0x10, .buf = pair, .len = sizeof(pair) };
++		int ret = i2c_transfer(adap, &msg, 1);
++
++		if (ret != 1)
++			return ret < 0 ? ret : -EIO;
++	}
++	return 0;
++}
++
++static int read_reg(struct i2c_adapter *adap, u8 reg, u8 *value)
++{
++	struct i2c_msg msgs[] = {
++		{ .addr = 0x10, .buf = &reg, .len = 1 },
++		{ .addr = 0x10, .flags = I2C_M_RD, .buf = value, .len = 1 },
++	};
++	int ret = i2c_transfer(adap, msgs, ARRAY_SIZE(msgs));
++
++	return ret == ARRAY_SIZE(msgs) ? 0 : ret < 0 ? ret : -EIO;
++}
++
++static int start(struct turner_sensor *s)
++{
++	static const u8 wake[][2] = {
++		{0xfd, 0}, {0x21, 6}, {0x21, 4}, {0x21, 0}, {0xfd, 0}, {0xc2, 0x38},
++	};
++	static const u8 on[][2] = {
++		{0xfd, 1}, {1, 3}, {0xfd, 0}, {0xa0, 1}, {0xfd, 0},
++		{0xe7, 3}, {0xe7, 0}, {0x20, 0x0f},
++	};
++	struct i2c_adapter *adap = s->client->adapter;
++	u8 size[4], active;
++	int ret = power_up(s);
++
++	if (ret)
++		return ret;
++
++	ret = write_table(adap, wake, ARRAY_SIZE(wake));
++	if (ret)
++		goto fail;
++	usleep_range(5000, 5500);
++	ret = write_table(adap, preview, ARRAY_SIZE(preview));
++	for (unsigned int i = 0; !ret && i < ARRAY_SIZE(size); i++)
++		ret = read_reg(adap, 0x8e + i, &size[i]);
++	if (!ret && memcmp(size, (const u8[]){0x0c, 0xc0, 0x09, 0x90}, 4))
++		ret = -EIO;
++	if (!ret)
++		ret = write_table(adap, on, ARRAY_SIZE(on));
++	if (!ret)
++		ret = read_reg(adap, 0xa0, &active);
++	if (!ret && active == 1)
++		return 0;
++	ret = ret ?: -EIO;
++fail:
++	power_down(s);
++	return ret;
++}
++
++static int stop(struct turner_sensor *s)
++{
++	static const u8 off[][2] = { {0xfd, 0}, {0xa0, 0}, {0xfd, 0}, {0x20, 0x0b} };
++	static const u8 sleep[][2] = { {0xc2, 0x3a}, {0xfd, 0}, {0x21, 7} };
++	struct i2c_adapter *adap = s->client->adapter;
++	int ret = write_table(adap, off, ARRAY_SIZE(off));
++	u8 active;
++
++	msleep(40);
++	if (!ret)
++		ret = read_reg(adap, 0xa0, &active);
++	if (!ret && active)
++		ret = -EIO;
++	if (!ret)
++		ret = write_table(adap, sleep, ARRAY_SIZE(sleep));
++	power_down(s);
++	return ret;
++}
++
++static int enable(struct v4l2_subdev *sd, struct v4l2_subdev_state *state,
++		  u32 pad, u64 streams)
++{
++	return start(container_of(sd, struct turner_sensor, sd));
++}
++static int disable(struct v4l2_subdev *sd, struct v4l2_subdev_state *state,
++		   u32 pad, u64 streams)
++{
++	return stop(container_of(sd, struct turner_sensor, sd));
++}
++
++static int format(struct v4l2_subdev *sd, struct v4l2_subdev_state *state,
++		  struct v4l2_subdev_format *fmt)
++{
++	if (fmt->pad || fmt->stream)
++		return -EINVAL;
++	fmt->format = (struct v4l2_mbus_framefmt){
++		.width = 3264, .height = 2448, .code = MEDIA_BUS_FMT_SBGGR10_1X10,
++		.field = V4L2_FIELD_NONE, .colorspace = V4L2_COLORSPACE_RAW,
++	};
++	*v4l2_subdev_state_get_format(state, 0) = fmt->format;
++	return 0;
++}
++static int init_state(struct v4l2_subdev *sd, struct v4l2_subdev_state *state)
++{
++	struct v4l2_subdev_format fmt = {};
++	return format(sd, state, &fmt);
++}
++static int code(struct v4l2_subdev *sd, struct v4l2_subdev_state *state,
++		struct v4l2_subdev_mbus_code_enum *item)
++{
++	if (item->index || item->pad || item->stream)
++		return -EINVAL;
++	item->code = MEDIA_BUS_FMT_SBGGR10_1X10;
++	return 0;
++}
++static int bus_config(struct v4l2_subdev *sd, unsigned int pad,
++		      struct v4l2_mbus_config *cfg)
++{
++	if (pad)
++		return -EINVAL;
++	/* The Turner preview table specifies 280.8 Mpixel/s, RAW10, two lanes. */
++	*cfg = (struct v4l2_mbus_config) {
++		.type = V4L2_MBUS_CSI2_DPHY,
++		.link_freq = 702000000,
++		.bus.mipi_csi2 = { .num_data_lanes = 2, .data_lanes = { 1, 2 } },
++	};
++	return 0;
++}
++
++static int frame_desc(struct v4l2_subdev *sd, unsigned int pad,
++		      struct v4l2_mbus_frame_desc *desc)
++{
++	if (pad)
++		return -EINVAL;
++	*desc = (struct v4l2_mbus_frame_desc) {
++		.type = V4L2_MBUS_FRAME_DESC_TYPE_CSI2,
++		.num_entries = 1,
++		.entry = { {
++			.pixelcode = MEDIA_BUS_FMT_SBGGR10_1X10,
++			.bus.csi2 = { .vc = 0, .dt = MIPI_CSI2_DT_RAW10 },
++		} },
++	};
++	return 0;
++}
++static const struct v4l2_subdev_pad_ops pad_ops = {
++	.get_mbus_config = bus_config, .get_frame_desc = frame_desc,
++	.enum_mbus_code = code, .get_fmt = v4l2_subdev_get_fmt, .set_fmt = format,
++	.enable_streams = enable, .disable_streams = disable,
++};
++static const struct v4l2_subdev_video_ops video_ops = {
++	.s_stream = v4l2_subdev_s_stream_helper,
++};
++static const struct v4l2_subdev_ops ops = { .pad = &pad_ops, .video = &video_ops };
++static const struct v4l2_subdev_internal_ops internal_ops = { .init_state = init_state };
++
++
++static int front_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct turner_sensor *s;
++	unsigned int i;
++	u8 id[2];
++	struct pinctrl_state *scl, *sda;
++	int ret;
++
++	if (of_property_match_string(dev->of_node, "sensor-names",
++				     "turnerov08f10front_mipi_raw") < 0)
++		return -ENODEV;
++	s = devm_kzalloc(dev, sizeof(*s), GFP_KERNEL);
++	if (!s)
++		return -ENOMEM;
++	s->dev = dev;
++	s->client = client;
++#ifdef TURNER_LIVE_CLOCK
++	s->clk = live_camtg0(dev);
++#else
++	s->clk = devm_clk_get(dev, "mclk");
++#endif
++	if (IS_ERR(s->clk))
++		return dev_err_probe(dev, PTR_ERR(s->clk), "MCLK unavailable\n");
++	if (clk_get_rate(s->clk) != 24000000)
++		return dev_err_probe(dev, -EINVAL, "expected 24 MHz MCLK\n");
++	s->pins = devm_pinctrl_get(dev);
++	if (IS_ERR(s->pins))
++		return PTR_ERR(s->pins);
++	s->low = pinctrl_lookup_state(s->pins, "rst_low");
++	s->high = pinctrl_lookup_state(s->pins, "rst_high");
++	s->drive = pinctrl_lookup_state(s->pins, "mclk_6mA");
++	s->off = pinctrl_lookup_state(s->pins, "mclk_off");
++	if (IS_ERR(s->low) || IS_ERR(s->high) || IS_ERR(s->drive) || IS_ERR(s->off))
++		return -EINVAL;
++	for (i = 0; i < ARRAY_SIZE(rails); i++) {
++		s->supplies[i] = devm_regulator_get_optional(dev, rails[i].name);
++		if (IS_ERR(s->supplies[i]))
++			return dev_err_probe(dev, PTR_ERR(s->supplies[i]), "missing %s\n", rails[i].name);
++	}
++	scl = pinctrl_lookup_state(s->pins, "scl_ap");
++	sda = pinctrl_lookup_state(s->pins, "sda_ap");
++	if (IS_ERR(scl) || IS_ERR(sda))
++		return -ENOENT;
++	ret = pinctrl_select_state(s->pins, scl);
++	if (!ret)
++		ret = pinctrl_select_state(s->pins, sda);
++	if (!ret)
++		ret = power_up(s);
++	if (ret)
++		return ret;
++	ret = read_reg(client->adapter, 0, &id[0]);
++	if (!ret)
++		ret = read_reg(client->adapter, 1, &id[1]);
++	power_down(s);
++	if (ret || id[0] != 0x56 || id[1] != 0x08)
++		return dev_err_probe(dev, ret ?: -ENODEV, "chip ID check failed\n");
++	v4l2_i2c_subdev_init(&s->sd, client, &ops);
++	s->sd.internal_ops = &internal_ops;
++	s->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++	s->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
++	s->pad.flags = MEDIA_PAD_FL_SOURCE;
++	ret = media_entity_pads_init(&s->sd.entity, 1, &s->pad);
++	if (ret)
++		return ret;
++	ret = v4l2_subdev_init_finalize(&s->sd);
++	if (!ret) {
++		ret = v4l2_async_register_subdev_sensor(&s->sd);
++		if (!ret)
++			return 0;
++		v4l2_subdev_cleanup(&s->sd);
++	}
++	media_entity_cleanup(&s->sd.entity);
++	return ret;
++}
++static void front_remove(struct i2c_client *client)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct turner_sensor *s = container_of(sd, struct turner_sensor, sd);
++
++	v4l2_async_unregister_subdev(sd);
++	if (s->clock_on)
++		stop(s);
++	v4l2_subdev_cleanup(sd);
++	media_entity_cleanup(&sd->entity);
++}
++static const struct of_device_id matches[] = {
++	{ .compatible = "mediatek,imgsensor" }, {}
++};
++static struct i2c_driver front_driver = {
++	.driver = { .name = "turner-ov08f10", .of_match_table = matches },
++	.probe = front_probe, .remove = front_remove,
++};
++module_i2c_driver(front_driver);
++MODULE_DESCRIPTION("Turner OV08F10 front camera");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/media/platform/mediatek/turner/isp8/turner-camera-domains.c b/drivers/media/platform/mediatek/turner/isp8/turner-camera-domains.c
+new file mode 100644
+index 0000000..1e82561
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/isp8/turner-camera-domains.c
+@@ -0,0 +1,187 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Firmware DT identifiers for the MT6991 ISP8 camera power path. */
++#include <linux/module.h>
++#include <linux/mfd/syscon.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_domain.h>
++#include <linux/regmap.h>
++
++struct camera_bank {
++	unsigned int set, clear, done, enable, pending_set, pending_clear;
++};
++static const struct camera_bank camera = { 0x218, 0x21c, 0x141c, 0x1410, 0x146c, 0x1470 };
++static const struct camera_bank phy = { 0x220, 0x224, 0x142c, 0x1420, 0x1474, 0x1478 };
++static const struct domain_info {
++	unsigned int id, bit;
++	const char *name;
++	const struct camera_bank *bank;
++	int parent;
++} infos[] = {
++	{ 2,  2, "mm-infra1", NULL, -1 },
++	{ 16, 21, "cam-vcore", &camera, 0 },
++	{ 17, 20, "cam-main", &camera, 1 },
++	{ 35, 5, "csi-bs-rx", &phy, 0 },
++	{ 36, 6, "csi-ls-rx", &phy, 0 },
++};
++
++struct domain {
++	struct generic_pm_domain pd;
++	const struct domain_info *info;
++	struct regmap *map;
++	bool inherited, sampled;
++};
++struct camera_power {
++	struct domain domains[ARRAY_SIZE(infos)];
++	struct generic_pm_domain *by_id[37];
++	struct genpd_onecell_data cells;
++	struct of_phandle_args mmup, infra;
++};
++
++static int wait_bit(struct domain *d, unsigned int reg, bool high)
++{
++	unsigned int v;
++	return regmap_read_poll_timeout(d->map, reg, v,
++			!!(v & BIT(d->info->bit)) == high, 10, 300000);
++}
++
++static int vote(struct domain *d, bool on)
++{
++	const struct camera_bank *b = d->info->bank;
++	unsigned int mask = BIT(d->info->bit), v;
++	int ret;
++
++	/* Keep the initial AP vote from the first-stage kernel intact. */
++	if (!d->sampled) {
++		ret = regmap_read(d->map, b ? b->set : 0x100, &v);
++		if (ret)
++			return ret;
++		d->inherited = !!(v & mask);
++		d->sampled = true;
++	}
++	if (!on && d->inherited)
++		return 0;
++	if (!b) {
++		unsigned int reg = on ? 0x104 : 0x108;
++
++		/* MT6991 requires the vote to be repeated across clock idle. */
++		ret = regmap_write(d->map, reg, mask);
++		if (!ret)
++			ret = regmap_write(d->map, reg, mask);
++		if (!ret)
++			ret = wait_bit(d, 0x100, on);
++		if (!ret && on)
++			ret = regmap_read_poll_timeout(d->map, 0x144, v, v == 1, 10, 300000);
++		return ret;
++	}
++	ret = wait_bit(d, b->done, true);
++	if (!ret)
++		ret = regmap_write(d->map, on ? b->set : b->clear, mask);
++	if (!ret)
++		ret = wait_bit(d, on ? b->set : b->clear, on);
++	if (!ret && !on)
++		usleep_range(100, 150);
++	if (!ret)
++		ret = wait_bit(d, b->done, true);
++	if (!ret && on)
++		ret = wait_bit(d, b->enable, true);
++	if (!ret)
++		ret = wait_bit(d, on ? b->pending_set : b->pending_clear, false);
++	return ret;
++}
++
++static int power_on(struct generic_pm_domain *pd)
++{
++	struct domain *d = container_of(pd, struct domain, pd);
++	int ret = vote(d, true);
++
++	if (ret) {
++		pr_err("turner camera: %s vote failed: %d\n", pd->name, ret);
++		if (d->sampled && !d->inherited)
++			vote(d, false);
++	}
++	return ret;
++}
++
++static int power_off(struct generic_pm_domain *pd)
++{
++	return vote(container_of(pd, struct domain, pd), false);
++}
++
++static int camera_domains_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct camera_power *p;
++	struct regmap *mm, *infra;
++	unsigned int i = 0, linked = 1;
++	int ret;
++
++	mm = syscon_regmap_lookup_by_phandle(dev->of_node, "mm-hw-ccf-regmap");
++	if (IS_ERR(mm))
++		return PTR_ERR(mm);
++	infra = syscon_regmap_lookup_by_phandle(dev->of_node, "mminfra-hwv-regmap");
++	if (IS_ERR(infra))
++		return PTR_ERR(infra);
++	p = devm_kzalloc(dev, sizeof(*p), GFP_KERNEL);
++	if (!p)
++		return -ENOMEM;
++	p->mmup.np = of_find_compatible_node(NULL, NULL, "mediatek,mt6991-hwv-scp-power-controller");
++	if (!p->mmup.np)
++		return -EPROBE_DEFER;
++	p->mmup.args_count = 1;
++	p->mmup.args[0] = 0; /* mm-proc-dormant in the #156 compact binding */
++	p->infra.np = dev->of_node;
++	p->infra.args_count = 1;
++	p->infra.args[0] = infos[0].id;
++	for (; i < ARRAY_SIZE(infos); i++) {
++		struct domain *d = &p->domains[i];
++
++		d->pd.name = infos[i].name;
++		d->pd.power_on = power_on;
++		d->pd.power_off = power_off;
++		d->info = &infos[i];
++		d->map = infos[i].bank ? mm : infra;
++		ret = pm_genpd_init(&d->pd, NULL, true);
++		if (ret)
++			goto rollback;
++		p->by_id[infos[i].id] = &d->pd;
++	}
++	for (; linked < ARRAY_SIZE(infos); linked++) {
++		ret = pm_genpd_add_subdomain(&p->domains[infos[linked].parent].pd,
++					     &p->domains[linked].pd);
++		if (ret)
++			goto rollback;
++	}
++	p->cells.domains = p->by_id;
++	p->cells.num_domains = ARRAY_SIZE(p->by_id);
++	ret = of_genpd_add_provider_onecell(dev->of_node, &p->cells);
++	if (ret)
++		goto rollback;
++	ret = of_genpd_add_subdomain(&p->mmup, &p->infra);
++	if (ret) {
++		of_genpd_del_provider(dev->of_node);
++		goto rollback;
++	}
++	of_node_put(p->mmup.np);
++	return 0;
++rollback:
++	while (linked > 1) {
++		linked--;
++		pm_genpd_remove_subdomain(&p->domains[infos[linked].parent].pd, &p->domains[linked].pd);
++	}
++	while (i)
++		pm_genpd_remove(&p->domains[--i].pd);
++	of_node_put(p->mmup.np);
++	return ret;
++}
++static const struct of_device_id matches[] = {
++	{ .compatible = "mediatek,mt6991-hfrpsys-hwv" }, {}
++};
++static struct platform_driver camera_domains = {
++	.driver = { .name = "turner-camera-domains", .of_match_table = matches, .suppress_bind_attrs = true },
++	.probe = camera_domains_probe,
++};
++/* These shared genpds live for the lifetime of the SoC. */
++builtin_platform_driver(camera_domains);
++MODULE_DESCRIPTION("MT6991 firmware camera power domains");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/media/platform/mediatek/turner/isp8/turner-capture-mode.h b/drivers/media/platform/mediatek/turner/isp8/turner-capture-mode.h
+new file mode 100644
+index 0000000..de50b61
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/isp8/turner-capture-mode.h
+@@ -0,0 +1,35 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++	{ TOP_CTL, 0x018, BIT(24), BIT(24) }, /* software config level */
++	{ TOP_CTL, 0x008, BIT(ASYNC_INDEX), BIT(ASYNC_INDEX) }, /* async clock */
++	{ TOP_CTL, 0x00c, BIT(0), BIT(0) }, /* outmux0 clock */
++	{ ASYNC, 0x000, BIT(24 + ASYNC_INDEX) | BIT(ASYNC_INDEX), BIT(24 + ASYNC_INDEX) }, /* physical input, debug on */
++#include PHY_REGISTERS
++	{ MAC, 0x304, U32_MAX, (MODE_HEIGHT << 16) | MODE_WIDTH }, /* size checker */
++	{ OUTMUX, 0x000, 3, 0 }, /* normal configuration */
++	{ OUTMUX, 0x008, 1, 1 }, /* 16 pixels per cycle */
++	{ OUTMUX, 0x00c, 0x1f1f73, ASYNC_INDEX << 4 }, /* async0, full port, first and last VC0 */
++	{ OUTMUX, 0x010, 0x1f, 0 }, /* tag 0 references VC0 */
++	{ OUTMUX, 0x018, 0x73, ASYNC_INDEX << 4 }, /* source async0 */
++	{ OUTMUX, 0x080, 0x3f1f11, 0x2b0001 }, /* accept VC0 RAW10 */
++	{ OUTMUX, 0x084, U32_MAX, ((MODE_HEIGHT - 1) << 16) | MODE_WIDTH },
++	{ OUTMUX, 0x02c, 1, 1 }, /* ready */
++	{ OUTMUX, 0x01c, 1, 1 }, /* commit */
++	/* CAMSV A DDR request and image write FIFO thresholds. */
++	{ SV, 0x150, 0x1e, 0x16 }, { SV, 0x158, 0x1e, 0x16 },
++	{ SV_DMA, 0x008, U32_MAX, 0x86660555 }, { SV_DMA, 0x004, U32_MAX, 0x14440333 },
++	{ SV_DMA, 0x000, U32_MAX, 0x12220111 }, { SV_DMA, 0x00c, U32_MAX, 0x81110000 },
++	{ SV_DMA, 0x0e8, U32_MAX, 0x84000355 }, { SV_DMA, 0x0e4, U32_MAX, 0x12ab0200 },
++	{ SV_DMA, 0x0e0, U32_MAX, 0x115600ab }, { SV_DMA, 0x0ec, U32_MAX, 0x80ab0000 },
++	{ SV, 0x554, U32_MAX, 1 }, /* CCD tag 0 packed RAW10 */
++	{ SV, 0x55c, U32_MAX, 1 }, /* enable tag */
++	{ SV, 0x170, U32_MAX, 0x20 }, /* CCD single tag timing */
++	{ SV, 0x18c, U32_MAX, 3 }, /* timestamp control */
++	{ SV, 0x548, U32_MAX, MODE_WIDTH << 16 }, /* grab pixels from column zero */
++	{ SV, 0x54c, U32_MAX, MODE_HEIGHT << 16 }, /* grab lines from row zero */
++	{ SV, 0x1cc, 0xff, 1 }, /* first tag */
++	{ SV, 0x1c8, 0xff, 1 }, /* last tag */
++	{ SV, 0x1b8, 0xff, 1 }, /* tag group 0 */
++	{ SV, 0x140, BIT(11) | BIT(4) | 3, BIT(4) | 3 }, /* CMOS on */
++	{ SV, 0x148, 1, 0 }, /* viewfinder on */
++	{ SV, 0x1b4, BIT(30), BIT(30) }, /* enable double buffering */
++	{ MAC, 0x020, 0x003f1f31, 0x002b0011 }, /* S0 DI: VC0 RAW10 */
+diff --git a/drivers/media/platform/mediatek/turner/isp8/turner-csi-packets.c b/drivers/media/platform/mediatek/turner/isp8/turner-csi-packets.c
+new file mode 100644
+index 0000000..4e54886
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/isp8/turner-csi-packets.c
+@@ -0,0 +1,475 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/module.h>
++#include "turner-sv-dma.h"
++
++static bool verify_write;
++module_param(verify_write, bool, 0444);
++#include <linux/device.h>
++#include <linux/interrupt.h>
++#include <linux/of_irq.h>
++#include <linux/io.h>
++#include <linux/of_address.h>
++#include <media/v4l2-subdev.h>
++#include "turner-receiver-clocks.h"
++
++enum csi_block { ANA_A, ANA_B, DPHY, MAC_TOP, MAC, TOP_CTL, ASYNC, OUTMUX, SV, SV_INNER, SV_DMA, SV_DMA_INNER, DELAY };
++static const char * const blocks[] = {
++	"seninf-csi-rxana-csia", "seninf-csi-rxana-csib", "seninf-csi-dphy",
++	"seninf-csi-mac-top", "seninf-csi-mac-csia", "seninf-top", "seninf-async-top", "base", "base", "inner_base", "base_DMA", "inner_base_DMA",
++};
++struct field_write { u16 bank, offset; u32 mask, value; };
++#define PHY_REGISTERS "turner-phy-mode.h"
++#define ASYNC_INDEX 0
++#define MODE_WIDTH TURNER_WIDTH
++#define MODE_HEIGHT TURNER_HEIGHT
++static const struct field_write rear_mode[] = {
++#include "turner-capture-mode.h"
++};
++#undef MODE_WIDTH
++#undef MODE_HEIGHT
++#define MODE_WIDTH 2104
++#define MODE_HEIGHT 1184
++static const struct field_write rear_video_mode[] = {
++#include "turner-capture-mode.h"
++};
++#undef PHY_REGISTERS
++#undef ASYNC_INDEX
++#undef MODE_WIDTH
++#undef MODE_HEIGHT
++#define PHY_REGISTERS "turner-front-phy.h"
++#define ASYNC_INDEX 4
++#define MODE_WIDTH 3264
++#define MODE_HEIGHT 2448
++static const struct field_write front_mode[] = {
++#include "turner-capture-mode.h"
++};
++#undef PHY_REGISTERS
++#undef ASYNC_INDEX
++#undef MODE_WIDTH
++#undef MODE_HEIGHT
++
++
++struct sv_frame_irq {
++	void __iomem *base;
++	void __iomem *inner;
++	atomic_t frames, errors, done;
++	/* One outstanding FBC entry; queued buffers stay owned until copied. */
++	spinlock_t lock;
++	void __iomem *dma;
++	struct turner_image *slots[2];
++	u64 timestamp[2];
++	unsigned int submitted, finished, released;
++	bool running;
++	wait_queue_head_t wait;
++};
++
++static irqreturn_t sv_frame_start(int irq, void *data)
++{
++	struct sv_frame_irq *sv = data;
++
++	/* Status is read-to-clear, as in the MT6991 CAMSV SOF handler. */
++	if (!(readl(sv->base + 0x360) & BIT(2)))
++		return IRQ_NONE;
++	atomic_inc(&sv->frames);
++	return IRQ_HANDLED;
++}
++
++/* Called under lock, both from DONE and when a stalled consumer returns space. */
++static void enqueue_available(struct sv_frame_irq *sv)
++{
++	struct turner_image *image;
++
++	if (!sv->running || sv->submitted != sv->finished ||
++	    sv->submitted - sv->released >= ARRAY_SIZE(sv->slots))
++		return;
++	image = sv->slots[sv->submitted % ARRAY_SIZE(sv->slots)];
++	writel(lower_32_bits(image->addr), sv->dma + 0x200);
++	writel(upper_32_bits(image->addr), sv->dma + 0x204);
++	sv->submitted++;
++	writel(0x8080, sv->base + 0x540);
++}
++
++static irqreturn_t sv_result(int irq, void *data)
++{
++	struct sv_frame_irq *sv = data;
++	u32 errors = readl(sv->inner + 0x350);
++	u32 done = readl(sv->base + 0x348);
++
++	atomic_or(errors, &sv->errors);
++	if (done & BIT(16)) {
++		spin_lock(&sv->lock);
++		if (sv->running && sv->finished != sv->submitted) {
++			sv->timestamp[sv->finished % ARRAY_SIZE(sv->slots)] = ktime_get_ns();
++			sv->finished++;
++			if (!errors)
++				enqueue_available(sv);
++		}
++		spin_unlock(&sv->lock);
++	}
++	atomic_or(done, &sv->done);
++	if (errors || done)
++		wake_up(&sv->wait);
++	return (errors || done) ? IRQ_HANDLED : IRQ_NONE;
++}
++
++static bool report_larb(struct device *dev, struct device_node *sv)
++{
++	struct device_node *larb = of_parse_phandle(sv, "mediatek,larbs", 0);
++	void __iomem *base;
++	u32 port;
++
++	if (!larb)
++		return false;
++	base = of_iomap(larb, 0);
++	of_node_put(larb);
++	if (!base)
++		return false;
++	dev_info(dev, "CAMSV LARB14 port control: CQ %#x IMGO0 %#x IMGO1 %#x\n",
++		 readl(base + 0x380), readl(base + 0x384), readl(base + 0x388));
++	port = readl(base + 0x384);
++	iounmap(base);
++	return port == 1;
++}
++
++int turner_sample_packets(struct device *dev, struct v4l2_subdev *sensor, struct turner_stream *stream, bool front)
++{
++	void __iomem *regs[ARRAY_SIZE(blocks)] = {};
++	struct device_node *node, *outmux, *sv;
++	bool binned = !front && stream && stream->width == 2104;
++	const struct field_write *preview = front ? front_mode : binned ? rear_video_mode : rear_mode;
++	const unsigned int count = front ? ARRAY_SIZE(front_mode) : ARRAY_SIZE(rear_mode);
++	const unsigned int width = stream ? stream->width : front ? 3264 : TURNER_WIDTH;
++	const unsigned int height = stream ? stream->height : front ? 2448 : TURNER_HEIGHT;
++	u32 saved[ARRAY_SIZE(front_mode) > ARRAY_SIZE(rear_mode) ? ARRAY_SIZE(front_mode) : ARRAY_SIZE(rear_mode)], port;
++	u32 packets, size = 0;
++	u8 *packed = NULL;
++	unsigned int i;
++	struct sv_frame_irq frame_irq = {};
++	struct turner_image image = { .stride = ALIGN(width * 10 / 8, 64), .height = height };
++	struct turner_image alternate = { .stride = image.stride, .height = height };
++	int idx, irq, result_irq, ret = 0;
++
++	if (stream) {
++		struct v4l2_subdev_format fmt = { .which = V4L2_SUBDEV_FORMAT_ACTIVE,
++			.format = { .width = width, .height = height } };
++
++		ret = v4l2_subdev_call_state_active(sensor, pad, set_fmt, &fmt);
++		if (ret || fmt.format.width != width || fmt.format.height != height)
++			return ret ?: -EINVAL;
++	}
++	for_each_compatible_node(node, NULL, "mediatek,seninf-csi") {
++		if (!of_property_read_u32(node, "csi-port", &port) && port == (front ? 0 : 2))
++			break;
++	}
++	if (!node)
++		return -ENODEV;
++	outmux = of_find_node_by_path("/soc/seninf-top@3a300000/seninf-outmux-top/seninf-outmux@3a100000");
++	sv = of_find_node_by_path("/soc/camsv1@3a500000");
++	if (!outmux || !sv) {
++		of_node_put(sv);
++		of_node_put(outmux);
++		of_node_put(node);
++		return -ENODEV;
++	}
++	for (i = 0; i < ARRAY_SIZE(blocks); i++) {
++		struct device_node *resource = i >= SV ? sv : i == OUTMUX ? outmux :
++			(i == TOP_CTL || i == ASYNC ? dev->of_node : node);
++
++		idx = of_property_match_string(resource, "reg-names", blocks[i]);
++		if (idx < 0 || !(regs[i] = of_iomap(resource, idx))) {
++			ret = -ENXIO;
++			goto out;
++		}
++	}
++	/* Never take over a running writer. */
++	if (readl(regs[SV] + 0x40) || readl(regs[SV_INNER] + 0x40)) {
++		ret = -EBUSY;
++		goto out;
++	}
++	if (!report_larb(dev, sv) && (verify_write || stream)) {
++		ret = -ENODEV;
++		goto out;
++	}
++	spin_lock_init(&frame_irq.lock);
++	init_waitqueue_head(&frame_irq.wait);
++	frame_irq.base = regs[SV];
++	frame_irq.inner = regs[SV_INNER];
++	irq = of_irq_get(sv, 1);
++	if (irq <= 0) {
++		ret = irq ?: -ENXIO;
++		goto out;
++	}
++	ret = request_irq(irq, sv_frame_start, 0, "turner-camsv-sof", &frame_irq);
++	if (ret)
++		goto out;
++	result_irq = of_irq_get(sv, 0);
++	ret = result_irq > 0 ? request_irq(result_irq, sv_result, 0, "turner-camsv-result", &frame_irq) :
++		(result_irq ?: -ENXIO);
++	if (ret) {
++		free_irq(irq, &frame_irq);
++		goto out;
++	}
++	if (stream) {
++		packed = kvmalloc_array(height, image.stride, GFP_KERNEL);
++		if (!packed) {
++			free_irq(result_irq, &frame_irq);
++			free_irq(irq, &frame_irq);
++			ret = -ENOMEM;
++			goto out;
++		}
++	}
++	if (verify_write || stream) {
++		ret = turner_image_alloc(&image);
++		if (ret) {
++			free_irq(result_irq, &frame_irq);
++			free_irq(irq, &frame_irq);
++			goto out;
++		}
++	}
++	if (stream) {
++		ret = turner_image_alloc(&alternate);
++		if (ret) {
++			turner_image_free(&image);
++			free_irq(result_irq, &frame_irq);
++			free_irq(irq, &frame_irq);
++			goto out;
++		}
++	}
++	for (i = 0; i < count; i++) {
++		const struct field_write *w = &preview[i];
++		void __iomem *reg;
++
++		if (w->bank == DELAY) {
++			udelay(w->value);
++			continue;
++		}
++		if (image.data && w->bank == SV && w->offset == 0x140)
++			turner_sv_arm(regs[SV], regs[SV_DMA], &image);
++		reg = regs[w->bank] + w->offset;
++		saved[i] = readl(reg);
++		writel((saved[i] & ~w->mask) | w->value, reg);
++	}
++	writel(0x701, regs[SV] + 0x34c);
++	writel(BIT(16), regs[SV] + 0x344);
++	writel(BIT(2), regs[SV] + 0x35c);
++	if (stream) {
++		spin_lock_irq(&frame_irq.lock);
++		frame_irq.slots[0] = &image;
++		frame_irq.slots[1] = &alternate;
++		frame_irq.dma = regs[SV_DMA];
++		frame_irq.submitted = 1; /* turner_sv_arm queued slot zero */
++		frame_irq.running = true;
++		spin_unlock_irq(&frame_irq.lock);
++	}
++	packets = readl(regs[MAC] + 0xdc);
++	ret = v4l2_subdev_enable_streams(sensor, 0, BIT_ULL(0));
++	if (!ret) {
++		unsigned int sample;
++
++		/* Wait for the sensor's startup frames before admitting data. */
++		msleep(120);
++		writel(1, regs[SV] + 0x148);
++		if (stream) {
++			while (stream->pixels) {
++				struct turner_image *completed;
++				unsigned int slot;
++				u64 timestamp;
++
++				if (!wait_event_timeout(frame_irq.wait,
++						READ_ONCE(frame_irq.finished) != READ_ONCE(frame_irq.released) ||
++						atomic_read(&frame_irq.errors), msecs_to_jiffies(600))) {
++					ret = -ETIMEDOUT;
++					break;
++				}
++				spin_lock_irq(&frame_irq.lock);
++				slot = frame_irq.released % ARRAY_SIZE(frame_irq.slots);
++				completed = frame_irq.slots[slot];
++				timestamp = frame_irq.timestamp[slot];
++				spin_unlock_irq(&frame_irq.lock);
++				size = readl(regs[MAC] + 0x308);
++				if (atomic_read(&frame_irq.errors) || size != ((height << 16) | width)) {
++					ret = -EIO;
++					break;
++				}
++				dma_rmb();
++				memcpy(packed, completed->data, image.stride * height);
++				spin_lock_irq(&frame_irq.lock);
++				frame_irq.released++;
++				enqueue_available(&frame_irq);
++				spin_unlock_irq(&frame_irq.lock);
++				stream->complete(stream, packed, image.stride, timestamp);
++			}
++		} else {
++			for (sample = 0; sample < 4; sample++) {
++				msleep(60);
++				size = readl(regs[MAC] + 0x308);
++				dev_info(dev, "CSI2 sample %u: packets %#x -> %#x, line/frame %#x, VC0 RAW10 size %#x, IRQ %#x\n",
++					 sample, packets, readl(regs[MAC] + 0xdc), readl(regs[MAC] + 0xd0),
++					 size, readl(regs[MAC] + 0xc8));
++				dev_info(dev, "outmux0 IRQ %#x path %#x tag0 %#x, async %#x\n",
++					 readl(regs[OUTMUX] + 0x44), readl(regs[OUTMUX] + 0x24),
++					 readl(regs[OUTMUX] + 0x90), readl(regs[ASYNC]));
++				dev_info(dev, "CAMSV A inner: SEN_MODE %#x VF %#x FRMSIZE %#x record %#x\n",
++					 readl(regs[SV_INNER] + 0x140), readl(regs[SV_INNER] + 0x148),
++					 readl(regs[SV_INNER] + 0x188), readl(regs[SV_INNER] + 0x180));
++				dev_info(dev, "CAMSV A SOF interrupts %u error %#x vf-state %#x grab %#x/%#x\n",
++					 atomic_read(&frame_irq.frames), atomic_read(&frame_irq.errors),
++					 readl(regs[SV_INNER] + 0x550), readl(regs[SV_INNER] + 0x548),
++					 readl(regs[SV_INNER] + 0x54c));
++			}
++		}
++		if (verify_write) {
++			u32 max_x = 0, tg_max_x = 0, n;
++			for (n = 0; n < 4096; n++) {
++				max_x = max(max_x, readl(regs[OUTMUX] + 0x90) >> 16);
++				tg_max_x = max(tg_max_x, readl(regs[SV_INNER] + 0x180) >> 16);
++			}
++			dev_info(dev, "OUTMUX max x %u TG max x %u MAC check %#x error size %#x\n",
++				 max_x, tg_max_x, readl(regs[MAC] + 0x300), readl(regs[MAC] + 0x30c));
++			dev_info(dev, "ASYNC status %#x debug %#x/%#x/%#x; MAC OPT %#x\n",
++				 readl(regs[TOP_CTL] + 0x24), readl(regs[ASYNC] + 0x3c),
++				 readl(regs[ASYNC] + 0x40), readl(regs[ASYNC] + 0x44),
++				 readl(regs[MAC] + 0x04));
++		}
++		{
++			int stop;
++
++			spin_lock_irq(&frame_irq.lock);
++			frame_irq.running = false;
++			spin_unlock_irq(&frame_irq.lock);
++			stop = v4l2_subdev_disable_streams(sensor, 0, BIT_ULL(0));
++
++			ret = ret ?: stop;
++		}
++		if (!ret && size != ((height << 16) | width))
++			ret = -ENODATA;
++	}
++	spin_lock_irq(&frame_irq.lock);
++	frame_irq.running = false;
++	spin_unlock_irq(&frame_irq.lock);
++	if (image.data) {
++		size_t y;
++		unsigned int rows = 0;
++		int err;
++
++		dev_info(dev, "CAMSV active DMA %#x mask %#x address %#x stride %#x FBC %#x/%#x\n",
++			 readl(regs[SV_INNER] + 0x40), readl(regs[SV_INNER] + 0x44),
++			 readl(regs[SV_DMA_INNER] + 0x200), readl(regs[SV_DMA_INNER] + 0x210),
++			 readl(regs[SV_INNER] + 0x540), readl(regs[SV_INNER] + 0x544));
++		err = turner_sv_drain(regs[SV], regs[SV_DMA]);
++
++		if (err) {
++			dev_err(dev, "DMA drain timed out, retaining buffer %pad\n", &image.addr);
++			ret = err;
++		} else {
++			dma_rmb();
++
++			for (y = 0; y < height; y++) {
++				const u8 *src = image.data + image.stride * y;
++				if (memchr_inv(src, 0xa5, width * 10 / 8))
++					rows++;
++			}
++			dev_info(dev, "CAMSV wrote %u of %u image rows\n", rows, height);
++			if (rows != height || (!stream && !(atomic_read(&frame_irq.done) & BIT(16))) ||
++			    atomic_read(&frame_irq.errors))
++				ret = -ENODATA;
++			if (alternate.data)
++				turner_image_free(&alternate);
++			turner_image_free(&image);
++		}
++	}
++	writel(0, regs[SV] + 0x35c);
++	writel(0, regs[SV] + 0x344);
++	writel(0, regs[SV] + 0x34c);
++	free_irq(result_irq, &frame_irq);
++	dev_info(dev, "CAMSV final error %#x done %#x\n",
++		 atomic_read(&frame_irq.errors), atomic_read(&frame_irq.done));
++	free_irq(irq, &frame_irq);
++	while (i) {
++		const struct field_write *w = &preview[--i];
++		void __iomem *reg;
++
++		if (w->bank == DELAY)
++			continue;
++		reg = regs[w->bank] + w->offset;
++		writel((readl(reg) & ~w->mask) | (saved[i] & w->mask), reg);
++	}
++out:
++	kvfree(packed);
++	of_node_put(sv);
++	of_node_put(outmux);
++	of_node_put(node);
++	for (i = 0; i < ARRAY_SIZE(blocks); i++)
++		if (regs[i])
++			iounmap(regs[i]);
++	return ret;
++}
++
++static const struct field_write front_phy[] = {
++#include "turner-front-phy.h"
++	{ MAC, 0x304, U32_MAX, (2448U << 16) | 3264 },
++	{ MAC, 0x020, 0x003f1f31, 0x002b0011 },
++};
++
++int turner_front_packets(struct device *dev, struct v4l2_subdev *sensor)
++{
++	void __iomem *regs[MAC + 1] = {};
++	struct device_node *node;
++	u32 saved[ARRAY_SIZE(front_phy)], port, before, after, size;
++	unsigned int i, applied = 0;
++	int ret = 0;
++
++	for_each_compatible_node(node, NULL, "mediatek,seninf-csi")
++		if (!of_property_read_u32(node, "csi-port", &port) && port == 0)
++			break;
++	if (!node)
++		return -ENODEV;
++	for (i = 0; i < ARRAY_SIZE(regs); i++) {
++		int index = of_property_match_string(node, "reg-names", blocks[i]);
++
++		regs[i] = index < 0 ? NULL : of_iomap(node, index);
++		if (!regs[i]) {
++			ret = -ENXIO;
++			goto out;
++		}
++	}
++	for (i = 0; i < ARRAY_SIZE(front_phy); i++) {
++		const struct field_write *w = &front_phy[i];
++
++		if (w->bank == DELAY) {
++			udelay(w->value);
++		} else {
++			saved[i] = readl(regs[w->bank] + w->offset);
++			writel((saved[i] & ~w->mask) | w->value, regs[w->bank] + w->offset);
++		}
++		applied++;
++	}
++	ret = v4l2_subdev_enable_streams(sensor, 0, BIT_ULL(0));
++	if (!ret) {
++		int stop;
++
++		msleep(120);
++		before = readl(regs[MAC] + 0xdc);
++		msleep(180);
++		after = readl(regs[MAC] + 0xdc);
++		size = readl(regs[MAC] + 0x308);
++		dev_info(dev, "front CSI0 packets %#x -> %#x, RAW10 size %ux%u, IRQ %#x\n",
++			 before, after, size & 0xffff, size >> 16, readl(regs[MAC] + 0xc4));
++		stop = v4l2_subdev_disable_streams(sensor, 0, BIT_ULL(0));
++		ret = stop ?: (size == ((2448U << 16) | 3264) && before != after ? 0 : -EIO);
++	}
++out:
++	while (applied) {
++		const struct field_write *w = &front_phy[--applied];
++
++		if (w->bank != DELAY)
++			writel(saved[applied], regs[w->bank] + w->offset);
++	}
++	for (i = 0; i < ARRAY_SIZE(regs); i++)
++		if (regs[i])
++			iounmap(regs[i]);
++	of_node_put(node);
++	return ret;
++}
+diff --git a/drivers/media/platform/mediatek/turner/isp8/turner-front-phy.h b/drivers/media/platform/mediatek/turner/isp8/turner-front-phy.h
+new file mode 100644
+index 0000000..15d056e
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/isp8/turner-front-phy.h
+@@ -0,0 +1,132 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* OV08F10, physical CSI0, two data lanes at 1.404 Gbit/s. */
++	{ ANA_A, 0x004, 0x00000077, 0x00000044 }, /* CDPHY_RX_ANA_1 */
++	{ ANA_A, 0x008, 0x77000000, 0x44000000 }, /* CDPHY_RX_ANA_2 */
++	{ ANA_A, 0x004, 0x00070700, 0x00020400 }, /* CDPHY_RX_ANA_1 */
++	{ ANA_A, 0x00c, 0x01f00000, 0x01000000 }, /* CDPHY_RX_ANA_3 */
++	{ ANA_A, 0x014, 0x0000ff7f, 0x00000045 }, /* CDPHY_RX_ANA_5 */
++	{ ANA_A, 0x038, 0x00000100, 0x00000100 }, /* CDPHY_RX_ANA_14 */
++	{ ANA_A, 0x008, 0x00001f1f, 0x00001010 }, /* CDPHY_RX_ANA_2 */
++	{ ANA_A, 0x00c, 0x00001f1f, 0x00001010 }, /* CDPHY_RX_ANA_3 */
++	{ ANA_A, 0x010, 0x00001f1f, 0x00001010 }, /* CDPHY_RX_ANA_4 */
++	{ ANA_A, 0x000, 0x00600000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_A, 0x008, 0x00030000, 0x00000000 }, /* CDPHY_RX_ANA_2 */
++	{ ANA_A, 0x018, 0x1f000000, 0x04000000 }, /* CDPHY_RX_ANA_6 */
++	{ ANA_A, 0x01c, 0x1f000000, 0x04000000 }, /* CDPHY_RX_ANA_7 */
++	{ ANA_A, 0x018, 0x001f1f1f, 0x00090909 }, /* CDPHY_RX_ANA_6 */
++	{ ANA_A, 0x01c, 0x001f1f1f, 0x00090909 }, /* CDPHY_RX_ANA_7 */
++	{ ANA_A, 0x020, 0x0000ffff, 0x00000400 }, /* CDPHY_RX_ANA_8 */
++	{ ANA_B, 0x004, 0x00000077, 0x00000044 }, /* CDPHY_RX_ANA_1 */
++	{ ANA_B, 0x008, 0x77000000, 0x44000000 }, /* CDPHY_RX_ANA_2 */
++	{ ANA_B, 0x004, 0x00070700, 0x00020400 }, /* CDPHY_RX_ANA_1 */
++	{ ANA_B, 0x00c, 0x01f00000, 0x01000000 }, /* CDPHY_RX_ANA_3 */
++	{ ANA_B, 0x014, 0x0000ff7f, 0x00000045 }, /* CDPHY_RX_ANA_5 */
++	{ ANA_B, 0x038, 0x00000100, 0x00000100 }, /* CDPHY_RX_ANA_14 */
++	{ ANA_B, 0x008, 0x00001f1f, 0x00001010 }, /* CDPHY_RX_ANA_2 */
++	{ ANA_B, 0x00c, 0x00001f1f, 0x00001010 }, /* CDPHY_RX_ANA_3 */
++	{ ANA_B, 0x010, 0x00001f1f, 0x00001010 }, /* CDPHY_RX_ANA_4 */
++	{ ANA_B, 0x000, 0x00600000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_B, 0x008, 0x00030000, 0x00000000 }, /* CDPHY_RX_ANA_2 */
++	{ ANA_B, 0x018, 0x1f000000, 0x04000000 }, /* CDPHY_RX_ANA_6 */
++	{ ANA_B, 0x01c, 0x1f000000, 0x04000000 }, /* CDPHY_RX_ANA_7 */
++	{ ANA_B, 0x018, 0x001f1f1f, 0x00090909 }, /* CDPHY_RX_ANA_6 */
++	{ ANA_B, 0x01c, 0x001f1f1f, 0x00090909 }, /* CDPHY_RX_ANA_7 */
++	{ ANA_B, 0x020, 0x0000ffff, 0x00000400 }, /* CDPHY_RX_ANA_8 */
++	{ DPHY, 0x020, 0x03fc0000, 0x00680000 }, /* DPHY_RX_DATA_LANE0_HS_PARAMETER */
++	{ DPHY, 0x024, 0x03fc0000, 0x00680000 }, /* DPHY_RX_DATA_LANE1_HS_PARAMETER */
++	{ DPHY, 0x028, 0x03fc0000, 0x00680000 }, /* DPHY_RX_DATA_LANE2_HS_PARAMETER */
++	{ DPHY, 0x02c, 0x03fc0000, 0x00680000 }, /* DPHY_RX_DATA_LANE3_HS_PARAMETER */
++	{ DPHY, 0x010, 0x00ff0000, 0x00000000 }, /* DPHY_RX_CLOCK_LANE0_HS_PARAMETER */
++	{ DPHY, 0x014, 0x00ff0000, 0x00000000 }, /* DPHY_RX_CLOCK_LANE1_HS_PARAMETER */
++	{ DPHY, 0x010, 0x40000000, 0x00000000 }, /* DPHY_RX_CLOCK_LANE0_HS_PARAMETER */
++	{ DPHY, 0x020, 0x000000ff, 0x00000000 }, /* DPHY_RX_DATA_LANE0_HS_PARAMETER */
++	{ DPHY, 0x024, 0x000000ff, 0x00000000 }, /* DPHY_RX_DATA_LANE1_HS_PARAMETER */
++	{ DPHY, 0x028, 0x000000ff, 0x00000000 }, /* DPHY_RX_DATA_LANE2_HS_PARAMETER */
++	{ DPHY, 0x02c, 0x000000ff, 0x00000000 }, /* DPHY_RX_DATA_LANE3_HS_PARAMETER */
++	{ DPHY, 0x020, 0x0003ff00, 0x00000000 }, /* DPHY_RX_DATA_LANE0_HS_PARAMETER */
++	{ DPHY, 0x024, 0x0003ff00, 0x00000000 }, /* DPHY_RX_DATA_LANE1_HS_PARAMETER */
++	{ DPHY, 0x028, 0x0003ff00, 0x00000000 }, /* DPHY_RX_DATA_LANE2_HS_PARAMETER */
++	{ DPHY, 0x02c, 0x0003ff00, 0x00000000 }, /* DPHY_RX_DATA_LANE3_HS_PARAMETER */
++	{ DPHY, 0x020, 0x20000000, 0x00000000 }, /* DPHY_RX_DATA_LANE0_HS_PARAMETER */
++	{ DPHY, 0x024, 0x20000000, 0x00000000 }, /* DPHY_RX_DATA_LANE1_HS_PARAMETER */
++	{ DPHY, 0x028, 0x20000000, 0x00000000 }, /* DPHY_RX_DATA_LANE2_HS_PARAMETER */
++	{ DPHY, 0x02c, 0x20000000, 0x00000000 }, /* DPHY_RX_DATA_LANE3_HS_PARAMETER */
++	{ DPHY, 0x050, 0x4000f100, 0x40000100 }, /* DPHY_RX_DESKEW_CTRL */
++	{ DPHY, 0x060, 0x00000001, 0x00000000 }, /* DPHY_RX_DESKEW_LANE0_CTRL */
++	{ DPHY, 0x064, 0x00000001, 0x00000000 }, /* DPHY_RX_DESKEW_LANE1_CTRL */
++	{ DPHY, 0x068, 0x00000001, 0x00000000 }, /* DPHY_RX_DESKEW_LANE2_CTRL */
++	{ DPHY, 0x06c, 0x00000001, 0x00000000 }, /* DPHY_RX_DESKEW_LANE3_CTRL */
++	{ DPHY, 0x020, 0x10000000, 0x10000000 }, /* DPHY_RX_DATA_LANE0_HS_PARAMETER */
++	{ DPHY, 0x024, 0x10000000, 0x10000000 }, /* DPHY_RX_DATA_LANE1_HS_PARAMETER */
++	{ DPHY, 0x028, 0x10000000, 0x10000000 }, /* DPHY_RX_DATA_LANE2_HS_PARAMETER */
++	{ DPHY, 0x02c, 0x10000000, 0x10000000 }, /* DPHY_RX_DATA_LANE3_HS_PARAMETER */
++	{ DPHY, 0x010, 0x100000ff, 0x10000000 }, /* DPHY_RX_CLOCK_LANE0_HS_PARAMETER */
++	{ DPHY, 0x014, 0x100000ff, 0x10000000 }, /* DPHY_RX_CLOCK_LANE1_HS_PARAMETER */
++	{ MAC_TOP, 0x000, 0x00010000, 0x00000000 }, /* CSIRX_MAC_TOP_CTRL */
++	{ MAC_TOP, 0x040, 0x00000303, 0x00000001 }, /* CSIRX_MAC_TOP_PHY_CTRL_CSI0 */
++	{ MAC, 0x004, 0x00080001, 0x00080000 }, /* CSIRX_MAC_CSI2_OPT */
++	{ MAC, 0x000, 0x0000000f, 0x00000003 }, /* CSIRX_MAC_CSI2_EN */
++	{ MAC, 0x004, 0x000103b6, 0x000000b6 }, /* CSIRX_MAC_CSI2_OPT */
++	{ MAC, 0x010, 0x0000001f, 0x0000001f }, /* CSIRX_MAC_CSI2_RESYNC_MERGE_CTRL */
++	{ MAC, 0x300, 0xffffffff, 0x002b0011 }, /* CSIRX_MAC_CSI2_SIZE_CHK_CTRL0 */
++	{ MAC, 0x310, 0xffffffff, 0x002b0111 }, /* CSIRX_MAC_CSI2_SIZE_CHK_CTRL1 */
++	{ MAC, 0x320, 0xffffffff, 0x002b0211 }, /* CSIRX_MAC_CSI2_SIZE_CHK_CTRL2 */
++	{ MAC, 0x330, 0xffffffff, 0x002b0311 }, /* CSIRX_MAC_CSI2_SIZE_CHK_CTRL3 */
++	{ MAC, 0x340, 0xffffffff, 0x00300011 }, /* CSIRX_MAC_CSI2_SIZE_CHK_CTRL4 */
++	{ MAC, 0x350, 0xffffffff, 0x00300111 }, /* CSIRX_MAC_CSI2_SIZE_CHK_CTRL5 */
++	{ MAC, 0x010, 0x00000100, 0x00000100 }, /* CSIRX_MAC_CSI2_RESYNC_MERGE_CTRL */
++	{ MAC, 0x0e0, 0x00020000, 0x00020000 }, /* CSIRX_MAC_CSI2_DBG_CTRL */
++	{ MAC, 0x008, 0x000007ff, 0x00000000 }, /* CSIRX_MAC_CSI2_HDR_MODE_0 */
++	{ MAC, 0x010, 0xfffff000, 0x00000000 }, /* CSIRX_MAC_CSI2_RESYNC_MERGE_CTRL */
++	{ ANA_A, 0x0f4, 0x7fff00fc, 0x40630044 }, /* CDPHY_RX_ANA_SETTING_1 */
++	{ ANA_A, 0x0f0, 0x100000f0, 0x00000020 }, /* CDPHY_RX_ANA_SETTING_0 */
++	{ ANA_A, 0x000, 0x00100000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_B, 0x000, 0x00100000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_A, 0x000, 0x00007000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_B, 0x000, 0x00007000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_A, 0x000, 0x00000700, 0x00000700 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_B, 0x000, 0x00000700, 0x00000700 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_A, 0x000, 0x00007000, 0x00004000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_B, 0x000, 0x00007000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_A, 0x000, 0x000000c0, 0x000000c0 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_B, 0x000, 0x000000c0, 0x000000c0 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_A, 0x038, 0x03000000, 0x01000000 }, /* CDPHY_RX_ANA_14 */
++	{ ANA_B, 0x038, 0x03000000, 0x01000000 }, /* CDPHY_RX_ANA_14 */
++	{ ANA_A, 0x100, 0x00202020, 0x00202020 }, /* CDPHY_RX_ASYM_AFIFO_CTRL_0 */
++	{ ANA_A, 0x00c, 0x08000000, 0x08000000 }, /* CDPHY_RX_ANA_3 */
++	{ ANA_B, 0x100, 0x00202020, 0x00202020 }, /* CDPHY_RX_ASYM_AFIFO_CTRL_0 */
++	{ ANA_B, 0x00c, 0x08000000, 0x08000000 }, /* CDPHY_RX_ANA_3 */
++	{ ANA_A, 0x014, 0x0000ffbf, 0x00000000 }, /* CDPHY_RX_ANA_5 */
++	{ ANA_A, 0x038, 0x00000100, 0x00000000 }, /* CDPHY_RX_ANA_14 */
++	{ ANA_B, 0x014, 0x0000ffbf, 0x00000000 }, /* CDPHY_RX_ANA_5 */
++	{ ANA_B, 0x038, 0x00000100, 0x00000000 }, /* CDPHY_RX_ANA_14 */
++	{ ANA_A, 0x020, 0x003f0000, 0x00000000 }, /* CDPHY_RX_ANA_8 */
++	{ ANA_A, 0x000, 0x00000803, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0x000, 0x00000000, 0x000000c8 }, /* - */
++	{ ANA_A, 0x000, 0x00000001, 0x00000001 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0x000, 0x00000000, 0x0000001e }, /* - */
++	{ ANA_A, 0x000, 0x00000002, 0x00000002 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0x000, 0x00000000, 0x00000005 }, /* - */
++	{ ANA_A, 0x000, 0x00000800, 0x00000800 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0x000, 0x00000000, 0x00000001 }, /* - */
++	{ ANA_A, 0x020, 0x003f0000, 0x003f0000 }, /* CDPHY_RX_ANA_8 */
++	{ DELAY, 0x000, 0x00000000, 0x00000001 }, /* - */
++	{ ANA_B, 0x020, 0x003f0000, 0x00000000 }, /* CDPHY_RX_ANA_8 */
++	{ ANA_B, 0x000, 0x00000803, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0x000, 0x00000000, 0x000000c8 }, /* - */
++	{ ANA_B, 0x000, 0x00000001, 0x00000001 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0x000, 0x00000000, 0x0000001e }, /* - */
++	{ ANA_B, 0x000, 0x00000002, 0x00000002 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0x000, 0x00000000, 0x00000005 }, /* - */
++	{ ANA_B, 0x000, 0x00000800, 0x00000800 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0x000, 0x00000000, 0x00000001 }, /* - */
++	{ ANA_B, 0x020, 0x003f0000, 0x003f0000 }, /* CDPHY_RX_ANA_8 */
++	{ DELAY, 0x000, 0x00000000, 0x00000001 }, /* - */
++	{ DPHY, 0x000, 0x00000f03, 0x00000301 }, /* DPHY_RX_LANE_EN */
++	{ DPHY, 0x004, 0x00777777, 0x00003102 }, /* DPHY_RX_LANE_SELECT */
++	{ ANA_A, 0x100, 0x00000100, 0x00000100 }, /* CDPHY_RX_ASYM_AFIFO_CTRL_0 */
++	{ ANA_B, 0x100, 0x00000001, 0x00000001 }, /* CDPHY_RX_ASYM_AFIFO_CTRL_0 */
++	{ DPHY, 0x004, 0x80000000, 0x80000000 }, /* DPHY_RX_LANE_SELECT */
++	{ DPHY, 0x008, 0x0003f000, 0x00000000 }, /* DPHY_RX_HS_RX_EN_SW */
++	{ DPHY, 0x180, 0x00000008, 0x00000008 }, /* DPHY_DPHYV21_CTRL */
++	{ DPHY, 0x0f0, 0xffffffff, 0x000000f1 }, /* DPHY_RX_SPARE0 */
+diff --git a/drivers/media/platform/mediatek/turner/isp8/turner-phy-mode.h b/drivers/media/platform/mediatek/turner/isp8/turner-phy-mode.h
+new file mode 100644
+index 0000000..806f9ea
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/isp8/turner-phy-mode.h
+@@ -0,0 +1,136 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* MT6991 ISP8 PHY 3.0, OV13B10 full D-PHY port, 1.2 Gbit/s per lane.
++ * Based on MediaTek csirx_{phyA,dphy,mac}_init/setting.
++ * The board's get_csi_param selects fixed register values 40/40/64
++ * for data settle, clock settle and trail. Interrupts are polled here.
++ */
++	{ ANA_A, 0x004, 0x00000077, 0x00000044 }, /* CDPHY_RX_ANA_1 */
++	{ ANA_A, 0x008, 0x77000000, 0x44000000 }, /* CDPHY_RX_ANA_2 */
++	{ ANA_A, 0x004, 0x00070700, 0x00020400 }, /* CDPHY_RX_ANA_1 */
++	{ ANA_A, 0x00c, 0x01f00000, 0x01000000 }, /* CDPHY_RX_ANA_3 */
++	{ ANA_A, 0x014, 0x0000ff7f, 0x00000045 }, /* CDPHY_RX_ANA_5 */
++	{ ANA_A, 0x038, 0x00000100, 0x00000100 }, /* CDPHY_RX_ANA_14 */
++	{ ANA_A, 0x008, 0x00001f1f, 0x00001010 }, /* CDPHY_RX_ANA_2 */
++	{ ANA_A, 0x00c, 0x00001f1f, 0x00001010 }, /* CDPHY_RX_ANA_3 */
++	{ ANA_A, 0x010, 0x00001f1f, 0x00001010 }, /* CDPHY_RX_ANA_4 */
++	{ ANA_A, 0x000, 0x00600000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_A, 0x008, 0x00030000, 0x00000000 }, /* CDPHY_RX_ANA_2 */
++	{ ANA_A, 0x018, 0x1f000000, 0x04000000 }, /* CDPHY_RX_ANA_6 */
++	{ ANA_A, 0x01c, 0x1f000000, 0x04000000 }, /* CDPHY_RX_ANA_7 */
++	{ ANA_A, 0x018, 0x001f1f1f, 0x00090909 }, /* CDPHY_RX_ANA_6 */
++	{ ANA_A, 0x01c, 0x001f1f1f, 0x00090909 }, /* CDPHY_RX_ANA_7 */
++	{ ANA_A, 0x020, 0x0000ffff, 0x00000400 }, /* CDPHY_RX_ANA_8 */
++	{ ANA_B, 0x004, 0x00000077, 0x00000044 }, /* CDPHY_RX_ANA_1 */
++	{ ANA_B, 0x008, 0x77000000, 0x44000000 }, /* CDPHY_RX_ANA_2 */
++	{ ANA_B, 0x004, 0x00070700, 0x00020400 }, /* CDPHY_RX_ANA_1 */
++	{ ANA_B, 0x00c, 0x01f00000, 0x01000000 }, /* CDPHY_RX_ANA_3 */
++	{ ANA_B, 0x014, 0x0000ff7f, 0x00000045 }, /* CDPHY_RX_ANA_5 */
++	{ ANA_B, 0x038, 0x00000100, 0x00000100 }, /* CDPHY_RX_ANA_14 */
++	{ ANA_B, 0x008, 0x00001f1f, 0x00001010 }, /* CDPHY_RX_ANA_2 */
++	{ ANA_B, 0x00c, 0x00001f1f, 0x00001010 }, /* CDPHY_RX_ANA_3 */
++	{ ANA_B, 0x010, 0x00001f1f, 0x00001010 }, /* CDPHY_RX_ANA_4 */
++	{ ANA_B, 0x000, 0x00600000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_B, 0x008, 0x00030000, 0x00000000 }, /* CDPHY_RX_ANA_2 */
++	{ ANA_B, 0x018, 0x1f000000, 0x04000000 }, /* CDPHY_RX_ANA_6 */
++	{ ANA_B, 0x01c, 0x1f000000, 0x04000000 }, /* CDPHY_RX_ANA_7 */
++	{ ANA_B, 0x018, 0x001f1f1f, 0x00090909 }, /* CDPHY_RX_ANA_6 */
++	{ ANA_B, 0x01c, 0x001f1f1f, 0x00090909 }, /* CDPHY_RX_ANA_7 */
++	{ ANA_B, 0x020, 0x0000ffff, 0x00000400 }, /* CDPHY_RX_ANA_8 */
++	{ DPHY, 0x020, 0x03fc0000, 0x00a00000 }, /* DPHY_RX_DATA_LANE0_HS_PARAMETER */
++	{ DPHY, 0x024, 0x03fc0000, 0x00a00000 }, /* DPHY_RX_DATA_LANE1_HS_PARAMETER */
++	{ DPHY, 0x028, 0x03fc0000, 0x00a00000 }, /* DPHY_RX_DATA_LANE2_HS_PARAMETER */
++	{ DPHY, 0x02c, 0x03fc0000, 0x00a00000 }, /* DPHY_RX_DATA_LANE3_HS_PARAMETER */
++	{ DPHY, 0x010, 0x00ff0000, 0x00280000 }, /* DPHY_RX_CLOCK_LANE0_HS_PARAMETER */
++	{ DPHY, 0x014, 0x00ff0000, 0x00280000 }, /* DPHY_RX_CLOCK_LANE1_HS_PARAMETER */
++	{ DPHY, 0x010, 0x40000000, 0x00000000 }, /* DPHY_RX_CLOCK_LANE0_HS_PARAMETER */
++	{ DPHY, 0x020, 0x000000ff, 0x00000000 }, /* DPHY_RX_DATA_LANE0_HS_PARAMETER */
++	{ DPHY, 0x024, 0x000000ff, 0x00000000 }, /* DPHY_RX_DATA_LANE1_HS_PARAMETER */
++	{ DPHY, 0x028, 0x000000ff, 0x00000000 }, /* DPHY_RX_DATA_LANE2_HS_PARAMETER */
++	{ DPHY, 0x02c, 0x000000ff, 0x00000000 }, /* DPHY_RX_DATA_LANE3_HS_PARAMETER */
++	{ DPHY, 0x020, 0x0003ff00, 0x00004000 }, /* DPHY_RX_DATA_LANE0_HS_PARAMETER */
++	{ DPHY, 0x024, 0x0003ff00, 0x00004000 }, /* DPHY_RX_DATA_LANE1_HS_PARAMETER */
++	{ DPHY, 0x028, 0x0003ff00, 0x00004000 }, /* DPHY_RX_DATA_LANE2_HS_PARAMETER */
++	{ DPHY, 0x02c, 0x0003ff00, 0x00004000 }, /* DPHY_RX_DATA_LANE3_HS_PARAMETER */
++	{ DPHY, 0x020, 0x20000000, 0x20000000 }, /* DPHY_RX_DATA_LANE0_HS_PARAMETER */
++	{ DPHY, 0x024, 0x20000000, 0x20000000 }, /* DPHY_RX_DATA_LANE1_HS_PARAMETER */
++	{ DPHY, 0x028, 0x20000000, 0x20000000 }, /* DPHY_RX_DATA_LANE2_HS_PARAMETER */
++	{ DPHY, 0x02c, 0x20000000, 0x20000000 }, /* DPHY_RX_DATA_LANE3_HS_PARAMETER */
++	{ DPHY, 0x050, 0x4000f100, 0x40000100 }, /* DPHY_RX_DESKEW_CTRL */
++	{ DPHY, 0x060, 0x00000001, 0x00000000 }, /* DPHY_RX_DESKEW_LANE0_CTRL */
++	{ DPHY, 0x064, 0x00000001, 0x00000000 }, /* DPHY_RX_DESKEW_LANE1_CTRL */
++	{ DPHY, 0x068, 0x00000001, 0x00000000 }, /* DPHY_RX_DESKEW_LANE2_CTRL */
++	{ DPHY, 0x06c, 0x00000001, 0x00000000 }, /* DPHY_RX_DESKEW_LANE3_CTRL */
++	{ DPHY, 0x020, 0x10000000, 0x10000000 }, /* DPHY_RX_DATA_LANE0_HS_PARAMETER */
++	{ DPHY, 0x024, 0x10000000, 0x10000000 }, /* DPHY_RX_DATA_LANE1_HS_PARAMETER */
++	{ DPHY, 0x028, 0x10000000, 0x10000000 }, /* DPHY_RX_DATA_LANE2_HS_PARAMETER */
++	{ DPHY, 0x02c, 0x10000000, 0x10000000 }, /* DPHY_RX_DATA_LANE3_HS_PARAMETER */
++	{ DPHY, 0x010, 0x100000ff, 0x10000000 }, /* DPHY_RX_CLOCK_LANE0_HS_PARAMETER */
++	{ DPHY, 0x014, 0x100000ff, 0x10000000 }, /* DPHY_RX_CLOCK_LANE1_HS_PARAMETER */
++	{ MAC_TOP, 0x000, 0x00010000, 0x00000000 }, /* CSIRX_MAC_TOP_CTRL */
++	{ MAC_TOP, 0x040, 0x00000303, 0x00000001 }, /* CSIRX_MAC_TOP_PHY_CTRL_CSI0 */
++	{ MAC, 0x004, 0x00080001, 0x00080000 }, /* CSIRX_MAC_CSI2_OPT */
++	{ MAC, 0x000, 0x0000000f, 0x0000000f }, /* CSIRX_MAC_CSI2_EN */
++	{ MAC, 0x004, 0x000103b6, 0x000000b6 }, /* CSIRX_MAC_CSI2_OPT */
++	{ MAC, 0x010, 0x0000001f, 0x0000001f }, /* CSIRX_MAC_CSI2_RESYNC_MERGE_CTRL */
++	{ MAC, 0x300, 0xffffffff, 0x002b0011 }, /* CSIRX_MAC_CSI2_SIZE_CHK_CTRL0 */
++	{ MAC, 0x310, 0xffffffff, 0x002b0111 }, /* CSIRX_MAC_CSI2_SIZE_CHK_CTRL1 */
++	{ MAC, 0x320, 0xffffffff, 0x002b0211 }, /* CSIRX_MAC_CSI2_SIZE_CHK_CTRL2 */
++	{ MAC, 0x330, 0xffffffff, 0x002b0311 }, /* CSIRX_MAC_CSI2_SIZE_CHK_CTRL3 */
++	{ MAC, 0x340, 0xffffffff, 0x00300011 }, /* CSIRX_MAC_CSI2_SIZE_CHK_CTRL4 */
++	{ MAC, 0x350, 0xffffffff, 0x00300111 }, /* CSIRX_MAC_CSI2_SIZE_CHK_CTRL5 */
++	{ MAC, 0x010, 0x00000100, 0x00000100 }, /* CSIRX_MAC_CSI2_RESYNC_MERGE_CTRL */
++	{ MAC, 0x0e0, 0x00020000, 0x00020000 }, /* CSIRX_MAC_CSI2_DBG_CTRL */
++	{ MAC, 0x008, 0x000007ff, 0x00000000 }, /* CSIRX_MAC_CSI2_HDR_MODE_0 */
++	{ MAC, 0x010, 0xfffff000, 0x00000000 }, /* CSIRX_MAC_CSI2_RESYNC_MERGE_CTRL */
++	{ ANA_A, 0x0f4, 0x7fff00fc, 0x40630044 }, /* CDPHY_RX_ANA_SETTING_1 */
++	{ ANA_A, 0x0f0, 0x100000f0, 0x00000020 }, /* CDPHY_RX_ANA_SETTING_0 */
++	{ ANA_A, 0x000, 0x00100000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_B, 0x000, 0x00100000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_A, 0x000, 0x00007000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_B, 0x000, 0x00007000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_A, 0x000, 0x00000700, 0x00000700 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_B, 0x000, 0x00000700, 0x00000700 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_A, 0x000, 0x00007000, 0x00004000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_B, 0x000, 0x00007000, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_A, 0x000, 0x000000c0, 0x000000c0 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_B, 0x000, 0x000000c0, 0x000000c0 }, /* CDPHY_RX_ANA_0 */
++	{ ANA_A, 0x038, 0x03000000, 0x01000000 }, /* CDPHY_RX_ANA_14 */
++	{ ANA_B, 0x038, 0x03000000, 0x01000000 }, /* CDPHY_RX_ANA_14 */
++	{ ANA_A, 0x100, 0x00202020, 0x00202020 }, /* CDPHY_RX_ASYM_AFIFO_CTRL_0 */
++	{ ANA_A, 0x00c, 0x08000000, 0x08000000 }, /* CDPHY_RX_ANA_3 */
++	{ ANA_B, 0x100, 0x00202020, 0x00202020 }, /* CDPHY_RX_ASYM_AFIFO_CTRL_0 */
++	{ ANA_B, 0x00c, 0x08000000, 0x08000000 }, /* CDPHY_RX_ANA_3 */
++	{ ANA_A, 0x014, 0x0000ffbf, 0x00000000 }, /* CDPHY_RX_ANA_5 */
++	{ ANA_A, 0x038, 0x00000100, 0x00000000 }, /* CDPHY_RX_ANA_14 */
++	{ ANA_B, 0x014, 0x0000ffbf, 0x00000000 }, /* CDPHY_RX_ANA_5 */
++	{ ANA_B, 0x038, 0x00000100, 0x00000000 }, /* CDPHY_RX_ANA_14 */
++	{ ANA_A, 0x020, 0x003f0000, 0x00000000 }, /* CDPHY_RX_ANA_8 */
++	{ ANA_A, 0x000, 0x00000803, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0, 0, 200 },
++	{ ANA_A, 0x000, 0x00000001, 0x00000001 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0, 0, 30 },
++	{ ANA_A, 0x000, 0x00000002, 0x00000002 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0, 0, 5 },
++	{ ANA_A, 0x000, 0x00000800, 0x00000800 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0, 0, 1 },
++	{ ANA_A, 0x020, 0x003f0000, 0x003f0000 }, /* CDPHY_RX_ANA_8 */
++	{ DELAY, 0, 0, 1 },
++	{ ANA_B, 0x020, 0x003f0000, 0x00000000 }, /* CDPHY_RX_ANA_8 */
++	{ ANA_B, 0x000, 0x00000803, 0x00000000 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0, 0, 200 },
++	{ ANA_B, 0x000, 0x00000001, 0x00000001 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0, 0, 30 },
++	{ ANA_B, 0x000, 0x00000002, 0x00000002 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0, 0, 5 },
++	{ ANA_B, 0x000, 0x00000800, 0x00000800 }, /* CDPHY_RX_ANA_0 */
++	{ DELAY, 0, 0, 1 },
++	{ ANA_B, 0x020, 0x003f0000, 0x003f0000 }, /* CDPHY_RX_ANA_8 */
++	{ DELAY, 0, 0, 1 },
++	{ DPHY, 0x000, 0x00000f03, 0x00000f01 }, /* DPHY_RX_LANE_EN */
++	{ DPHY, 0x004, 0x00777777, 0x00403102 }, /* DPHY_RX_LANE_SELECT */
++	{ ANA_A, 0x100, 0x00000101, 0x00000101 }, /* CDPHY_RX_ASYM_AFIFO_CTRL_0 */
++	{ ANA_B, 0x100, 0x00000101, 0x00000101 }, /* CDPHY_RX_ASYM_AFIFO_CTRL_0 */
++	{ DPHY, 0x004, 0x80000000, 0x80000000 }, /* DPHY_RX_LANE_SELECT */
++	{ DPHY, 0x008, 0x0003f000, 0x00000000 }, /* DPHY_RX_HS_RX_EN_SW */
++	{ DPHY, 0x180, 0x00000008, 0x00000008 }, /* DPHY_DPHYV21_CTRL */
++	{ DPHY, 0x0f0, 0xffffffff, 0x000000f1 }, /* DPHY_RX_SPARE0 */
+diff --git a/drivers/media/platform/mediatek/turner/isp8/turner-receiver-clocks.c b/drivers/media/platform/mediatek/turner/isp8/turner-receiver-clocks.c
+new file mode 100644
+index 0000000..e162adb
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/isp8/turner-receiver-clocks.c
+@@ -0,0 +1,297 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MT6991 clock sequence for direct CSI2 -> CAMSV A capture. Caller holds
++ * CAM_VCORE, CAM_MAIN and both PHY domains throughout the transaction.
++ */
++#include <linux/device.h>
++#include <media/v4l2-subdev.h>
++#include <linux/spmi.h>
++#include <linux/mfd/syscon.h>
++#include <linux/of_address.h>
++#include <linux/of_platform.h>
++#include <linux/regmap.h>
++
++#include "turner-receiver-clocks.h"
++
++enum bank { TOP, VCORE, MAIN, HWV };
++struct gate {
++	const char *name;
++	enum bank control, status;
++	u16 request, release, done, status_reg;
++	u32 mask, status_mask;
++	bool rmw, status_inverted;
++};
++
++#define MUX(_name, _set, _done, _bit, _fence) \
++	{ _name, HWV, TOP, _set, _set + 4, _done, 0x174, BIT(_bit), BIT(_fence) }
++#define CAM_MAIN_MASK (BIT(1) | BIT(4) | BIT(9) | BIT(10) | BIT(11) | GENMASK(19, 16))
++static const struct gate gates[] = {
++	MUX("mminfra", 0x118, 0x2c8c, 15, 10),
++	MUX("cam", 0x100, 0x2c80, 7, 23),
++	MUX("camtm", 0x100, 0x2c80, 15, 22),
++	MUX("seninf2", 0xf0, 0x2c78, 23, 29),
++	{ "vcore", VCORE, VCORE, 0xa8, 0xa4, 0, 0xa0, BIT(0), BIT(0), false, true },
++	{ "subcommon", VCORE, VCORE, 0x2c, 0x2c, 0, 0x2c, 3, 3, true },
++	{ "cam-main", HWV, MAIN, 0, 4, 0x2c00, 0, CAM_MAIN_MASK, CAM_MAIN_MASK, false, true },
++	{ "camsv-a", MAIN, MAIN, 0x54, 0x50, 0, 0x4c, BIT(0), BIT(0), false, true },
++};
++
++static const struct gate seninf0 = MUX("seninf0", 0xf0, 0x2c78, 7, 31);
++
++static int apply_gate(struct regmap **maps, const struct gate *g, u32 *owned)
++{
++	struct regmap *control = maps[g->control];
++	u32 value;
++	int ret;
++
++	if (g->control == HWV)
++		ret = regmap_read(control, g->request, &value);
++	else {
++		ret = regmap_read(control, g->status_reg, &value);
++		if (!ret && g->status_inverted)
++			value = ~value;
++	}
++	if (ret)
++		return ret;
++	value = g->mask & ~value;
++	if (value) {
++		ret = g->rmw ? regmap_set_bits(control, g->request, value) :
++				regmap_write(control, g->request, value);
++		if (ret)
++			return ret;
++		*owned = value;
++	}
++	if (g->control == HWV) {
++		ret = regmap_read_poll_timeout(control, g->request, value,
++					(value & g->mask) == g->mask, 5, 10000);
++		if (!ret)
++			ret = regmap_read_poll_timeout(control, g->done, value,
++					(value & g->mask) == g->mask, 5, 10000);
++		if (ret)
++			return ret;
++	}
++	return regmap_read_poll_timeout(maps[g->status], g->status_reg, value,
++			((g->status_inverted ? ~value : value) & g->status_mask) == g->status_mask,
++			5, 10000);
++}
++
++static int release_gate(struct regmap **maps, const struct gate *g, u32 owned)
++{
++	struct regmap *control = maps[g->control];
++	u32 value;
++	int ret;
++
++	if (!owned)
++		return 0;
++	ret = g->rmw ? regmap_clear_bits(control, g->release, owned) :
++			regmap_write(control, g->release, owned);
++	if (!ret && g->control == HWV) {
++		ret = regmap_read_poll_timeout(control, g->request, value, !(value & owned), 5, 10000);
++		if (!ret)
++			ret = regmap_read_poll_timeout(control, g->done, value,
++						       (value & owned) == owned, 5, 10000);
++	}
++	return ret;
++}
++
++static int check_csi_mac(struct device *dev)
++{
++	struct device_node *node;
++	void __iomem *mac;
++	u32 port, version, ctrl, phy, active;
++	const u32 mode_mask = GENMASK(9, 8) | GENMASK(1, 0);
++	int index, ret = 0;
++
++	for_each_compatible_node(node, NULL, "mediatek,seninf-csi") {
++		if (!of_property_read_u32(node, "csi-port", &port) && port == 2)
++			break;
++	}
++	if (!node)
++		return -ENODEV;
++	index = of_property_match_string(node, "reg-names", "seninf-csi-mac-top");
++	mac = index < 0 ? NULL : of_iomap(node, index);
++	of_node_put(node);
++	if (!mac)
++		return -ENXIO;
++	version = readl(mac + 4);
++	ctrl = readl(mac);
++	phy = readl(mac + 0x40);
++	/* Full port mode joins the A and B halves into one four-lane D-PHY. */
++	writel(ctrl & ~BIT(16), mac);
++	writel((phy & ~mode_mask) | BIT(0), mac + 0x40);
++	active = readl(mac + 0x40);
++	if ((active & mode_mask) != BIT(0) || (readl(mac) & BIT(16)))
++		ret = -EIO;
++	dev_info(dev, "CSI2 MAC revision %#x, PHY control %#x -> %#x\n", version, phy, active);
++	writel(phy, mac + 0x40);
++	writel(ctrl, mac);
++	if (readl(mac) != ctrl || readl(mac + 0x40) != phy)
++		ret = -EIO;
++	iounmap(mac);
++	return ret;
++}
++
++static int read_camsv(struct device *dev)
++{
++	struct device_node *node;
++	void __iomem *base;
++	u32 id;
++	int index;
++
++	for_each_compatible_node(node, NULL, "mediatek,camsv") {
++		if (!of_property_read_u32(node, "mediatek,camsv-id", &id) && id == 0)
++			break;
++	}
++	if (!node)
++		return -ENODEV;
++	index = of_property_match_string(node, "reg-names", "base");
++	base = index < 0 ? NULL : of_iomap(node, index);
++	of_node_put(node);
++	if (!base)
++		return -ENXIO;
++	dev_info(dev, "CAMSV A SEN_MODE=%#x VF_CON=%#x PATH_CFG=%#x FRMSIZE=%#x\n",
++		 readl(base + 0x140), readl(base + 0x148),
++		 readl(base + 0x14c), readl(base + 0x188));
++	iounmap(base);
++	return 0;
++}
++
++static int read_vmm_uv(void)
++{
++	struct device_node *np = of_find_compatible_node(NULL, NULL, "mediatek,mt6363");
++	struct spmi_device *pmic;
++	u8 sel;
++	int ret;
++
++	if (!np)
++		return -ENODEV;
++	pmic = spmi_find_device_by_of_node(np);
++	of_node_put(np);
++	if (!pmic)
++		return -ENODEV;
++	/* Turner VMM is MT6363 VBUCK2 on the vendor PMIC register map. */
++	ret = spmi_ext_register_readl(pmic, 0x24e, &sel, 1);
++	put_device(&pmic->dev);
++	return ret ?: sel * 6250;
++}
++
++static int set_cam_parent(struct regmap *map, u32 sel)
++{
++	int ret = regmap_write(map, 0x38, 15);
++
++	if (!ret)
++		ret = regmap_write(map, 0x34, sel);
++	if (!ret)
++		ret = regmap_write(map, 4, BIT(8));
++	return ret;
++}
++
++/* CKGEN_CK2 source IDs from this board's clk-fmeter nodes. */
++static void measure_camera_clock(struct device *dev, struct regmap *map, u32 id)
++{
++	u32 misc, dbg, ctl, count, state;
++
++	if (regmap_read(map, 0xf0, &ctl) || (ctl & BIT(4)) ||
++	    regmap_read(map, 0x104, &misc) || regmap_read(map, 0x124, &dbg))
++		return;
++	regmap_write(map, 0xf0, ctl & ~BIT(15));
++	regmap_write(map, 0xf0, ctl | BIT(15));
++	regmap_write(map, 0x124, (dbg & 0xffff80fc) | (id << 8) | 1);
++	regmap_write(map, 0x104, (misc & 0x00ffffff) | (3 << 24));
++	regmap_write(map, 0xf0, 0x9000);
++	regmap_write(map, 0xf0, 0x9010);
++	if (!regmap_read_poll_timeout(map, 0xf0, state, !(state & BIT(4)), 10, 10000) &&
++	    !regmap_read(map, 0xf4, &count))
++		dev_info(dev, "clock meter %u: %u kHz\n", id, (count & 65535) * 26000 / 1024 * 4);
++	regmap_write(map, 0xf0, ctl);
++	regmap_write(map, 0x104, misc);
++	regmap_write(map, 0x124, dbg);
++}
++
++int turner_check_receiver_clocks(struct device *dev, struct v4l2_subdev *sensor, struct turner_stream *stream)
++{
++	struct device_node *node;
++	struct regmap *maps[4];
++	u32 owned[ARRAY_SIZE(gates)] = {}, cfg;
++	unsigned int i;
++	int ret;
++
++	const struct gate *sequence[ARRAY_SIZE(gates)];
++	bool front = sensor && of_property_match_string(sensor->dev->of_node,
++				"sensor-names", "turnerov08f10front_mipi_raw") >= 0;
++
++	for (i = 0; i < ARRAY_SIZE(gates); i++)
++		sequence[i] = front && !strcmp(gates[i].name, "seninf2") ? &seninf0 : &gates[i];
++	node = of_find_compatible_node(NULL, NULL, "mediatek,mt6991-cksys_gp2");
++	if (!node)
++		return -ENODEV;
++	maps[TOP] = syscon_node_to_regmap(node);
++	maps[HWV] = syscon_regmap_lookup_by_phandle(node, "mm-hw-ccf-regmap");
++	of_node_put(node);
++	maps[VCORE] = syscon_regmap_lookup_by_compatible("mediatek,mt6991-cam_vcore_r1a");
++	maps[MAIN] = syscon_regmap_lookup_by_compatible("mediatek,mt6991-cam_main_r1a");
++	for (i = 0; i < ARRAY_SIZE(maps); i++)
++		if (IS_ERR(maps[i]))
++			return PTR_ERR(maps[i]);
++	ret = regmap_read(maps[TOP], 0x30, &cfg);
++	if (ret || !(cfg & BIT(7)))
++		return ret ?: -EBUSY;
++	ret = read_vmm_uv();
++	dev_info(dev, "CAM VMM selector %d uV (312 MHz OPP requires 575000 uV)\n", ret);
++	if (ret < 575000 || ret > 1193750)
++		return ret < 0 ? ret : -ERANGE;
++	ret = set_cam_parent(maps[TOP], 6);
++	if (ret) {
++		set_cam_parent(maps[TOP], cfg & 15);
++		return ret;
++	}
++	for (i = 0; i < ARRAY_SIZE(gates); i++) {
++		ret = apply_gate(maps, sequence[i], &owned[i]);
++		if (ret) {
++			dev_err(dev, "%s clock enable: %d\n", gates[i].name, ret);
++			i++;
++			goto unwind;
++		}
++	}
++	ret = read_camsv(dev);
++	if (!ret && !front)
++		ret = check_csi_mac(dev);
++	if (!ret && sensor) {
++		u32 vc;
++		measure_camera_clock(dev, maps[TOP], 3);
++		measure_camera_clock(dev, maps[TOP], 9);
++		if (front && !stream) {
++			ret = turner_front_packets(dev, sensor);
++			goto unwind;
++		}
++		ret = regmap_read(maps[MAIN], 0x594, &vc);
++		if (!ret) {
++			ret = regmap_write(maps[MAIN], 0x594, 0x37);
++			if (!ret)
++				ret = turner_sample_packets(dev, sensor, stream, front);
++			{
++				int err = regmap_write(maps[MAIN], 0x594, vc);
++
++				if (!ret)
++					ret = err;
++			}
++		}
++	}
++unwind:
++	while (i) {
++		int err;
++
++		i--;
++		err = release_gate(maps, sequence[i], owned[i]);
++		if (err) {
++			dev_err(dev, "%s clock release: %d\n", gates[i].name, err);
++			if (!ret)
++				ret = err;
++		}
++	}
++	{
++		int err = set_cam_parent(maps[TOP], cfg & 15);
++		if (!ret)
++			ret = err;
++	}
++	return ret;
++}
+diff --git a/drivers/media/platform/mediatek/turner/isp8/turner-receiver-clocks.h b/drivers/media/platform/mediatek/turner/isp8/turner-receiver-clocks.h
+new file mode 100644
+index 0000000..b634560
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/isp8/turner-receiver-clocks.h
+@@ -0,0 +1,15 @@
++// SPDX-License-Identifier: GPL-2.0-only
++struct turner_stream {
++	u16 *pixels;
++	unsigned int width, height;
++	void (*complete)(struct turner_stream *stream, const u8 *packed, unsigned int stride, u64 timestamp);
++};
++struct device;
++struct v4l2_subdev;
++int turner_front_packets(struct device *dev, struct v4l2_subdev *sensor);
++int turner_sample_packets(struct device *dev, struct v4l2_subdev *sensor, struct turner_stream *stream, bool front);
++int turner_check_receiver_clocks(struct device *dev, struct v4l2_subdev *sensor, struct turner_stream *stream);
++struct turner_still;
++int check_receiver_power(struct device *dev, struct v4l2_subdev *sensor, struct turner_stream *stream);
++struct turner_still *turner_still_register(struct device *dev, struct v4l2_subdev *sd, bool front);
++void turner_still_unregister(struct turner_still *still);
+diff --git a/drivers/media/platform/mediatek/turner/isp8/turner-seninf.c b/drivers/media/platform/mediatek/turner/isp8/turner-seninf.c
+new file mode 100644
+index 0000000..7f78892
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/isp8/turner-seninf.c
+@@ -0,0 +1,359 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Turner ISP8 receiver: bind the rear port's sensor through its firmware graph. */
++#include <linux/dma-mapping.h>
++#include <linux/iommu.h>
++#include <linux/of_platform.h>
++#include <linux/mfd/syscon.h>
++#include <linux/module.h>
++#include <linux/regmap.h>
++#include <linux/of_graph.h>
++#include <linux/platform_device.h>
++#include <linux/pm_domain.h>
++#include <linux/pm_runtime.h>
++#include <media/media-device.h>
++#include <media/v4l2-async.h>
++#include <media/v4l2-device.h>
++
++#include "turner-receiver-clocks.h"
++#include "turner-sv-dma.h"
++
++static bool verify_front_packets;
++module_param(verify_front_packets, bool, 0444);
++static bool verify_packets;
++module_param(verify_packets, bool, 0444);
++static bool verify_receiver_clocks;
++module_param(verify_receiver_clocks, bool, 0444);
++
++struct turner_capture {
++	struct turner_still *still[2];
++	struct media_device media;
++	struct v4l2_device v4l2;
++	struct v4l2_async_notifier notifier;
++};
++
++static bool verify_domains;
++module_param(verify_domains, bool, 0444);
++MODULE_PARM_DESC(verify_domains, "Test the receiver power domains during probe");
++
++static bool verify_port_clock;
++module_param(verify_port_clock, bool, 0444);
++MODULE_PARM_DESC(verify_port_clock, "Test the firmware-selected CSI port 2 clock while powered");
++
++static int check_port_clock(struct device *dev, struct regmap *top)
++{
++	struct device_node *node;
++	struct regmap *hwv;
++	u32 value, mask = BIT(23);
++	int ret, release;
++
++	node = of_find_compatible_node(NULL, NULL, "mediatek,mt6991-cksys_gp2");
++	if (!node)
++		return -ENODEV;
++	hwv = syscon_regmap_lookup_by_phandle(node, "mm-hw-ccf-regmap");
++	of_node_put(node);
++	if (IS_ERR(hwv))
++		return PTR_ERR(hwv);
++	ret = regmap_read(hwv, 0xf0, &value);
++	if (ret)
++		return ret;
++	/* Leave existing AP votes intact. */
++	if (value & mask)
++		return regmap_read_poll_timeout(top, 0x174, value, value & BIT(29), 5, 10000);
++	ret = regmap_write(hwv, 0xf0, mask);
++	if (ret)
++		return ret;
++	ret = regmap_read_poll_timeout(hwv, 0xf0, value, value & mask, 5, 10000);
++	if (!ret)
++		ret = regmap_read_poll_timeout(hwv, 0x2c78, value, value & mask, 5, 10000);
++	if (!ret)
++		ret = regmap_read_poll_timeout(top, 0x174, value, value & BIT(29), 5, 10000);
++	if (!ret)
++		dev_info(dev, "SENINF2 clock vote acknowledged, fence %#x\n", value);
++	release = regmap_write(hwv, 0xf4, mask);
++	if (!release)
++		release = regmap_read_poll_timeout(hwv, 0xf0, value, !(value & mask), 5, 10000);
++	if (!release)
++		release = regmap_read_poll_timeout(hwv, 0x2c78, value, value & mask, 5, 10000);
++	return ret ?: release;
++}
++
++static int read_source_muxes(struct device *dev)
++{
++	struct regmap *map;
++	unsigned int cfg0, cfg2, cfg5;
++	int ret;
++
++	map = syscon_regmap_lookup_by_compatible("mediatek,mt6991-cksys_gp2");
++	if (IS_ERR(map))
++		return PTR_ERR(map);
++	ret = regmap_read(map, 0x10, &cfg0);
++	if (!ret)
++		ret = regmap_read(map, 0x30, &cfg2);
++	if (!ret)
++		ret = regmap_read(map, 0x60, &cfg5);
++	if (!ret)
++		dev_info(dev, "CKSYS2 CFG0=%08x CFG2=%08x CFG5=%08x\n",
++			 cfg0, cfg2, cfg5);
++	if (!ret && verify_port_clock)
++		ret = check_port_clock(dev, map);
++	return ret;
++}
++
++static int receiver_power_locked(struct device *dev, struct v4l2_subdev *sensor, struct turner_stream *stream)
++{
++	struct dev_pm_domain_attach_data args = { .pd_flags = PD_FLAG_NO_DEV_LINK };
++	struct dev_pm_domain_list *list;
++	unsigned int i = 0;
++	int count, ret = 0;
++
++	count = dev_pm_domain_attach_list(dev, &args, &list);
++	if (count <= 0)
++		return count ?: -ENODEV;
++	if (count != 4) {
++		ret = -EINVAL;
++		goto detach;
++	}
++	for (; i < count; i++) {
++		ret = pm_runtime_resume_and_get(list->pd_devs[i]);
++		if (ret < 0)
++			break;
++		dev_info(dev, "resumed receiver power domain %u\n", i);
++	}
++	if (i == count)
++		ret = read_source_muxes(dev);
++	if (!ret && i == count && (verify_receiver_clocks || sensor))
++		ret = turner_check_receiver_clocks(dev, sensor, stream);
++	while (i) {
++		int err = pm_runtime_put_sync_suspend(list->pd_devs[--i]);
++
++		if (err < 0 && !ret)
++			ret = err;
++	}
++detach:
++	dev_pm_domain_detach_list(list);
++	return ret;
++}
++
++static DEFINE_MUTEX(receiver_lock);
++int check_receiver_power(struct device *dev, struct v4l2_subdev *sensor, struct turner_stream *stream)
++{
++	int ret;
++
++	if (stream) {
++		if (!mutex_trylock(&receiver_lock))
++			return -EBUSY;
++	} else if (mutex_lock_interruptible(&receiver_lock))
++		return -ERESTARTSYS;
++	ret = receiver_power_locked(dev, sensor, stream);
++	mutex_unlock(&receiver_lock);
++	return ret;
++}
++
++static bool verify_dma;
++module_param(verify_dma, bool, 0444);
++MODULE_PARM_DESC(verify_dma, "Check a frame-sized mapping on the ISP's shared DMA device");
++
++static int check_dma_mapping(struct device *dev)
++{
++	/* The ISP owns the SMMU stream. CAMSV's AXIDs identify its ports. */
++	struct device_node *isp, *shared;
++	struct platform_device *pdev;
++	struct iommu_domain *domain;
++	const size_t bytes = ALIGN(DIV_ROUND_UP(4208 * 10, 8), 64) * 3120;
++	dma_addr_t addr;
++	void *buf;
++	int ret = 0;
++
++	isp = of_find_compatible_node(NULL, NULL, "mediatek,mt6991-camisp");
++	if (!isp)
++		return -ENODEV;
++	shared = of_parse_phandle(isp, "mtk,smmu-shared", 0);
++	of_node_put(isp);
++	if (!shared)
++		return -ENODEV;
++	pdev = of_find_device_by_node(shared);
++	of_node_put(shared);
++	if (!pdev)
++		return -EPROBE_DEFER;
++	domain = iommu_get_domain_for_dev(&pdev->dev);
++	if (!domain || !(domain->type & __IOMMU_DOMAIN_DMA_API)) {
++		ret = -ENODEV;
++		goto put;
++	}
++	buf = dma_alloc_coherent(&pdev->dev, bytes, &addr, GFP_KERNEL);
++	if (!buf) {
++		ret = -ENOMEM;
++		goto put;
++	}
++	if (!iommu_iova_to_phys(domain, addr) ||
++	    !iommu_iova_to_phys(domain, addr + bytes - 1))
++		ret = -EFAULT;
++	else
++		dev_info(dev, "%s mapped %zu bytes, IOVA %pad, both ends translated\n",
++			 dev_name(&pdev->dev), bytes, &addr);
++	dma_free_coherent(&pdev->dev, bytes, buf, addr);
++put:
++	put_device(&pdev->dev);
++	return ret;
++}
++
++struct turner_connection {
++	struct v4l2_async_connection asc;
++	bool front;
++};
++
++static int sensor_bound(struct v4l2_async_notifier *notifier, struct v4l2_subdev *sd,
++			struct v4l2_async_connection *connection)
++{
++	struct turner_capture *cam = container_of(notifier, struct turner_capture, notifier);
++	struct v4l2_mbus_config bus = {};
++	struct v4l2_mbus_frame_desc desc = {};
++	int ret;
++
++	bool front = container_of(connection, struct turner_connection, asc)->front;
++	struct v4l2_subdev_format fmt = {
++		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
++		.format = { .width = front ? 3264 : TURNER_WIDTH, .height = front ? 2448 : TURNER_HEIGHT },
++	};
++
++	ret = v4l2_subdev_call_state_active(sd, pad, set_fmt, &fmt);
++	if (ret || fmt.format.width != (front ? 3264 : TURNER_WIDTH) ||
++	    fmt.format.height != (front ? 2448 : TURNER_HEIGHT))
++		return ret ?: -EINVAL;
++	ret = v4l2_subdev_call(sd, pad, get_mbus_config, 0, &bus);
++	if (!ret)
++		ret = v4l2_subdev_call(sd, pad, get_frame_desc, 0, &desc);
++	if (ret)
++		return ret;
++	if (bus.type != V4L2_MBUS_CSI2_DPHY || !bus.link_freq ||
++	    desc.type != V4L2_MBUS_FRAME_DESC_TYPE_CSI2 || desc.num_entries != 1)
++		return -EINVAL;
++	dev_info(notifier->v4l2_dev->dev, "%s: %u D-PHY lanes, %llu Hz, VC%u DT %#x\n",
++		 sd->name, bus.bus.mipi_csi2.num_data_lanes, bus.link_freq,
++		 desc.entry[0].bus.csi2.vc, desc.entry[0].bus.csi2.dt);
++	if (front) {
++		if (verify_front_packets) {
++			ret = check_receiver_power(notifier->v4l2_dev->dev, sd, NULL);
++			dev_info(notifier->v4l2_dev->dev, "front packet verification: %d\n", ret);
++		}
++	}
++	if (!front && verify_packets) {
++		ret = check_receiver_power(notifier->v4l2_dev->dev, sd, NULL);
++		dev_info(notifier->v4l2_dev->dev, "CSI2 packet trial result %d\n", ret);
++	}
++	cam->still[front] = turner_still_register(notifier->v4l2_dev->dev, sd, front);
++	if (IS_ERR(cam->still[front]))
++		return PTR_ERR(cam->still[front]);
++	return 0;
++}
++
++static void sensor_unbound(struct v4l2_async_notifier *nf, struct v4l2_subdev *sd,
++			   struct v4l2_async_connection *asc)
++{
++	struct turner_capture *cam = container_of(nf, struct turner_capture, notifier);
++
++	bool front = container_of(asc, struct turner_connection, asc)->front;
++
++	turner_still_unregister(cam->still[front]);
++	cam->still[front] = NULL;
++}
++
++static int graph_complete(struct v4l2_async_notifier *notifier)
++{
++	return v4l2_device_register_subdev_nodes(notifier->v4l2_dev);
++}
++static const struct v4l2_async_notifier_operations notifier_ops = {
++	.bound = sensor_bound, .unbind = sensor_unbound, .complete = graph_complete,
++};
++
++static int receiver_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct turner_capture *cam;
++	struct device_node *port, *ep, *front_ep;
++	struct turner_connection *connection;
++	int ret;
++
++	if (verify_dma) {
++		ret = check_dma_mapping(dev);
++		if (ret)
++			return dev_err_probe(dev, ret, "receiver DMA mapping test failed\n");
++	}
++	if (verify_domains || verify_port_clock || verify_receiver_clocks) {
++		ret = check_receiver_power(dev, NULL, NULL);
++		if (ret)
++			return dev_err_probe(dev, ret, "receiver power test failed\n");
++	}
++	cam = devm_kzalloc(dev, sizeof(*cam), GFP_KERNEL);
++	if (!cam)
++		return -ENOMEM;
++	port = of_get_child_by_name(dev->of_node, "seninf-csi-port-2");
++	if (!port)
++		return -ENODEV;
++	ep = of_graph_get_next_endpoint(port, NULL);
++	of_node_put(port);
++	if (!ep)
++		return -ENODEV;
++	strscpy(cam->media.model, "Turner ISP8", sizeof(cam->media.model));
++	cam->media.dev = dev;
++	media_device_init(&cam->media);
++	cam->v4l2.mdev = &cam->media;
++	ret = v4l2_device_register(dev, &cam->v4l2);
++	if (ret)
++		goto free_media;
++	ret = media_device_register(&cam->media);
++	if (ret)
++		goto free_v4l2;
++	v4l2_async_nf_init(&cam->notifier, &cam->v4l2);
++	cam->notifier.ops = &notifier_ops;
++	connection = v4l2_async_nf_add_fwnode_remote(&cam->notifier, of_fwnode_handle(ep),
++						     struct turner_connection);
++	if (!IS_ERR(connection)) {
++		port = of_get_child_by_name(dev->of_node, "seninf-csi-port-0");
++		front_ep = port ? of_graph_get_next_endpoint(port, NULL) : NULL;
++		of_node_put(port);
++		if (front_ep) {
++			connection = v4l2_async_nf_add_fwnode_remote(&cam->notifier,
++					of_fwnode_handle(front_ep), struct turner_connection);
++			if (!IS_ERR(connection))
++				connection->front = true;
++			of_node_put(front_ep);
++		}
++	}
++	ret = IS_ERR(connection) ? PTR_ERR(connection) : v4l2_async_nf_register(&cam->notifier);
++	if (ret)
++		goto cleanup_nf;
++	platform_set_drvdata(pdev, cam);
++	of_node_put(ep);
++	return 0;
++cleanup_nf:
++	v4l2_async_nf_cleanup(&cam->notifier);
++	media_device_unregister(&cam->media);
++free_v4l2:
++	v4l2_device_unregister(&cam->v4l2);
++free_media:
++	media_device_cleanup(&cam->media);
++	of_node_put(ep);
++	return ret;
++}
++
++static void receiver_remove(struct platform_device *pdev)
++{
++	struct turner_capture *cam = platform_get_drvdata(pdev);
++
++	v4l2_async_nf_unregister(&cam->notifier);
++	v4l2_async_nf_cleanup(&cam->notifier);
++	media_device_unregister(&cam->media);
++	v4l2_device_unregister(&cam->v4l2);
++	media_device_cleanup(&cam->media);
++}
++static const struct of_device_id matches[] = {
++	{ .compatible = "mediatek,seninf-core" }, {}
++};
++static struct platform_driver receiver = {
++	.probe = receiver_probe, .remove = receiver_remove,
++	.driver = { .name = "turner-seninf", .of_match_table = matches },
++};
++module_platform_driver(receiver);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("Turner ISP8 rear camera media graph");
+diff --git a/drivers/media/platform/mediatek/turner/isp8/turner-still.c b/drivers/media/platform/mediatek/turner/isp8/turner-still.c
+new file mode 100644
+index 0000000..90bc4c5
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/isp8/turner-still.c
+@@ -0,0 +1,487 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Queue full-resolution Bayer frames for read() and mmap streaming. */
++#include <linux/module.h>
++#include <linux/unaligned.h>
++#include <linux/workqueue.h>
++#include <media/videobuf2-vmalloc.h>
++#include <media/videobuf2-v4l2.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-fh.h>
++#include <media/v4l2-ioctl.h>
++#include "turner-receiver-clocks.h"
++#include "turner-sv-dma.h"
++
++struct turner_still {
++	struct v4l2_device v4l2;
++	struct video_device video;
++	unsigned int width, height, bytes;
++	u32 fourcc;
++
++	struct mutex lock;
++	struct v4l2_subdev *sensor;
++	struct vb2_queue queue;
++	struct list_head pending;
++	spinlock_t pending_lock;
++	struct work_struct capture;
++	bool streaming, front;
++	wait_queue_head_t available;
++	struct turner_stream stream;
++	struct turner_buffer *active;
++	u32 sequence;
++};
++
++struct turner_buffer {
++	struct vb2_v4l2_buffer vb;
++	struct list_head entry;
++};
++
++static int queue_setup(struct vb2_queue *q, unsigned int *nbuf,
++		       unsigned int *planes, unsigned int sizes[],
++		       struct device *alloc_devs[])
++{
++	struct turner_still *st = vb2_get_drv_priv(q);
++
++	if (*planes)
++		return *planes == 1 && sizes[0] >= st->bytes ? 0 : -EINVAL;
++	*planes = 1;
++	sizes[0] = st->bytes;
++	return 0;
++}
++
++static int buffer_prepare(struct vb2_buffer *vb)
++{
++	struct turner_still *st = vb2_get_drv_priv(vb->vb2_queue);
++
++	return vb2_plane_size(vb, 0) >= st->bytes ? 0 : -EINVAL;
++}
++
++static void buffer_queue(struct vb2_buffer *vb)
++{
++	struct turner_still *st = vb2_get_drv_priv(vb->vb2_queue);
++	struct turner_buffer *buf = container_of(to_vb2_v4l2_buffer(vb),
++						 struct turner_buffer, vb);
++
++	spin_lock(&st->pending_lock);
++	list_add_tail(&buf->entry, &st->pending);
++	wake_up(&st->available);
++	spin_unlock(&st->pending_lock);
++}
++
++static void next_buffer(struct turner_still *st)
++{
++	struct turner_buffer *buf = NULL;
++
++	wait_event(st->available, !READ_ONCE(st->streaming) ||
++		   !list_empty_careful(&st->pending));
++	spin_lock(&st->pending_lock);
++	if (st->streaming && !list_empty(&st->pending)) {
++		buf = list_first_entry(&st->pending, struct turner_buffer, entry);
++		list_del_init(&buf->entry);
++	}
++	spin_unlock(&st->pending_lock);
++	st->active = buf;
++	st->stream.pixels = buf ? vb2_plane_vaddr(&buf->vb.vb2_buf, 0) : NULL;
++}
++
++/* The MT6991 writer packs four little-endian ten-bit samples into five bytes. */
++static void unpack_bayer(struct turner_still *st, const u8 *packed, unsigned int stride)
++{
++	u16 *dst = st->stream.pixels;
++	u8 *gray = (u8 *)dst;
++	unsigned int x, y;
++
++	for (y = 0; y < st->height; y++) {
++		const u8 *p = packed + y * stride;
++
++		for (x = 0; x < st->width; x += 4, p += 5) {
++			u32 low = get_unaligned_le32(p);
++			u16 last = (low >> 30) | (p[4] << 2);
++
++			if (st->fourcc == V4L2_PIX_FMT_SBGGR8) {
++				*gray++ = low >> 2;
++				*gray++ = low >> 12;
++				*gray++ = low >> 22;
++				*gray++ = last >> 2;
++			} else {
++				*dst++ = low & 1023;
++				*dst++ = (low >> 10) & 1023;
++				*dst++ = (low >> 20) & 1023;
++				*dst++ = last;
++			}
++		}
++	}
++}
++
++/* Ten-bit black level 64, followed by the sRGB transfer function. */
++static const u8 gamma_srgb[] = {
++	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++	0, 13, 23, 29, 35, 40, 44, 48, 51, 55, 58, 61, 63, 66, 68, 71,
++	73, 75, 78, 80, 82, 84, 86, 87, 89, 91, 93, 94, 96, 98, 99, 101,
++	102, 104, 105, 107, 108, 110, 111, 112, 114, 115, 116, 118, 119, 120, 121, 123,
++	124, 125, 126, 127, 128, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
++	141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156,
++	156, 157, 158, 159, 160, 161, 162, 163, 163, 164, 165, 166, 167, 168, 168, 169,
++	170, 171, 172, 172, 173, 174, 175, 175, 176, 177, 178, 178, 179, 180, 181, 181,
++	182, 183, 184, 184, 185, 186, 186, 187, 188, 189, 189, 190, 191, 191, 192, 193,
++	193, 194, 195, 195, 196, 197, 197, 198, 199, 199, 200, 201, 201, 202, 203, 203,
++	204, 204, 205, 206, 206, 207, 208, 208, 209, 209, 210, 211, 211, 212, 212, 213,
++	214, 214, 215, 215, 216, 217, 217, 218, 218, 219, 219, 220, 221, 221, 222, 222,
++	223, 223, 224, 224, 225, 226, 226, 227, 227, 228, 228, 229, 229, 230, 230, 231,
++	232, 232, 233, 233, 234, 234, 235, 235, 236, 236, 237, 237, 238, 238, 239, 239,
++	240, 240, 241, 241, 242, 242, 243, 243, 244, 244, 245, 245, 246, 246, 247, 247,
++	248, 248, 249, 249, 250, 250, 251, 251, 252, 252, 253, 253, 254, 254, 255, 255,
++};
++
++struct rgb { int r, g, b; };
++
++static struct rgb read_cell(const u8 *row, unsigned int stride, unsigned int x)
++{
++	unsigned int shift = (x & 2) * 2;
++	const u8 *p = row + x * 5 / 4;
++	u32 bg = get_unaligned_le16(p) >> shift;
++	u32 gr = get_unaligned_le16(p + stride) >> shift;
++	unsigned int next_shift = shift + 2;
++
++	return (struct rgb) {
++		.r = gamma_srgb[((get_unaligned_le16(p + stride + 1) >> next_shift) & 1023) >> 2],
++		.g = gamma_srgb[((gr & 1023) + ((get_unaligned_le16(p + 1) >> next_shift) & 1023)) >> 3],
++		.b = gamma_srgb[(bg & 1023) >> 2],
++	};
++}
++
++static u8 luma(struct rgb c)
++{
++	return 16 + ((66 * c.r + 129 * c.g + 25 * c.b + 128) >> 8);
++}
++
++/* Sample complete BG/GR cells from a centered crop, preserving pixel aspect. */
++static void output_yuyv(struct turner_still *st, const u8 *packed, unsigned int stride)
++{
++	unsigned int sw = st->stream.width, sh = st->stream.height;
++	unsigned int cw = min(sw, sh * st->width / st->height) & ~1U;
++	unsigned int ch = min(sh, sw * st->height / st->width) & ~1U;
++	unsigned int step = (cw << 16) / st->width;
++	unsigned int x, y;
++	u8 *out = (u8 *)st->stream.pixels;
++
++	for (y = 0; y < st->height; y++) {
++		unsigned int sy = ((sh - ch) / 2 + (2 * y + 1) * ch / (2 * st->height)) & ~1U;
++		const u8 *row = packed + sy * stride;
++		unsigned int pos = ((sw - cw) / 2 << 16) + step / 2;
++
++		for (x = 0; x < st->width; x += 2, pos += 2 * step) {
++			struct rgb a = read_cell(row, stride, (pos >> 16) & ~1U);
++			struct rgb b = read_cell(row, stride, ((pos + step) >> 16) & ~1U);
++			int r = a.r + b.r, g = a.g + b.g, blue = a.b + b.b;
++
++			*out++ = luma(a);
++			*out++ = 128 + ((-38 * r - 74 * g + 112 * blue + 256) >> 9);
++			*out++ = luma(b);
++			*out++ = 128 + ((112 * r - 94 * g - 18 * blue + 256) >> 9);
++		}
++	}
++}
++
++static void frame_complete(struct turner_stream *stream, const u8 *packed,
++			   unsigned int stride, u64 timestamp)
++{
++	struct turner_still *st = container_of(stream, struct turner_still, stream);
++	struct vb2_v4l2_buffer *vb = &st->active->vb;
++
++	if (st->fourcc == V4L2_PIX_FMT_YUYV)
++		output_yuyv(st, packed, stride);
++	else
++		unpack_bayer(st, packed, stride);
++	vb->vb2_buf.timestamp = timestamp;
++	vb->sequence = st->sequence++;
++	vb->field = V4L2_FIELD_NONE;
++	vb2_set_plane_payload(&vb->vb2_buf, 0, st->bytes);
++	vb2_buffer_done(&vb->vb2_buf, VB2_BUF_STATE_DONE);
++	next_buffer(st);
++}
++
++static void capture_work(struct work_struct *work)
++{
++	struct turner_still *st = container_of(work, struct turner_still, capture);
++	int ret;
++
++	next_buffer(st);
++	if (!st->active)
++		return;
++	ret = check_receiver_power(st->video.dev_parent, st->sensor, &st->stream);
++	if (ret) {
++		dev_warn(st->video.dev_parent, "capture stream failed: %d\n", ret);
++		vb2_queue_error(&st->queue);
++	}
++	if (st->active) {
++		vb2_buffer_done(&st->active->vb.vb2_buf, VB2_BUF_STATE_ERROR);
++		st->active = NULL;
++	}
++}
++
++static int start_streaming(struct vb2_queue *q, unsigned int count)
++{
++	struct turner_still *st = vb2_get_drv_priv(q);
++
++	if (st->fourcc == V4L2_PIX_FMT_YUYV) {
++		st->stream.width = st->front ? 3264 : TURNER_WIDTH;
++		st->stream.height = st->front ? 2448 : TURNER_HEIGHT;
++	} else {
++		st->stream.width = st->width;
++		st->stream.height = st->height;
++	}
++	st->sequence = 0;
++	spin_lock(&st->pending_lock);
++	st->streaming = true;
++	schedule_work(&st->capture);
++	spin_unlock(&st->pending_lock);
++	return 0;
++}
++
++static void stop_streaming(struct vb2_queue *q)
++{
++	struct turner_still *st = vb2_get_drv_priv(q);
++	struct turner_buffer *buf, *tmp;
++
++	spin_lock(&st->pending_lock);
++	st->streaming = false;
++	spin_unlock(&st->pending_lock);
++	wake_up(&st->available);
++	cancel_work_sync(&st->capture);
++	list_for_each_entry_safe(buf, tmp, &st->pending, entry) {
++		list_del(&buf->entry);
++		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
++	}
++}
++
++static const struct vb2_ops queue_ops = {
++	.queue_setup = queue_setup, .buf_prepare = buffer_prepare, .buf_queue = buffer_queue,
++	.start_streaming = start_streaming, .stop_streaming = stop_streaming,
++};
++
++static int still_cap(struct file *f, void *fh, struct v4l2_capability *cap)
++{
++	strscpy(cap->driver, "turner-camsv", sizeof(cap->driver));
++	strscpy(cap->card, video_devdata(f)->name, sizeof(cap->card));
++	snprintf(cap->bus_info, sizeof(cap->bus_info), "platform:turner-camsv-%s",
++		 ((struct turner_still *)video_drvdata(f))->front ? "front" : "rear");
++	return 0;
++}
++static int enum_input(struct file *f, void *fh, struct v4l2_input *input)
++{
++	if (input->index)
++		return -EINVAL;
++	strscpy(input->name, video_devdata(f)->name, sizeof(input->name));
++	input->type = V4L2_INPUT_TYPE_CAMERA;
++	return 0;
++}
++
++static int get_input(struct file *f, void *fh, unsigned int *input)
++{
++	*input = 0;
++	return 0;
++}
++
++static int set_input(struct file *f, void *fh, unsigned int input)
++{
++	return input ? -EINVAL : 0;
++}
++
++static const u32 formats[] = { V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_SBGGR8, V4L2_PIX_FMT_SBGGR10 };
++static const struct v4l2_frmsize_discrete color_sizes[] = { {640, 480}, {1280, 720} };
++
++static int still_enum(struct file *f, void *fh, struct v4l2_fmtdesc *fmt)
++{
++	if (fmt->index >= ARRAY_SIZE(formats))
++		return -EINVAL;
++	fmt->pixelformat = formats[fmt->index];
++	if (fmt->pixelformat == V4L2_PIX_FMT_YUYV)
++		fmt->flags |= V4L2_FMT_FLAG_EMULATED;
++	return 0;
++}
++
++static void describe(struct v4l2_pix_format *pix, u32 code, unsigned int w, unsigned int h)
++{
++	unsigned int stride = w * (code == V4L2_PIX_FMT_SBGGR8 ? 1 : 2);
++
++	*pix = (struct v4l2_pix_format) {
++		.width = w, .height = h, .pixelformat = code, .field = V4L2_FIELD_NONE,
++		.bytesperline = stride, .sizeimage = stride * h,
++		.colorspace = code == V4L2_PIX_FMT_YUYV ? V4L2_COLORSPACE_SRGB : V4L2_COLORSPACE_RAW,
++	};
++	if (code == V4L2_PIX_FMT_YUYV) {
++		pix->ycbcr_enc = V4L2_YCBCR_ENC_601;
++		pix->quantization = V4L2_QUANTIZATION_LIM_RANGE;
++		pix->xfer_func = V4L2_XFER_FUNC_SRGB;
++	}
++}
++
++static int still_fmt(struct file *f, void *fh, struct v4l2_format *fmt)
++{
++	struct turner_still *st = video_drvdata(f);
++
++	describe(&fmt->fmt.pix, st->fourcc, st->width, st->height);
++	return 0;
++}
++
++static int try_format(struct file *f, void *fh, struct v4l2_format *fmt)
++{
++	struct turner_still *st = video_drvdata(f);
++	struct v4l2_pix_format *pix = &fmt->fmt.pix;
++	const struct v4l2_frmsize_discrete *sz;
++	bool binned = pix->width <= 2104;
++
++	if (pix->pixelformat == V4L2_PIX_FMT_SBGGR8 || pix->pixelformat == V4L2_PIX_FMT_SBGGR10)
++		describe(pix, pix->pixelformat, st->front ? 3264 : binned ? 2104 : TURNER_WIDTH,
++			 st->front ? 2448 : binned ? 1184 : TURNER_HEIGHT);
++	else {
++		sz = v4l2_find_nearest_size(color_sizes, ARRAY_SIZE(color_sizes), width, height,
++					    pix->width, pix->height);
++		describe(pix, V4L2_PIX_FMT_YUYV, sz->width, sz->height);
++	}
++	return 0;
++}
++
++static int frame_sizes(struct file *f, void *fh, struct v4l2_frmsizeenum *sz)
++{
++	struct turner_still *st = video_drvdata(f);
++
++	sz->type = V4L2_FRMSIZE_TYPE_DISCRETE;
++	if (sz->pixel_format == V4L2_PIX_FMT_YUYV && sz->index < ARRAY_SIZE(color_sizes)) {
++		sz->discrete = color_sizes[sz->index];
++		return 0;
++	}
++	if ((sz->pixel_format != V4L2_PIX_FMT_SBGGR10 && sz->pixel_format != V4L2_PIX_FMT_SBGGR8) ||
++	    sz->index > (st->front ? 0 : 1))
++		return -EINVAL;
++	sz->discrete.width = st->front ? 3264 : sz->index ? 2104 : TURNER_WIDTH;
++	sz->discrete.height = st->front ? 2448 : sz->index ? 1184 : TURNER_HEIGHT;
++	return 0;
++}
++
++static int intervals(struct file *f, void *fh, struct v4l2_frmivalenum *iv)
++{
++	struct v4l2_frmsizeenum sz = { .pixel_format = iv->pixel_format };
++
++	if (iv->index)
++		return -EINVAL;
++	while (!frame_sizes(f, fh, &sz)) {
++		if (sz.discrete.width == iv->width && sz.discrete.height == iv->height) {
++			iv->type = V4L2_FRMIVAL_TYPE_DISCRETE;
++			iv->discrete = (struct v4l2_fract){ 1, iv->width == 2104 ? 60 : 30 };
++			return 0;
++		}
++		sz.index++;
++	}
++	return -EINVAL;
++}
++
++static int parameters(struct file *f, void *fh, struct v4l2_streamparm *parm)
++{
++	struct turner_still *st = video_drvdata(f);
++
++	parm->parm.capture = (struct v4l2_captureparm) {
++		.capability = V4L2_CAP_TIMEPERFRAME,
++		.timeperframe = { 1, st->width == 2104 ? 60 : 30 },
++		.readbuffers = 2,
++	};
++	return 0;
++}
++
++static int set_format(struct file *f, void *fh, struct v4l2_format *fmt)
++{
++	struct turner_still *st = video_drvdata(f);
++
++	if (vb2_is_busy(&st->queue))
++		return -EBUSY;
++	try_format(f, fh, fmt);
++	st->fourcc = fmt->fmt.pix.pixelformat;
++	st->width = fmt->fmt.pix.width;
++	st->height = fmt->fmt.pix.height;
++	st->bytes = fmt->fmt.pix.sizeimage;
++	return 0;
++}
++
++static const struct v4l2_ioctl_ops ioctls = {
++	.vidioc_reqbufs = vb2_ioctl_reqbufs, .vidioc_querybuf = vb2_ioctl_querybuf,
++	.vidioc_qbuf = vb2_ioctl_qbuf, .vidioc_dqbuf = vb2_ioctl_dqbuf,
++	.vidioc_streamon = vb2_ioctl_streamon, .vidioc_streamoff = vb2_ioctl_streamoff,
++	.vidioc_enum_frameintervals = intervals, .vidioc_g_parm = parameters, .vidioc_s_parm = parameters,
++	.vidioc_enum_input = enum_input, .vidioc_g_input = get_input, .vidioc_s_input = set_input,
++	.vidioc_querycap = still_cap, .vidioc_enum_fmt_vid_cap = still_enum,
++	.vidioc_g_fmt_vid_cap = still_fmt, .vidioc_s_fmt_vid_cap = set_format,
++	.vidioc_try_fmt_vid_cap = try_format, .vidioc_enum_framesizes = frame_sizes,
++};
++static const struct v4l2_file_operations fops = {
++	.owner = THIS_MODULE, .open = v4l2_fh_open, .release = vb2_fop_release,
++	.poll = vb2_fop_poll, .mmap = vb2_fop_mmap,
++	.read = vb2_fop_read, .unlocked_ioctl = video_ioctl2,
++};
++static void still_release(struct v4l2_device *v4l2)
++{
++	struct turner_still *st = container_of(v4l2, struct turner_still, v4l2);
++
++	kfree(st);
++}
++struct turner_still *turner_still_register(struct device *dev, struct v4l2_subdev *sd, bool front)
++{
++	struct turner_still *st = kzalloc(sizeof(*st), GFP_KERNEL);
++	int ret;
++
++	if (!st)
++		return ERR_PTR(-ENOMEM);
++	/* A separate v4l2_device keeps open descriptors valid across unbind. */
++	strscpy(st->v4l2.name, "turner-still", sizeof(st->v4l2.name));
++	ret = v4l2_device_register(NULL, &st->v4l2);
++	if (ret) {
++		kfree(st);
++		return ERR_PTR(ret);
++	}
++	st->v4l2.release = still_release;
++	st->video.dev_parent = dev;
++	st->video.v4l2_dev = &st->v4l2;
++	st->video.release = video_device_release_empty;
++	st->video.device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_READWRITE | V4L2_CAP_STREAMING;
++	st->video.fops = &fops;
++	st->video.ioctl_ops = &ioctls;
++	st->video.lock = &st->lock;
++	mutex_init(&st->lock);
++	st->fourcc = V4L2_PIX_FMT_YUYV;
++	st->sensor = sd;
++	st->front = front;
++	st->width = 1280;
++	st->height = 720;
++	st->bytes = st->width * st->height * sizeof(u16);
++	strscpy(st->video.name, front ? "Turner OV08F10 front" : "Turner OV13B10 rear", sizeof(st->video.name));
++	video_set_drvdata(&st->video, st);
++	INIT_LIST_HEAD(&st->pending);
++	spin_lock_init(&st->pending_lock);
++	init_waitqueue_head(&st->available);
++	st->stream.complete = frame_complete;
++	INIT_WORK(&st->capture, capture_work);
++	st->queue.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
++	st->queue.io_modes = VB2_MMAP | VB2_READ;
++	st->queue.drv_priv = st;
++	st->queue.ops = &queue_ops;
++	st->queue.mem_ops = &vb2_vmalloc_memops;
++	st->queue.buf_struct_size = sizeof(struct turner_buffer);
++	st->queue.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
++	st->queue.lock = &st->lock;
++	st->queue.dev = dev;
++	st->video.queue = &st->queue;
++	ret = vb2_queue_init(&st->queue);
++	if (!ret)
++		ret = video_register_device(&st->video, VFL_TYPE_VIDEO, front ? 1 : 0);
++	if (ret) {
++		v4l2_device_unregister(&st->v4l2);
++		v4l2_device_put(&st->v4l2);
++		return ERR_PTR(ret);
++	}
++	return st;
++}
++void turner_still_unregister(struct turner_still *st)
++{
++	vb2_video_unregister_device(&st->video);
++	v4l2_device_unregister(&st->v4l2);
++	v4l2_device_put(&st->v4l2);
++}
+diff --git a/drivers/media/platform/mediatek/turner/isp8/turner-sv-dma.c b/drivers/media/platform/mediatek/turner/isp8/turner-sv-dma.c
+new file mode 100644
+index 0000000..741d7fa
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/isp8/turner-sv-dma.c
+@@ -0,0 +1,99 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/device.h>
++#include <linux/dma-mapping.h>
++#include <linux/iommu.h>
++#include <linux/iopoll.h>
++#include <linux/of_platform.h>
++#include <linux/platform_device.h>
++#include "turner-sv-dma.h"
++
++int turner_image_alloc(struct turner_image *image)
++{
++	struct device_node *isp, *shared;
++	struct platform_device *pdev;
++	struct iommu_domain *domain;
++	int ret = -ENODEV;
++
++	isp = of_find_compatible_node(NULL, NULL, "mediatek,mt6991-camisp");
++	if (!isp)
++		return -ENODEV;
++	shared = of_parse_phandle(isp, "mtk,smmu-shared", 0);
++	of_node_put(isp);
++	if (!shared)
++		return -ENODEV;
++	pdev = of_find_device_by_node(shared);
++	of_node_put(shared);
++	if (!pdev)
++		return -EPROBE_DEFER;
++	image->dev = &pdev->dev;
++	domain = iommu_get_domain_for_dev(image->dev);
++	if (!domain || !(domain->type & __IOMMU_DOMAIN_DMA_API))
++		goto put;
++	image->data = dma_alloc_coherent(image->dev, (image->stride * image->height),
++					 &image->addr, GFP_KERNEL);
++	if (!image->data) {
++		ret = -ENOMEM;
++		goto put;
++	}
++	if (!iommu_iova_to_phys(domain, image->addr) ||
++	    !iommu_iova_to_phys(domain, image->addr + (image->stride * image->height) - 1)) {
++		turner_image_free(image);
++		return -EFAULT;
++	}
++	memset(image->data, 0xa5, (image->stride * image->height));
++	return 0;
++put:
++	put_device(image->dev);
++	return ret;
++}
++
++void turner_image_free(struct turner_image *image)
++{
++	dma_free_coherent(image->dev, (image->stride * image->height), image->data, image->addr);
++	put_device(image->dev);
++	image->data = NULL;
++}
++
++void turner_sv_arm(void __iomem *sv, void __iomem *dma, struct turner_image *image)
++{
++	/* One CAMSV tag, packed Bayer10, no metadata plane or compression. */
++	writel(0x8000, sv + 0x540); /* FBC enable */
++	writel((image->stride << 16) | 16, dma + 0x210);
++	writel(16, dma + 0xa10);
++	writel(lower_32_bits(image->addr), dma + 0x200);
++	writel(upper_32_bits(image->addr), dma + 0x204);
++	writel(0, dma + 0x218);
++	writel(0, dma + 0x21c);
++	writel(0, dma + 0x220);
++	writel(0, dma + 0x224);
++	writel(0x101, dma + 0xf30);
++	dma_wmb();
++	writel(0x8080, sv + 0x540); /* enqueue exactly one address */
++	writel(1, sv + 0x044);
++	writel(1, sv + 0x040);
++}
++
++int turner_sv_drain(void __iomem *sv, void __iomem *dma)
++{
++	u32 value;
++	int ret;
++
++	writel(readl(sv + 0x140) | BIT(11), sv + 0x140);
++	writel(0, sv + 0x148);
++	writel(readl(sv + 0x14c) | BIT(8), sv + 0x14c);
++	writel(readl(sv + 0x14c) & ~BIT(8), sv + 0x14c);
++	writel(readl(sv + 0x140) & ~BIT(0), sv + 0x140);
++	writel(1, sv + 0x7c);
++	writel(0, dma + 0x20);
++	writel(1, dma + 0x20);
++	ret = readl_poll_timeout(dma + 0x20, value, value & 2, 5, 100000);
++	if (ret)
++		return ret;
++	writel(1, sv + 0x1d0);
++	writel(0, dma + 0x20);
++	writel(0, sv + 0x1d0);
++	writel(0, sv + 0x40);
++	writel(0, sv + 0x44);
++	writel(0, sv + 0x7c);
++	return 0;
++}
+diff --git a/drivers/media/platform/mediatek/turner/isp8/turner-sv-dma.h b/drivers/media/platform/mediatek/turner/isp8/turner-sv-dma.h
+new file mode 100644
+index 0000000..ccb1a27
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/isp8/turner-sv-dma.h
+@@ -0,0 +1,16 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/types.h>
++#define TURNER_WIDTH 4208U
++#define TURNER_HEIGHT 3120U
++#define TURNER_IMAGE_STRIDE ALIGN(TURNER_WIDTH * 10 / 8, 64)
++#define TURNER_IMAGE_SIZE (TURNER_IMAGE_STRIDE * TURNER_HEIGHT)
++struct turner_image {
++	unsigned int stride, height;
++	struct device *dev;
++	void *data;
++	dma_addr_t addr;
++};
++int turner_image_alloc(struct turner_image *image);
++void turner_image_free(struct turner_image *image);
++void turner_sv_arm(void __iomem *sv, void __iomem *dma, struct turner_image *image);
++int turner_sv_drain(void __iomem *sv, void __iomem *dma);
+diff --git a/drivers/media/platform/mediatek/turner/rear/drive-fix.c b/drivers/media/platform/mediatek/turner/rear/drive-fix.c
+new file mode 100644
+index 0000000..1e79b8a
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/rear/drive-fix.c
+@@ -0,0 +1,51 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/module.h>
++#include <linux/of.h>
++static struct of_changeset pins;
++static int __init setup(void)
++{
++	static const u32 raw[] = { 1, 0, 1, 2, 3, 0, 1 };
++	struct device_node *sensor, *state, *group;
++	struct property *prop;
++	int ret = 0;
++	u32 val;
++	unsigned int i;
++	char key[16];
++
++	sensor = of_find_node_by_path("/soc/i2c@13bb0000/sensor0@10");
++	if (!sensor)
++		return -ENODEV;
++	of_changeset_init(&pins);
++	for (i = 0; i < ARRAY_SIZE(raw); i++) {
++		snprintf(key, sizeof(key), "pinctrl-%u", i);
++		state = of_parse_phandle(sensor, key, 0);
++		group = of_get_child_by_name(state, "pins-cmd-dat");
++		of_node_put(state);
++		if (!group) { ret = -EINVAL; break; }
++		prop = of_find_property(group, "drive-strength", NULL);
++		if (!prop || of_property_read_u32(group, "drive-strength", &val) || val != raw[i])
++			ret = -EINVAL;
++		else
++			ret = of_changeset_remove_property(&pins, group, prop);
++		if (!ret)
++			ret = of_changeset_add_prop_u32(&pins, group, "drive-strength", (val + 1) * 2);
++		of_node_put(group);
++		if (ret)
++			break;
++	}
++	of_node_put(sensor);
++	if (!ret)
++		ret = of_changeset_apply(&pins);
++	if (ret)
++		of_changeset_destroy(&pins);
++	return ret;
++}
++static void __exit cleanup(void)
++{
++	of_changeset_revert(&pins);
++	of_changeset_destroy(&pins);
++}
++module_init(setup);
++module_exit(cleanup);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("Apply rear camera pin drive units to running Turner DT");
+diff --git a/drivers/media/platform/mediatek/turner/rear/live-camtg3.h b/drivers/media/platform/mediatek/turner/rear/live-camtg3.h
+new file mode 100644
+index 0000000..cb87ea6
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/rear/live-camtg3.h
+@@ -0,0 +1,76 @@
++#include "clk-mtk.h"
++#include "clk-mux.h"
++
++static const char * const tg3_parents[] = {
++	"clk26m", "univpll_192m_d32", "univpll_192m_d16", "clk26m_d2",
++	"osc_d40", "osc_d32", "univpll_192m_d10", "univpll_192m_d8",
++	"univpll_d6_d16", "osc_d20", "tvdpll1_d16", "univpll_d6_d8",
++};
++static const struct mtk_mux tg3[] = {
++	MUX_GATE_HWV_FENC_CLR_SET_UPD(0, "turner_camtg3", tg3_parents,
++		0x50, 0x54, 0x58, 0x2c24, 0x48, 0x4c,
++		24, 4, 31, 0x4, 19, 0x39c, 12),
++};
++static DEFINE_SPINLOCK(tg3_lock);
++
++static void unregister_tg3(void *data)
++{
++	mtk_clk_unregister_muxes(tg3, ARRAY_SIZE(tg3), data);
++}
++
++static struct clk *live_camtg3(struct device *dev)
++{
++	struct of_phandle_args spec;
++	struct of_changeset cs;
++	struct clk_hw_onecell_data *data;
++	struct clk_hw *factor;
++	struct clk *parent, *mclk;
++	u32 voter;
++	int ret;
++
++	ret = of_parse_phandle_with_args(dev->of_node, "clocks", "#clock-cells", 8, &spec);
++	if (ret)
++		return ERR_PTR(ret);
++	if (spec.args_count != 1 || spec.args[0] != 21 ||
++	    !of_device_is_compatible(spec.np, "mediatek,mt6991-vlp_cksys")) {
++		ret = -EINVAL;
++		goto put;
++	}
++	ret = of_property_read_u32(spec.np, "hw-voter-regmap", &voter);
++	if (ret)
++		goto put;
++	data = mtk_devm_alloc_clk_data(dev, 1);
++	if (!data) {
++		ret = -ENOMEM;
++		goto put;
++	}
++	factor = devm_clk_hw_register_fixed_factor(dev, "univpll_192m_d8",
++		"univpll_192m", 0, 1, 8);
++	if (IS_ERR(factor)) {
++		ret = PTR_ERR(factor);
++		goto put;
++	}
++	of_changeset_init(&cs);
++	ret = of_changeset_add_prop_u32(&cs, spec.np, "mediatek,hardware-voter", voter);
++	if (!ret)
++		ret = of_changeset_apply(&cs);
++	if (!ret) {
++		ret = mtk_clk_register_muxes(dev, tg3, ARRAY_SIZE(tg3), spec.np, &tg3_lock, data);
++		of_changeset_revert(&cs);
++	}
++	of_changeset_destroy(&cs);
++	if (ret)
++		goto put;
++	ret = devm_add_action_or_reset(dev, unregister_tg3, data);
++	if (ret)
++		goto put;
++	mclk = devm_clk_hw_get_clk(dev, data->hws[0], NULL);
++	parent = devm_clk_hw_get_clk(dev, factor, NULL);
++	if (IS_ERR(mclk) || IS_ERR(parent))
++		ret = IS_ERR(mclk) ? PTR_ERR(mclk) : PTR_ERR(parent);
++	else
++		ret = clk_set_parent(mclk, parent);
++put:
++	of_node_put(spec.np);
++	return ret ? ERR_PTR(ret) : mclk;
++}
+diff --git a/drivers/media/platform/mediatek/turner/rear/mode-header.py b/drivers/media/platform/mediatek/turner/rear/mode-header.py
+new file mode 100644
+index 0000000..77e909a
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/rear/mode-header.py
+@@ -0,0 +1,17 @@
++"""Convert the two ordered vendor register lists into a regmap sequence."""
++import csv
++import sys
++from pathlib import Path
++
++root = Path(sys.argv[1])
++for stage in ("init", "preview", "custom1"):
++    print(f"static const struct reg_sequence {stage}_regs[] = {{")
++    path = root / f"turnerov13b10wide_{stage}_setting.tsv"
++    with path.open() as stream:
++        for row in csv.DictReader(stream, delimiter="\t"):
++            reg, val = (int(row[k], 16) for k in ("register", "value"))
++            if not 0 <= reg <= 0xffff or not 0 <= val <= 255 or reg == 0x0100:
++                raise ValueError(f"unexpected mode entry in {path}: {row}")
++            delay = 5000 if (reg, val) == (0x0103, 1) else 0
++            print(f"	{{ 0x{reg:04x}, 0x{val:02x}, {delay} }},")
++    print("};")
+diff --git a/drivers/media/platform/mediatek/turner/rear/turner-ov13b10.c b/drivers/media/platform/mediatek/turner/rear/turner-ov13b10.c
+new file mode 100644
+index 0000000..1c4fffb
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/rear/turner-ov13b10.c
+@@ -0,0 +1,343 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Turner OV13B10 rear sensor, 24 MHz stock preview mode. */
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/regmap.h>
++#include <linux/regulator/consumer.h>
++#include <media/mipi-csi2.h>
++#include <media/v4l2-async.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-subdev.h>
++#include "turner-preview.h"
++
++struct rail_setting {
++	const char *name;
++	int uv;
++	int delay_us;
++};
++static const struct rail_setting rails[] = {
++	{ "avdd1", 3200000, 2000 }, { "dvdd1", 1450000, 1000 },
++	{ "afvdd", 2800000, 1000 }, { "avdd", 2800000, 2000 },
++	{ "dovdd", 1800000, 1000 }, { "dvdd", 1200000, 1000 },
++};
++
++struct turner_sensor {
++	struct v4l2_subdev sd;
++	struct media_pad pad;
++	struct v4l2_ctrl_handler controls;
++	struct v4l2_ctrl *pattern;
++	struct device *dev;
++	struct regmap *map;
++	struct clk *clk;
++	struct pinctrl *pins;
++	struct pinctrl_state *low, *high, *drive, *off;
++	struct regulator *supplies[ARRAY_SIZE(rails)];
++	unsigned int nrails;
++	bool clock_on;
++};
++
++static const char * const test_patterns[] = { "Disabled", "Color bars" };
++static bool verify_stream;
++module_param(verify_stream, bool, 0444);
++MODULE_PARM_DESC(verify_stream, "Perform a short start/readback/stop test at probe");
++
++/* #156 has no CAMTG3 clock provider; the trial build supplies the clock. */
++#ifdef TURNER_LIVE_CLOCK
++#include "live-camtg3.h"
++#endif
++
++static void power_down(struct turner_sensor *s)
++{
++	pinctrl_select_state(s->pins, s->low);
++	pinctrl_select_state(s->pins, s->off);
++	if (s->clock_on) {
++		clk_disable_unprepare(s->clk);
++		s->clock_on = false;
++	}
++	while (s->nrails) {
++		unsigned int i = --s->nrails;
++		/* RT6160 enable pin is tied high on Turner. */
++		if (i && regulator_disable(s->supplies[i]))
++			dev_warn(s->dev, "could not disable %s\n", rails[i].name);
++		else
++			regulator_set_voltage(s->supplies[i], 0, INT_MAX);
++	}
++}
++
++static int power_up(struct turner_sensor *s)
++{
++	unsigned int i;
++	int ret;
++
++	ret = pinctrl_select_state(s->pins, s->low);
++	if (ret)
++		return ret;
++	usleep_range(1000, 1200);
++	for (i = 0; i < ARRAY_SIZE(rails); i++) {
++		ret = regulator_set_voltage(s->supplies[i], rails[i].uv, rails[i].uv);
++		if (ret)
++			goto fail;
++		if (i) {
++			ret = regulator_enable(s->supplies[i]);
++			if (ret) {
++				regulator_set_voltage(s->supplies[i], 0, INT_MAX);
++				goto fail;
++			}
++		}
++		s->nrails++;
++		usleep_range(rails[i].delay_us, rails[i].delay_us + 200);
++	}
++	ret = pinctrl_select_state(s->pins, s->high);
++	if (ret)
++		goto fail;
++	usleep_range(6000, 6500);
++	ret = clk_prepare_enable(s->clk);
++	if (ret)
++		goto fail;
++	s->clock_on = true;
++	ret = pinctrl_select_state(s->pins, s->drive);
++	if (ret)
++		goto fail;
++	usleep_range(1000, 1500);
++	return 0;
++fail:
++	power_down(s);
++	return ret;
++}
++
++static int start(struct turner_sensor *s, unsigned int width, unsigned int height)
++{
++	u8 size[4];
++	unsigned int mode;
++	int ret = power_up(s);
++
++	if (ret)
++		return ret;
++	ret = regmap_multi_reg_write(s->map, init_regs, ARRAY_SIZE(init_regs));
++	if (!ret) {
++		if (width == 2104)
++			ret = regmap_multi_reg_write(s->map, custom1_regs, ARRAY_SIZE(custom1_regs));
++		else
++			ret = regmap_multi_reg_write(s->map, preview_regs, ARRAY_SIZE(preview_regs));
++	}
++	if (!ret)
++		ret = regmap_bulk_read(s->map, 0x3808, size, sizeof(size));
++	if (!ret && (((size[0] << 8) | size[1]) != width || ((size[2] << 8) | size[3]) != height))
++		ret = -EIO;
++	if (!ret)
++		ret = regmap_update_bits(s->map, 0x5080, 0x8c,
++					 s->pattern && v4l2_ctrl_g_ctrl(s->pattern) ? BIT(7) : 0);
++	if (!ret)
++		ret = regmap_write(s->map, 0x0100, 1);
++	if (!ret)
++		ret = regmap_read(s->map, 0x0100, &mode);
++	if (!ret && !(mode & 1))
++		ret = -EIO;
++	if (ret)
++		power_down(s);
++	return ret;
++}
++
++static int stop(struct turner_sensor *s)
++{
++	unsigned int mode;
++	int ret = regmap_write(s->map, 0x0100, 0);
++
++	if (!ret)
++		ret = regmap_read(s->map, 0x0100, &mode);
++	if (!ret && (mode & 1))
++		ret = -EIO;
++	usleep_range(35000, 36000);
++	power_down(s);
++	return ret;
++}
++
++static int enable(struct v4l2_subdev *sd, struct v4l2_subdev_state *state,
++		  u32 pad, u64 streams)
++{
++	const struct v4l2_mbus_framefmt *fmt = v4l2_subdev_state_get_format(state, pad);
++
++	return start(container_of(sd, struct turner_sensor, sd), fmt->width, fmt->height);
++}
++static int disable(struct v4l2_subdev *sd, struct v4l2_subdev_state *state,
++		   u32 pad, u64 streams)
++{
++	return stop(container_of(sd, struct turner_sensor, sd));
++}
++
++static int format(struct v4l2_subdev *sd, struct v4l2_subdev_state *state,
++		  struct v4l2_subdev_format *fmt)
++{
++	bool binned = fmt->format.width == 2104;
++
++	if (fmt->pad || fmt->stream)
++		return -EINVAL;
++	fmt->format = (struct v4l2_mbus_framefmt){
++		.width = binned ? 2104 : 4208, .height = binned ? 1184 : 3120, .code = MEDIA_BUS_FMT_SBGGR10_1X10,
++		.field = V4L2_FIELD_NONE, .colorspace = V4L2_COLORSPACE_RAW,
++	};
++	*v4l2_subdev_state_get_format(state, 0) = fmt->format;
++	return 0;
++}
++static int init_state(struct v4l2_subdev *sd, struct v4l2_subdev_state *state)
++{
++	struct v4l2_subdev_format fmt = {};
++	return format(sd, state, &fmt);
++}
++static int code(struct v4l2_subdev *sd, struct v4l2_subdev_state *state,
++		struct v4l2_subdev_mbus_code_enum *item)
++{
++	if (item->index || item->pad || item->stream)
++		return -EINVAL;
++	item->code = MEDIA_BUS_FMT_SBGGR10_1X10;
++	return 0;
++}
++static int bus_config(struct v4l2_subdev *sd, unsigned int pad,
++		      struct v4l2_mbus_config *cfg)
++{
++	if (pad)
++		return -EINVAL;
++	/* The Turner preview table specifies 480 Mpixel/s, RAW10, four lanes. */
++	*cfg = (struct v4l2_mbus_config) {
++		.type = V4L2_MBUS_CSI2_DPHY,
++		.link_freq = 600000000,
++		.bus.mipi_csi2 = { .num_data_lanes = 4, .data_lanes = { 1, 2, 3, 4 } },
++	};
++	return 0;
++}
++
++static int frame_desc(struct v4l2_subdev *sd, unsigned int pad,
++		      struct v4l2_mbus_frame_desc *desc)
++{
++	if (pad)
++		return -EINVAL;
++	*desc = (struct v4l2_mbus_frame_desc) {
++		.type = V4L2_MBUS_FRAME_DESC_TYPE_CSI2,
++		.num_entries = 1,
++		.entry = { {
++			.pixelcode = MEDIA_BUS_FMT_SBGGR10_1X10,
++			.bus.csi2 = { .vc = 0, .dt = MIPI_CSI2_DT_RAW10 },
++		} },
++	};
++	return 0;
++}
++static const struct v4l2_subdev_pad_ops pad_ops = {
++	.get_mbus_config = bus_config, .get_frame_desc = frame_desc,
++	.enum_mbus_code = code, .get_fmt = v4l2_subdev_get_fmt, .set_fmt = format,
++	.enable_streams = enable, .disable_streams = disable,
++};
++static const struct v4l2_subdev_video_ops video_ops = {
++	.s_stream = v4l2_subdev_s_stream_helper,
++};
++static const struct v4l2_subdev_ops ops = { .pad = &pad_ops, .video = &video_ops };
++static const struct v4l2_subdev_internal_ops internal_ops = { .init_state = init_state };
++static const struct regmap_config regconfig = { .reg_bits = 16, .val_bits = 8 };
++
++static int rear_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct turner_sensor *s;
++	unsigned int i;
++	u8 id[3];
++	int ret;
++
++	if (of_property_match_string(dev->of_node, "sensor-names",
++				     "turnerov13b10wide_mipi_raw") < 0)
++		return -ENODEV;
++	s = devm_kzalloc(dev, sizeof(*s), GFP_KERNEL);
++	if (!s)
++		return -ENOMEM;
++	s->dev = dev;
++	s->map = devm_regmap_init_i2c(client, &regconfig);
++	if (IS_ERR(s->map))
++		return PTR_ERR(s->map);
++#ifdef TURNER_LIVE_CLOCK
++	s->clk = live_camtg3(dev);
++#else
++	s->clk = devm_clk_get(dev, "mclk");
++#endif
++	if (IS_ERR(s->clk))
++		return dev_err_probe(dev, PTR_ERR(s->clk), "MCLK unavailable\n");
++	if (clk_get_rate(s->clk) != 24000000)
++		return dev_err_probe(dev, -EINVAL, "expected 24 MHz MCLK\n");
++	s->pins = devm_pinctrl_get(dev);
++	if (IS_ERR(s->pins))
++		return PTR_ERR(s->pins);
++	s->low = pinctrl_lookup_state(s->pins, "rst_low");
++	s->high = pinctrl_lookup_state(s->pins, "rst_high");
++	s->drive = pinctrl_lookup_state(s->pins, "mclk_4mA");
++	s->off = pinctrl_lookup_state(s->pins, "mclk_off");
++	if (IS_ERR(s->low) || IS_ERR(s->high) || IS_ERR(s->drive) || IS_ERR(s->off))
++		return -EINVAL;
++	for (i = 0; i < ARRAY_SIZE(rails); i++) {
++		s->supplies[i] = devm_regulator_get_optional(dev, rails[i].name);
++		if (IS_ERR(s->supplies[i]))
++			return dev_err_probe(dev, PTR_ERR(s->supplies[i]), "missing %s\n", rails[i].name);
++	}
++	ret = power_up(s);
++	if (ret)
++		return ret;
++	ret = regmap_bulk_read(s->map, 0x300a, id, sizeof(id));
++	power_down(s);
++	if (ret || memcmp(id, (const u8[]){0x56, 0x0d, 0x42}, sizeof(id)))
++		return dev_err_probe(dev, ret ?: -ENODEV, "chip ID check failed\n");
++	if (verify_stream) {
++		ret = start(s, 4208, 3120);
++		if (ret)
++			return dev_err_probe(dev, ret, "preview start failed\n");
++		msleep(150);
++		ret = stop(s);
++		if (ret)
++			return dev_err_probe(dev, ret, "preview stop failed\n");
++		dev_info(dev, "sensor ID %*phN, 4208x3120, stream on/off readback passed\n",
++			 (int)sizeof(id), id);
++	}
++	v4l2_i2c_subdev_init(&s->sd, client, &ops);
++	s->sd.internal_ops = &internal_ops;
++	s->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++	s->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
++	s->pad.flags = MEDIA_PAD_FL_SOURCE;
++	ret = media_entity_pads_init(&s->sd.entity, 1, &s->pad);
++	if (ret)
++		return ret;
++	v4l2_ctrl_handler_init(&s->controls, 1);
++	s->pattern = v4l2_ctrl_new_std_menu_items(&s->controls, NULL, V4L2_CID_TEST_PATTERN,
++						  ARRAY_SIZE(test_patterns) - 1, 0, 0, test_patterns);
++	s->sd.ctrl_handler = &s->controls;
++	ret = s->controls.error ?: v4l2_subdev_init_finalize(&s->sd);
++	if (!ret) {
++		ret = v4l2_async_register_subdev_sensor(&s->sd);
++		if (!ret)
++			return 0;
++		v4l2_subdev_cleanup(&s->sd);
++	}
++	v4l2_ctrl_handler_free(&s->controls);
++	media_entity_cleanup(&s->sd.entity);
++	return ret;
++}
++static void rear_remove(struct i2c_client *client)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct turner_sensor *s = container_of(sd, struct turner_sensor, sd);
++
++	v4l2_async_unregister_subdev(sd);
++	if (s->clock_on)
++		stop(s);
++	v4l2_subdev_cleanup(sd);
++	media_entity_cleanup(&sd->entity);
++}
++static const struct of_device_id matches[] = {
++	{ .compatible = "mediatek,imgsensor" }, {}
++};
++static struct i2c_driver rear_driver = {
++	.driver = { .name = "turner-ov13b10", .of_match_table = matches },
++	.probe = rear_probe, .remove = rear_remove,
++};
++module_i2c_driver(rear_driver);
++MODULE_DESCRIPTION("Turner OV13B10 rear camera");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/media/platform/mediatek/turner/regulators/aw37004.c b/drivers/media/platform/mediatek/turner/regulators/aw37004.c
+new file mode 100644
+index 0000000..31a40a5
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/regulators/aw37004.c
+@@ -0,0 +1,127 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* AW37004 camera LDOs on Turner. */
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++#include <linux/regulator/of_regulator.h>
++
++#define AW37004_PRODUCT_ID 0x00
++#define AW37004_VSEL_BASE  0x03
++#define AW37004_DISCHARGE  0x02
++#define AW37004_ENABLE     0x0e
++
++/* Selector zero restores a factory voltage outside the linear sequence. */
++static const struct linear_range digital_ranges[] = {
++	REGULATOR_LINEAR_RANGE(1200000, 0, 0, 0),
++	REGULATOR_LINEAR_RANGE(606000, 1, 255, 6000),
++};
++
++static const struct linear_range analog_ranges[] = {
++	REGULATOR_LINEAR_RANGE(2800000, 0, 0, 0),
++	REGULATOR_LINEAR_RANGE(1212500, 1, 255, 12500),
++};
++
++/* Request an explicit voltage code even when the POR default has that value. */
++static int aw37004_map_voltage(struct regulator_dev *rdev, int min_uv, int max_uv)
++{
++	const struct linear_range *range = &rdev->desc->linear_ranges[1];
++	int sel = range->min_sel;
++
++	if (min_uv > range->min)
++		sel += DIV_ROUND_UP(min_uv - range->min, range->step);
++	if (sel > range->max_sel ||
++	    regulator_list_voltage_linear_range(rdev, sel) > max_uv)
++		return -EINVAL;
++	return sel;
++}
++
++static const struct regulator_ops aw37004_ops = {
++	.list_voltage = regulator_list_voltage_linear_range,
++	.map_voltage = aw37004_map_voltage,
++	.set_voltage_sel = regulator_set_voltage_sel_regmap,
++	.get_voltage_sel = regulator_get_voltage_sel_regmap,
++	.enable = regulator_enable_regmap,
++	.disable = regulator_disable_regmap,
++	.is_enabled = regulator_is_enabled_regmap,
++};
++
++#define AW37004_LDO(_id, _name, _ranges) {			\
++	.id = _id, .name = _name, .type = REGULATOR_VOLTAGE,	\
++	.owner = THIS_MODULE, .ops = &aw37004_ops,		\
++	.n_voltages = 256, .linear_ranges = _ranges,		\
++	.n_linear_ranges = ARRAY_SIZE(_ranges),			\
++	.vsel_reg = AW37004_VSEL_BASE + _id, .vsel_mask = 0xff,	\
++	.enable_reg = AW37004_ENABLE, .enable_mask = BIT(_id),	\
++}
++
++static const struct regulator_desc regulators[] = {
++	AW37004_LDO(0, "dvdd1", digital_ranges),
++	AW37004_LDO(1, "dvdd2", digital_ranges),
++	AW37004_LDO(2, "avdd1", analog_ranges),
++	AW37004_LDO(3, "avdd2", analog_ranges),
++};
++
++static const struct regmap_config aw37004_regmap = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = 0x0f,
++};
++
++static int aw37004_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct regulator_config config = { .dev = dev };
++	unsigned long seen = 0;
++	unsigned int product;
++	int ret;
++
++	config.regmap = devm_regmap_init_i2c(client, &aw37004_regmap);
++	if (IS_ERR(config.regmap))
++		return PTR_ERR(config.regmap);
++	ret = regmap_read(config.regmap, AW37004_PRODUCT_ID, &product);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot read product ID\n");
++	if (product != 0)
++		return dev_err_probe(dev, -ENODEV, "unexpected product ID %#x\n", product);
++
++	/* Stock Turner initialization enables discharge on all four outputs. */
++	ret = regmap_write(config.regmap, AW37004_DISCHARGE, 0xff);
++	if (ret)
++		return ret;
++	for_each_available_child_of_node_scoped(dev->of_node, child) {
++		struct regulator_dev *rdev;
++		u16 id;
++
++		if (of_property_read_u16(child, "offset", &id) ||
++		    id >= ARRAY_SIZE(regulators) || test_and_set_bit(id, &seen))
++			return dev_err_probe(dev, -EINVAL, "invalid LDO offset in %pOF\n", child);
++		config.of_node = child;
++		config.init_data = of_get_regulator_init_data(dev, child, &regulators[id]);
++		if (!config.init_data)
++			return -ENOMEM;
++		rdev = devm_regulator_register(dev, &regulators[id], &config);
++		if (IS_ERR(rdev))
++			return dev_err_probe(dev, PTR_ERR(rdev), "cannot register %pOF\n", child);
++	}
++	return seen ? 0 : -ENODEV;
++}
++
++static const struct of_device_id aw37004_match[] = {
++	{ .compatible = "awinic,aw37004" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, aw37004_match);
++
++static struct i2c_driver aw37004_driver = {
++	.driver = {
++		.name = "aw37004-regulator",
++		.of_match_table = aw37004_match,
++	},
++	.probe = aw37004_probe,
++};
++module_i2c_driver(aw37004_driver);
++
++MODULE_DESCRIPTION("AW37004 camera regulators");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/media/platform/mediatek/turner/stock/turnerov13b10wide_custom1_setting.tsv b/drivers/media/platform/mediatek/turner/stock/turnerov13b10wide_custom1_setting.tsv
+new file mode 100644
+index 0000000..ecb1ee5
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/stock/turnerov13b10wide_custom1_setting.tsv
+@@ -0,0 +1,39 @@
++register	value
++0x3501	0x06
++0x3662	0x88
++0x3714	0x28
++0x3739	0x10
++0x37c2	0x14
++0x37d9	0x06
++0x37e2	0x0c
++0x37e4	0x00
++0x3800	0x00
++0x3801	0x00
++0x3802	0x01
++0x3803	0x70
++0x3804	0x10
++0x3805	0x8f
++0x3806	0x0a
++0x3807	0xcf
++0x3808	0x08
++0x3809	0x38
++0x380a	0x04
++0x380b	0xa0
++0x380c	0x04
++0x380d	0x98
++0x380e	0x06
++0x380f	0x32
++0x3811	0x07
++0x3813	0x08
++0x3814	0x03
++0x3816	0x03
++0x3820	0x8b
++0x3c8c	0x18
++0x4008	0x00
++0x4009	0x05
++0x4050	0x00
++0x4051	0x05
++0x4501	0x08
++0x4505	0x04
++0x5000	0xfd
++0x5001	0x0d
+diff --git a/drivers/media/platform/mediatek/turner/stock/turnerov13b10wide_init_setting.tsv b/drivers/media/platform/mediatek/turner/stock/turnerov13b10wide_init_setting.tsv
+new file mode 100644
+index 0000000..a8147bc
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/stock/turnerov13b10wide_init_setting.tsv
+@@ -0,0 +1,131 @@
++register	value
++0x0103	0x01
++0x0303	0x01
++0x0305	0x4b
++0x0321	0x00
++0x0323	0x04
++0x0324	0x01
++0x0325	0x50
++0x0326	0x81
++0x0327	0x04
++0x3011	0x7c
++0x3012	0x07
++0x3013	0x32
++0x3107	0x23
++0x3501	0x0c
++0x3502	0x10
++0x3504	0x08
++0x3508	0x07
++0x3509	0xc0
++0x3600	0x16
++0x3601	0x54
++0x3612	0x4e
++0x3620	0x00
++0x3621	0x68
++0x3622	0x66
++0x3623	0x03
++0x3662	0x92
++0x3666	0xbb
++0x3667	0x44
++0x366e	0xff
++0x366f	0xf3
++0x3675	0x44
++0x3676	0x00
++0x367f	0xe9
++0x3681	0x32
++0x3682	0x1f
++0x3683	0x0b
++0x3684	0x0b
++0x3704	0x0f
++0x3706	0x40
++0x3708	0x3b
++0x3709	0x72
++0x370b	0xa2
++0x3714	0x24
++0x371a	0x3e
++0x3725	0x42
++0x3739	0x12
++0x3767	0x00
++0x377a	0x0d
++0x3789	0x18
++0x3790	0x40
++0x3791	0xa2
++0x37c2	0x04
++0x37c3	0xf1
++0x37d9	0x0c
++0x37da	0x02
++0x37dc	0x02
++0x37e1	0x04
++0x37e2	0x0a
++0x3800	0x00
++0x3801	0x00
++0x3802	0x00
++0x3803	0x08
++0x3804	0x10
++0x3805	0x8f
++0x3806	0x0c
++0x3807	0x47
++0x3808	0x10
++0x3809	0x70
++0x380a	0x0c
++0x380b	0x30
++0x380c	0x04
++0x380d	0x98
++0x380e	0x0c
++0x380f	0x66
++0x3811	0x0f
++0x3813	0x08
++0x3814	0x01
++0x3815	0x01
++0x3816	0x01
++0x3817	0x01
++0x381f	0x08
++0x3820	0x88
++0x3821	0x00
++0x3822	0x14
++0x3823	0x18
++0x3827	0x01
++0x382e	0xe6
++0x3c80	0x00
++0x3c87	0x01
++0x3c8c	0x19
++0x3c8d	0x1c
++0x3ca0	0x00
++0x3ca1	0x00
++0x3ca2	0x00
++0x3ca3	0x00
++0x3ca4	0x50
++0x3ca5	0x11
++0x3ca6	0x01
++0x3ca7	0x00
++0x3ca8	0x00
++0x4008	0x02
++0x4009	0x0f
++0x400a	0x01
++0x400b	0x19
++0x4011	0x21
++0x4017	0x08
++0x4019	0x04
++0x401a	0x58
++0x4032	0x1e
++0x4050	0x02
++0x4051	0x09
++0x405e	0x00
++0x4066	0x02
++0x4501	0x00
++0x4502	0x10
++0x4505	0x00
++0x4800	0x64
++0x481b	0x3e
++0x481f	0x30
++0x4825	0x34
++0x4837	0x0d
++0x484b	0x01
++0x4883	0x02
++0x5000	0xff
++0x5001	0x0f
++0x5045	0x20
++0x5046	0x20
++0x5047	0xa4
++0x5048	0x20
++0x5049	0xa4
+diff --git a/drivers/media/platform/mediatek/turner/stock/turnerov13b10wide_preview_setting.tsv b/drivers/media/platform/mediatek/turner/stock/turnerov13b10wide_preview_setting.tsv
+new file mode 100644
+index 0000000..dab07a2
+--- /dev/null
++++ b/drivers/media/platform/mediatek/turner/stock/turnerov13b10wide_preview_setting.tsv
+@@ -0,0 +1,39 @@
++register	value
++0x3501	0x0c
++0x3662	0x92
++0x3714	0x24
++0x3739	0x12
++0x37c2	0x04
++0x37d9	0x0c
++0x37e2	0x0a
++0x37e4	0x04
++0x3800	0x00
++0x3801	0x00
++0x3802	0x00
++0x3803	0x08
++0x3804	0x10
++0x3805	0x8f
++0x3806	0x0c
++0x3807	0x47
++0x3808	0x10
++0x3809	0x70
++0x380a	0x0c
++0x380b	0x30
++0x380c	0x04
++0x380d	0x98
++0x380e	0x0c
++0x380f	0x66
++0x3811	0x0f
++0x3813	0x08
++0x3814	0x01
++0x3816	0x01
++0x3820	0x88
++0x3c8c	0x19
++0x4008	0x02
++0x4009	0x0f
++0x4050	0x02
++0x4051	0x09
++0x4501	0x00
++0x4505	0x00
++0x5000	0xff
++0x5001	0x0f

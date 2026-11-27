@@ -1,0 +1,30 @@
+--- a/drivers/perf/arm_smmuv3_pmu.c
++++ b/drivers/perf/arm_smmuv3_pmu.c
+@@ -877,6 +877,16 @@
+ 		.capabilities	= PERF_PMU_CAP_NO_EXCLUDE,
+ 	};
+ 
++	/* Check for an interrupt path before touching a potentially gated PMCG. */
++	irq = platform_get_irq_optional(pdev, 0);
++	if (irq == -EPROBE_DEFER)
++		return irq;
++	if (irq > 0)
++		smmu_pmu->irq = irq;
++	else if (dev->of_node && !dev_get_msi_domain(dev) &&
++		 !of_property_present(dev->of_node, "msi-parent"))
++		return dev_err_probe(dev, -ENXIO, "no interrupt or MSI for PMCG\n");
++
+ 	smmu_pmu->reg_base = devm_platform_get_and_ioremap_resource(pdev, 0, &res_0);
+ 	if (IS_ERR(smmu_pmu->reg_base))
+ 		return PTR_ERR(smmu_pmu->reg_base);
+@@ -891,10 +901,6 @@
+ 	} else {
+ 		smmu_pmu->reloc_base = smmu_pmu->reg_base;
+ 	}
+-
+-	irq = platform_get_irq_optional(pdev, 0);
+-	if (irq > 0)
+-		smmu_pmu->irq = irq;
+ 
+ 	ceid_64[0] = readq_relaxed(smmu_pmu->reg_base + SMMU_PMCG_CEID0);
+ 	ceid_64[1] = readq_relaxed(smmu_pmu->reg_base + SMMU_PMCG_CEID1);

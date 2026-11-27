@@ -1,0 +1,76 @@
+--- a/drivers/ufs/host/ufs-mediatek.c
++++ b/drivers/ufs/host/ufs-mediatek.c
+@@ -2369,6 +2369,25 @@
+ 	.config_scsi_dev     = ufs_mtk_config_scsi_dev,
+ };
+ 
++struct ufs_mtk_phy_pm {
++	struct device *dev;
++	bool enabled_here;
++};
++
++/* The runtime reference follows the HBA through suspend/resume. Its PHY
++ * device reference and any PM enable done by this consumer last until
++ * generic probe unwinds or the HBA has finished removal.
++ */
++static void ufs_mtk_put_phy_pm(void *data)
++{
++	struct ufs_mtk_phy_pm *pm = data;
++
++	pm_runtime_put_sync(pm->dev);
++	if (pm->enabled_here)
++		pm_runtime_disable(pm->dev);
++	put_device(pm->dev);
++}
++
+ /**
+  * ufs_mtk_probe - probe routine of the driver
+  * @pdev: pointer to Platform device handle
+@@ -2382,6 +2401,7 @@
+ 	struct device_node *reset_node, *phy_node = NULL;
+ 	struct platform_device *reset_pdev, *phy_pdev = NULL;
+ 	struct device_link *link;
++	struct ufs_mtk_phy_pm *pm;
+ 	struct ufs_hba *hba;
+ 	struct ufs_mtk_host *host;
+ 
+@@ -2419,11 +2439,34 @@
+ 			goto skip_phy;
+ 		phy_dev = &phy_pdev->dev;
+ 
+-		pm_runtime_set_active(phy_dev);
+-		pm_runtime_enable(phy_dev);
+-		pm_runtime_get_sync(phy_dev);
+-
+-		put_device(phy_dev);
++		pm = devm_kzalloc(dev, sizeof(*pm), GFP_KERNEL);
++		if (!pm) {
++			put_device(phy_dev);
++			err = -ENOMEM;
++			goto out;
++		}
++
++		pm->dev = phy_dev;
++		pm->enabled_here = !pm_runtime_enabled(phy_dev);
++		if (pm->enabled_here) {
++			err = pm_runtime_set_active(phy_dev);
++			if (err) {
++				put_device(phy_dev);
++				goto out;
++			}
++			pm_runtime_enable(phy_dev);
++		}
++		err = pm_runtime_resume_and_get(phy_dev);
++		if (err < 0) {
++			if (pm->enabled_here)
++				pm_runtime_disable(phy_dev);
++			put_device(phy_dev);
++			goto out;
++		}
++
++		err = devm_add_action_or_reset(dev, ufs_mtk_put_phy_pm, pm);
++		if (err)
++			goto out;
+ 		dev_info(dev, "phys node found\n");
+ 	} else {
+ 		dev_notice(dev, "phys node not found\n");

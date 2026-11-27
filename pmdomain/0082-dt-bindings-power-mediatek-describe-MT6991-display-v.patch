@@ -1,0 +1,64 @@
+From 5b7028884acd5fabf241e9d11752710245e3eb68 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 09:36:21 +0800
+Subject: [PATCH 82/84] dt-bindings: power: mediatek: describe MT6991 display
+ voter domains
+
+---
+ .../power/mediatek,power-controller.yaml        | 17 +++++++++++++++--
+ .../dt-bindings/power/mediatek,mt6991-power.h   |  2 ++
+ 2 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml b/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
+index 95831532..cc0a53c2 100644
+--- a/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
++++ b/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
+@@ -55,10 +55,12 @@ properties:
+     const: 0
+ 
+   power-domains:
+-    maxItems: 1
++    minItems: 1
++    maxItems: 2
+ 
+   power-domains-child-ids:
+-    maxItems: 1
++    minItems: 1
++    maxItems: 2
+ 
+   access-controllers:
+     description:
+@@ -183,6 +185,17 @@ allOf:
+         power-domains: false
+         power-domains-child-ids: false
+ 
++  - if:
++      properties:
++        compatible:
++          const: mediatek,mt6991-hfrp-power-controller
++    then:
++      properties:
++        power-domains:
++          maxItems: 1
++        power-domains-child-ids:
++          maxItems: 1
++
+   - if:
+       properties:
+         compatible:
+diff --git a/include/dt-bindings/power/mediatek,mt6991-power.h b/include/dt-bindings/power/mediatek,mt6991-power.h
+index afa3b2bb..b7d863d4 100644
+--- a/include/dt-bindings/power/mediatek,mt6991-power.h
++++ b/include/dt-bindings/power/mediatek,mt6991-power.h
+@@ -14,6 +14,8 @@
+ 
+ /* Multimedia hardware voter */
+ #define MT6991_POWER_DOMAIN_DSI_PHY0		0
++#define MT6991_POWER_DOMAIN_DISP_VCORE		1
++#define MT6991_POWER_DOMAIN_DIS1_DORMANT	2
+ 
+ /* Multimedia direct control */
+ #define MT6991_POWER_DOMAIN_DSI_PHY1		0
+-- 
+2.50.1 (Apple Git-155)
+

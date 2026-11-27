@@ -1,0 +1,266 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -47,6 +47,9 @@
+ 	u32 pcm_bytes;
+ 	u32 pcm_format;
+ 	bool hw_prepared;
++	u32 prefilled;
++	u32 copy_sequence;
++	u8 app_desc[96];
+ 	u8 pending_direction;
+ 	bool pcm_open;
+ 	bool pcm_owns_pair;
+@@ -56,6 +59,7 @@
+ 	PCM_PREPARE = 3,
+ 	PCM_PARAMS = 4,
+ 	PCM_FREE = 9,
++	PCM_COPY = 0x0a,
+ 	MEMIF_PARAMS = 0x201,
+ 	MEMIF_FREE = 0x202,
+ 	MEMIF_PREPARE = 0x203,
+@@ -63,7 +67,7 @@
+ 
+ static bool mt6991_adsp_has_descriptor(u16 cmd)
+ {
+-	return cmd == PCM_PARAMS || cmd == PCM_PREPARE ||
++	return cmd == PCM_PARAMS || cmd == PCM_PREPARE || cmd == PCM_COPY ||
+ 	       cmd == MEMIF_PARAMS || cmd == MEMIF_PREPARE;
+ }
+ 
+@@ -892,6 +896,11 @@
+ 	desc[83] = 1;
+ 	memcpy_toio(a->playback_buffers, desc, sizeof(desc));
+ 	wmb();
++	if (cmd == PCM_PREPARE) {
++		memcpy(a->app_desc, desc, sizeof(desc));
++		a->prefilled = 0;
++		a->copy_sequence = 0;
++	}
+ 	return mt6991_adsp_pcm_command(dev, cmd, direction);
+ }
+ 
+@@ -952,6 +961,51 @@
+ 	return ret;
+ }
+ EXPORT_SYMBOL_GPL(mt6991_adsp_pcm_prepare);
++
++/* Submit samples while the task is prepared but has not received START.
++ * There is no consumer credit until streaming/IRQ support is available.
++ */
++int mt6991_adsp_pcm_prefill(struct device *dev, u32 pos, const void *data, u32 bytes)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	void __iomem *samples;
++	u64 base, next;
++	int ret;
++
++	guard(mutex)(&a->boot_lock);
++	if (!a->pair_ready || !a->pcm_open || !a->hw_prepared || !a->pcm_bytes)
++		return -EHOSTDOWN;
++	if (!bytes || !IS_ALIGNED(bytes, 8) || pos != a->prefilled % a->pcm_bytes)
++		return -EINVAL;
++	if (bytes > a->pcm_bytes - a->prefilled)
++		return -ENOSPC;
++
++	base = a->audio_base + SZ_4K;
++	samples = ioremap_wc(base, a->pcm_bytes);
++	if (!samples)
++		return -ENOMEM;
++	memcpy_toio(samples + pos, data, bytes);
++	wmb();
++	iounmap(samples);
++
++	next = base + (a->prefilled + bytes) % a->pcm_bytes;
++	put_unaligned_le64(next, a->app_desc + 24);
++	put_unaligned_le32(a->copy_sequence, a->app_desc + 84);
++	memcpy_toio(a->playback_buffers, a->app_desc, sizeof(a->app_desc));
++	wmb();
++	ret = mt6991_adsp_pcm_command(dev, PCM_COPY, 1);
++	if (ret) {
++		dev_err(dev, "DSP COPY failed: %d\n", ret);
++		if (mt6991_adsp_stop_pair(dev))
++			dev_err(dev, "failed to halt DSP after COPY error\n");
++		return ret;
++	}
++	a->prefilled += bytes;
++	a->copy_sequence++;
++	dev_info_once(dev, "DSP acknowledged prefill of %u bytes\n", bytes);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(mt6991_adsp_pcm_prefill);
+ 
+ int mt6991_adsp_pcm_hw_params(struct device *dev, u32 format, u32 bytes)
+ {
+--- a/include/linux/soc/mediatek/mt6991-adsp-ipi.h
++++ b/include/linux/soc/mediatek/mt6991-adsp-ipi.h
+@@ -33,6 +33,7 @@
+ int mt6991_adsp_memif_windows(struct device *dev, phys_addr_t *output, phys_addr_t *iv);
+ int mt6991_adsp_pcm_prepare(struct device *dev, u32 period, u32 periods,
+ 			    u32 start_threshold, u32 stop_threshold);
++int mt6991_adsp_pcm_prefill(struct device *dev, u32 pos, const void *data, u32 bytes);
+ int mt6991_adsp_pcm_hw_free(struct device *dev);
+ int mt6991_adsp_pcm_close(struct device *dev);
+ 
+--- a/sound/soc/mediatek/mt6991/turner.c
++++ b/sound/soc/mediatek/mt6991/turner.c
+@@ -4,6 +4,7 @@
+ #include <linux/of.h>
+ #include <linux/pinctrl/consumer.h>
+ #include <linux/platform_device.h>
++#include <linux/uio.h>
+ #include <linux/soc/mediatek/mt6991-adsp-ipi.h>
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
+@@ -18,8 +19,27 @@
+ 	struct pinctrl_state *idle;
+ 	struct snd_soc_dai_link links[2];
+ 	struct snd_soc_dai_link_component cpus[2];
+-	struct snd_soc_dai_link_component platform;
++	struct snd_soc_dai_link_component platforms[2];
+ 	struct snd_soc_codec_conf amps[2];
++};
++
++static int turner_copy(struct snd_soc_component *component, struct snd_pcm_substream *s,
++		       int channel, unsigned long pos, struct iov_iter *iter, unsigned long bytes)
++{
++	struct turner_audio *audio = snd_soc_card_get_drvdata(component->card);
++	struct snd_pcm_runtime *rt = s->runtime;
++	unsigned long size = snd_pcm_lib_buffer_bytes(s);
++
++	if (channel || !rt->dma_area || pos > size || bytes > size - pos)
++		return -EINVAL;
++	if (copy_from_iter(rt->dma_area + pos, bytes, iter) != bytes)
++		return -EFAULT;
++	return mt6991_adsp_pcm_prefill(audio->dsp, pos, rt->dma_area + pos, bytes);
++}
++
++static const struct snd_soc_component_driver turner_stream_component = {
++	.name = "turner-dsp-playback",
++	.copy = turner_copy,
+ };
+ 
+ static int turner_playback_startup(struct snd_pcm_substream *s)
+@@ -160,10 +180,10 @@
+ 	if (IS_ERR(audio->dsp))
+ 		return dev_err_probe(dev, PTR_ERR(audio->dsp), "linking playback DSP\n");
+ 
+-	audio->platform.of_node = of_parse_phandle(dev->of_node, "mediatek,platform", 0);
+-	if (!audio->platform.of_node)
++	audio->platforms[0].of_node = of_parse_phandle(dev->of_node, "mediatek,platform", 0);
++	if (!audio->platforms[0].of_node)
+ 		return dev_err_probe(dev, -EINVAL, "missing AFE phandle\n");
+-	ret = devm_add_action_or_reset(dev, turner_put_afe, audio->platform.of_node);
++	ret = devm_add_action_or_reset(dev, turner_put_afe, audio->platforms[0].of_node);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -185,13 +205,19 @@
+ 	audio->cpus[1].dai_name = "I2SOUT4";
+ 
+ 	for (i = 0; i < ARRAY_SIZE(audio->links); i++) {
+-		audio->cpus[i].of_node = audio->platform.of_node;
++		audio->cpus[i].of_node = audio->platforms[0].of_node;
+ 		audio->links[i].cpus = &audio->cpus[i];
+ 		audio->links[i].num_cpus = 1;
+-		audio->links[i].platforms = &audio->platform;
++		audio->links[i].platforms = audio->platforms;
+ 		audio->links[i].num_platforms = 1;
+ 		audio->links[i].playback_only = 1;
+ 	}
++
++	audio->platforms[1].of_node = dev->of_node;
++	fe->num_platforms = ARRAY_SIZE(audio->platforms);
++	ret = devm_snd_soc_register_component(dev, &turner_stream_component, NULL, 0);
++	if (ret)
++		return ret;
+ 
+ 	speakers = of_get_child_by_name(dev->of_node, "mediatek,speaker-codec");
+ 	if (!speakers)
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -202,7 +202,7 @@
+ };
+ 
+ static const struct snd_pcm_hardware dl0_hw = {
+-	.info = SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_MMAP_VALID,
++	.info = SNDRV_PCM_INFO_INTERLEAVED,
+ 	.formats = DL0_FORMATS,
+ 	.period_bytes_min = 96, .period_bytes_max = 192 * 1024,
+ 	.periods_min = 2, .periods_max = 256, .buffer_bytes_max = 256 * 1024,
+@@ -319,13 +319,11 @@
+ 	switch (cmd) {
+ 	case SNDRV_PCM_TRIGGER_START:
+ 	case SNDRV_PCM_TRIGGER_RESUME:
+-		afe->dl0.substream = s;
+-		regmap_update_bits(map, IRQ0_CFG1, GENMASK(23, 0), s->runtime->period_size);
+-		regmap_update_bits(map, IRQ0_CFG0, GENMASK(8, 4) | BIT(0),
+-				   FIELD_PREP(GENMASK(8, 4), DL0_RATE_48K) | BIT(0));
+-		regmap_set_bits(map, IRQ_MCU_EN, BIT(0));
+-		regmap_set_bits(map, AFE_DL0_CON0, BIT(28));
+-		break;
++		/* Prefilling the protected ring is supported. Starting DL0 would
++		 * bypass the DSP's consumer pointer and interrupt accounting.
++		 */
++		spin_unlock_irqrestore(&afe->irq_lock, flags);
++		return -EOPNOTSUPP;
+ 	case SNDRV_PCM_TRIGGER_STOP:
+ 	case SNDRV_PCM_TRIGGER_SUSPEND:
+ 		regmap_clear_bits(map, AFE_DL0_CON0, BIT(28));
+--- a/sound/soc/codecs/tfa986x.c
++++ b/sound/soc/codecs/tfa986x.c
+@@ -211,6 +211,7 @@
+ }
+ 
+ struct tfa986x {
++	bool hold_reset;
+ 	struct tfa_stereo stereo;
+ 	struct regmap *regmap;
+ 	struct reset_control *reset;
+@@ -230,6 +231,8 @@
+ 	struct tfa986x *tfa = dev_get_drvdata(dev);
+ 	int ret;
+ 
++	if (tfa->hold_reset)
++		return 0;
+ 	guard(mutex)(&tfa986x_reset_lock);
+ 	/* The first user releases the common active-low reset. */
+ 	usleep_range(2000, 2500);
+@@ -244,6 +247,8 @@
+ {
+ 	struct tfa986x *tfa = dev_get_drvdata(dev);
+ 
++	if (tfa->hold_reset)
++		return 0;
+ 	guard(mutex)(&tfa986x_reset_lock);
+ 	return reset_control_assert(tfa->reset);
+ }
+@@ -287,15 +292,8 @@
+ 	return 0;
+ }
+ 
+-static int tfa986x_prepare(struct snd_pcm_substream *s, struct snd_soc_dai *dai)
+-{
+-	/* Playback needs the calibrated protection path before enabling the output. */
+-	return -EOPNOTSUPP;
+-}
+-
+ static const struct snd_soc_dai_ops tfa986x_dai_ops = {
+ 	.set_fmt = tfa986x_set_fmt,
+-	.prepare = tfa986x_prepare,
+ };
+ 
+ static struct snd_soc_dai_driver tfa986x_dai = {
+@@ -360,6 +358,13 @@
+ 	if (suspend_ret < 0)
+ 		return dev_err_probe(dev, suspend_ret, "suspending amplifier\n");
+ 
++	/* Pre-start playback may prepare I2S clocks. Keep both amplifiers
++	 * physically reset until calibrated power-stage control is available.
++	 */
++	if (!pm_runtime_status_suspended(dev))
++		return -EBUSY;
++	tfa->hold_reset = true;
++
+ 	ret = request_firmware(&fw, TFA986X_CONTAINER, dev);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "loading speaker container\n");

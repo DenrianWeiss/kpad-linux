@@ -1,0 +1,127 @@
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -380,6 +380,38 @@
+ 	{ AUD_TOP_CFG_VLP_RG, I2S4_NEG_LATCH, 0 },
+ };
+ 
++/* Stock Turner crossbar: I2SIN4 feeds VUL3; DL_24CH feeds I2SOUT4.
++ * Include the direct DL0 bits in the output mask to exclude a bypass.
++ * Each caller holds the AFE runtime PM reference.
++ */
++static int mt6991_speaker_routes(struct regmap *map, bool enable)
++{
++	static const struct { unsigned int reg, mask, active; } routes[] = {
++		{ 0x2390, BIT(14), BIT(14) },
++		{ 0x23b0, BIT(15), BIT(15) },
++		{ AFE_CONN116_1, BIT(22) | BIT(0), BIT(22) },
++		{ AFE_CONN117_1, BIT(23) | BIT(1), BIT(23) },
++	};
++	unsigned int value;
++	int i, ret, first = 0;
++
++	for (i = 0; i < ARRAY_SIZE(routes); i++) {
++		int n = enable ? i : ARRAY_SIZE(routes) - 1 - i;
++		unsigned int target = enable ? routes[n].active : 0;
++
++		ret = regmap_update_bits(map, routes[n].reg, routes[n].mask, target);
++		if (!ret)
++			ret = regmap_read(map, routes[n].reg, &value);
++		if (!ret && (value & routes[n].mask) != target)
++			ret = -EIO;
++		if (ret && enable)
++			return ret;
++		if (!first)
++			first = ret;
++	}
++	return first;
++}
++
+ static int mt6991_i2sout4_params(struct snd_pcm_substream *s,
+ 				 struct snd_pcm_hw_params *params,
+ 				 struct snd_soc_dai *dai)
+@@ -397,6 +429,13 @@
+ 		if (ret)
+ 			return ret;
+ 	}
++	ret = mt6991_speaker_routes(afe->common.regmap, true);
++	if (ret) {
++		if (mt6991_speaker_routes(afe->common.regmap, false))
++			dev_err(dai->dev, "failed to clear speaker routes after setup error\n");
++		return ret;
++	}
++	dev_info_once(dai->dev, "verified DL_24CH to I2S4 and I2S4 to VUL3 routes\n");
+ 	return 0;
+ }
+ 
+@@ -507,10 +546,17 @@
+ 	struct regmap *map = afe->common.regmap;
+ 	int ret, err;
+ 
++	ret = mt6991_speaker_routes(map, false);
++	if (ret)
++		dev_err(dai->dev, "speaker route cleanup failed: %d\n", ret);
++	else
++		dev_info_once(dai->dev, "verified idle speaker and feedback routes\n");
+ 	if (!afe->mclk_enabled)
+-		return 0;
+-
+-	ret = regmap_clear_bits(map, ETDM_OUT4_CON0, ETDM_ENABLE);
++		return ret;
++
++	err = regmap_clear_bits(map, ETDM_OUT4_CON0, ETDM_ENABLE);
++	if (!ret)
++		ret = err;
+ 	err = regmap_clear_bits(map, ETDM_IN4_CON0, ETDM_ENABLE);
+ 	if (!ret)
+ 		ret = err;
+@@ -567,36 +613,10 @@
+ 	return 0;
+ }
+ 
+-/*
+- * Turner wires DL0 stereo to eTDM output 4. DAPM updates just the
+- * selected crossbar bits while the corresponding channel path is powered.
+- */
+-static int mt6991_output_event(struct snd_soc_dapm_widget *w,
+-			       struct snd_kcontrol *control, int event)
+-{
+-	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+-	struct mt6991_afe *afe = snd_soc_component_get_drvdata(component);
+-	unsigned int reg = w->shift ? AFE_CONN117_1 : AFE_CONN116_1;
+-	unsigned int mask = BIT(w->shift);
+-	int ret;
+-
+-	ret = pm_runtime_resume_and_get(component->dev);
+-	if (ret < 0)
+-		return ret;
+-	ret = regmap_update_bits(afe->common.regmap, reg, mask,
+-				 SND_SOC_DAPM_EVENT_ON(event) ? mask : 0);
+-	pm_runtime_put(component->dev);
+-	return ret;
+-}
+-
+-/* Card binding may occur after the AFE's probe-time PM reference is gone.
+- * NOPM prevents DAPM from reading the crossbar while creating the widgets.
+- */
++/* DPCM connectivity only. The backend owns the physical crossbar. */
+ static const struct snd_soc_dapm_widget mt6991_output_widgets[] = {
+-	SND_SOC_DAPM_PGA_E("I2SOUT4_CH1", SND_SOC_NOPM, 0, 0, NULL, 0,
+-			   mt6991_output_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+-	SND_SOC_DAPM_PGA_E("I2SOUT4_CH2", SND_SOC_NOPM, 1, 0, NULL, 0,
+-			   mt6991_output_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
++	SND_SOC_DAPM_PGA("I2SOUT4_CH1", SND_SOC_NOPM, 0, 0, NULL, 0),
++	SND_SOC_DAPM_PGA("I2SOUT4_CH2", SND_SOC_NOPM, 0, 0, NULL, 0),
+ };
+ 
+ static const struct snd_soc_dapm_route mt6991_output_routes[] = {
+@@ -701,9 +721,7 @@
+ 	}
+ 	dl0 = readl(afe->base + AFE_DL0_CON0);
+ 	dev_dbg(dev, "DL0 control at probe %#x\n", dl0);
+-	ret = regmap_clear_bits(afe->common.regmap, AFE_CONN116_1, BIT(0));
+-	if (!ret)
+-		ret = regmap_clear_bits(afe->common.regmap, AFE_CONN117_1, BIT(1));
++	ret = mt6991_speaker_routes(afe->common.regmap, false);
+ 	if (ret) {
+ 		pm_runtime_put_sync_suspend(dev);
+ 		pm_runtime_disable(dev);

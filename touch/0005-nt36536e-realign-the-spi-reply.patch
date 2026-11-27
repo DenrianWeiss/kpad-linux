@@ -1,0 +1,324 @@
+Subject: [PATCH] Input: nt36536e: realign the digitizer SPI reply before decoding
+
+The receiver samples the digitizer reply about 104 ns late, so at 19.2 MHz
+the reply arrives two bits ahead of the real content: the trim ID reads as
+'54 38 00 8d 94 0c' instead of '15 0e 00 23 65 03'. Detect the bit offset
+from the known trim ID, realign whole read windows including the carry byte,
+and apply the same shift to the capture path. Also accept the REK state the
+stock resume path waits for.
+
+--- a/drivers/input/touchscreen/nt36536e/nt36536-fw.c
++++ b/drivers/input/touchscreen/nt36536e/nt36536-fw.c
+@@ -3,7 +3,9 @@
+ #include <crypto/sha2.h>
+ #include <linux/delay.h>
+ #include <linux/firmware.h>
++#include <linux/io.h>
+ #include <linux/module.h>
++#include <linux/pm_runtime.h>
+ #include <linux/slab.h>
+ #include <linux/spi/spi.h>
+ #include <linux/unaligned.h>
+@@ -17,11 +19,14 @@
+ #define BOOT_READY 0x1fb50d
+ #define AUTO_COPY 0x1fc825
+ 
++u8 nt36536_read_shift = 2;
++
+ struct nvt_bus {
+ 	struct spi_device *spi;
+ 	u8 *tx;
+ 	u8 *rx;
+ 	size_t chunk;
++	u8 shift;
+ };
+ 
+ struct nvt_segment {
+@@ -42,6 +47,28 @@
+ 	return ret ?: (msg.actual_length == len ? 0 : -EIO);
+ }
+ 
++/* Read the controller state with its clock held, for protocol comparison. */
++static void nvt_log_spi_regs(struct nvt_bus *bus)
++{
++	struct device *ctlr = &bus->spi->controller->dev;
++	void __iomem *regs = ioremap(0x161d0000, 0x100);
++	int ret = pm_runtime_get_sync(ctlr);
++
++	if (ret < 0 || !regs) {
++		dev_notice(&bus->spi->dev, "SPI peek unavailable ret=%d\n", ret);
++		if (regs)
++			iounmap(regs);
++		if (ret >= 0)
++			pm_runtime_put_sync(ctlr);
++		return;
++	}
++	dev_notice(&bus->spi->dev, "SPI cfg0=%#x cfg1=%#x cmd=%#x pad=%#x cfg2=%#x cfg3=%#x\n",
++		   readl(regs + 0x00), readl(regs + 0x04), readl(regs + 0x18),
++		   readl(regs + 0x24), readl(regs + 0x28), readl(regs + 0x40));
++	iounmap(regs);
++	pm_runtime_put_sync(ctlr);
++}
++
+ static int page(struct nvt_bus *bus, u32 addr)
+ {
+ 	bus->tx[0] = 0xff;
+@@ -68,7 +95,10 @@
+ 	return write_bytes(bus, addr, (const u8 *)&bytes, width);
+ }
+ 
+-static int read_bytes(struct nvt_bus *bus, u32 addr, u8 *data, size_t len)
++/* One command byte, two idle bytes and the payload. The receiver samples the
++ * reply late by a fixed time, so the byte stream is realigned afterwards.
++ */
++static int read_stream(struct nvt_bus *bus, u32 addr, u8 *raw, size_t len)
+ {
+ 	int ret = page(bus, addr);
+ 
+@@ -78,10 +108,40 @@
+ 	bus->tx[0] = addr & 0x7f;
+ 	ret = transfer(bus, len + 2, true);
+ 	if (!ret)
+-		memcpy(data, bus->rx + 2, len);
++		memcpy(raw, bus->rx + 2, len);
+ 	return ret;
+ }
+ 
++static void shift_stream(const u8 *raw, u8 *data, size_t len, unsigned int shift)
++{
++	size_t i;
++
++	for (i = 0; i < len; i++) {
++		u8 carry = shift && i ? (u8)(raw[i - 1] << (8 - shift)) : 0;
++
++		data[i] = (raw[i] >> shift) | carry;
++	}
++}
++
++/* Read @len bytes at @addr. The receiver samples the reply two bits late, so
++ * the window starts one byte before the target; realigning the whole window
++ * keeps the carry that carries the target byte's top bits.
++ */
++static int read_bytes(struct nvt_bus *bus, u32 addr, u8 *data, size_t len)
++{
++	u8 raw[34], aligned[33];
++	int ret;
++
++	if (!addr || len + 2 > sizeof(raw))
++		return -EINVAL;
++	ret = read_stream(bus, addr - 1, raw, len + 2);
++	if (!ret) {
++		shift_stream(raw, aligned, len + 1, bus->shift);
++		memcpy(data, aligned + 1, len);
++	}
++	return ret;
++}
++
+ static int bootloader_reset(struct nvt_bus *bus)
+ {
+ 	int ret = write_value(bus, RESET, 0x69, 1);
+@@ -93,21 +153,38 @@
+ 
+ static int read_trim_id(struct nvt_bus *bus, u32 *event)
+ {
+-	u8 id[6] = {}, topology;
++	static bool logged;
++	u8 raw[18], aligned[18], id[8] = {}, topology;
++	unsigned int shift;
+ 	int ret;
+ 
+ 	ret = bootloader_reset(bus);
+ 	if (!ret)
+-		ret = write_bytes(bus, TRIM_ID, id, sizeof(id));
++		ret = write_bytes(bus, TRIM_ID, id, 6);
+ 	if (!ret)
+-		ret = read_bytes(bus, TRIM_ID, id, sizeof(id));
++		ret = read_stream(bus, TRIM_ID - 1, raw, sizeof(raw));
+ 	if (ret)
+ 		return ret;
+-	if ((id[0] != 0x14 && id[0] != 0x15) ||
+-	    id[3] != 0x23 || id[4] != 0x65 || id[5] != 0x03) {
+-		dev_notice(&bus->spi->dev, "unexpected trim ID %*ph\n", 6, id);
++	for (shift = 0; shift < 8; shift++) {
++		shift_stream(raw, aligned, sizeof(aligned), shift);
++		memcpy(id, aligned + 1, sizeof(id));
++		if ((id[0] == 0x14 || id[0] == 0x15) &&
++		    id[3] == 0x23 && id[4] == 0x65 && id[5] == 0x03)
++			break;
++	}
++	if (shift == 8) {
++		dev_notice(&bus->spi->dev, "unexpected trim ID %*ph\n", (int)sizeof(raw), raw);
++		if (!logged) {
++			logged = true;
++			nvt_log_spi_regs(bus);
++		}
+ 		return -ENODEV;
+ 	}
++	if (shift != bus->shift)
++		dev_notice(&bus->spi->dev, "trim ID shift=%u %*ph\n", shift,
++			   (int)sizeof(id), id);
++	bus->shift = shift;
++	nt36536_read_shift = shift;
+ 	ret = read_bytes(bus, TOPOLOGY, &topology, 1);
+ 	if (!ret)
+ 		*event = topology & 1 ? 0x130900 : 0x133300;
+@@ -138,7 +215,7 @@
+ 		      unsigned int attempts, unsigned int delay_us)
+ {
+ 	unsigned int i;
+-	u8 value;
++	u8 value = 0;
+ 	int ret;
+ 
+ 	for (i = 0; i < attempts; i++) {
+@@ -149,6 +226,7 @@
+ 			return 0;
+ 		usleep_range(delay_us, delay_us + 100);
+ 	}
++	dev_notice(&bus->spi->dev, "wait %#x timed out, last=%#x\n", addr, value);
+ 	return -ETIMEDOUT;
+ }
+ 
+@@ -156,25 +234,30 @@
+ 		    const struct nvt_segment *segments, u32 event)
+ {
+ 	static const u8 zeros[6], crc_command[] = { 0xae, 0 };
++	const char *stage = "reset";
+ 	u8 version[2];
+ 	unsigned int i;
+ 	int ret = bootloader_reset(bus);
+ 
+-	for (i = 0; !ret && i < 2; i++) {
+-		u32 bank = 0x1fcc30 + i * 16;
++	if (!ret) {
++		stage = "banks";
++		for (i = 0; !ret && i < 2; i++) {
++			u32 bank = 0x1fcc30 + i * 16;
+ 
+-		ret = write_value(bus, bank, segments[i].addr, 3);
+-		if (!ret)
+-			ret = write_value(bus, bank + 4, segments[i].last, 3);
+-		if (!ret)
+-			ret = write_value(bus, bank + 8, segments[i].crc, 4);
++			ret = write_value(bus, bank, segments[i].addr, 3);
++			if (!ret)
++				ret = write_value(bus, bank + 4, segments[i].last, 3);
++			if (!ret)
++				ret = write_value(bus, bank + 8, segments[i].crc, 4);
++		}
+ 	}
+-	if (!ret)
+-		ret = write_value(bus, AUTO_COPY, 0x56, 1);
++	if (!ret && (ret = write_value(bus, AUTO_COPY, 0x56, 1)))
++		stage = "auto-copy";
+ 	for (i = 0; !ret && i < 4; i++) {
+ 		const struct nvt_segment *s = &segments[i];
+ 		size_t offset = 0, size = s->last + 1;
+ 
++		stage = "payload";
+ 		while (!ret && offset < size) {
+ 			size_t len = min(bus->chunk, size - offset);
+ 
+@@ -182,23 +265,32 @@
+ 			offset += len;
+ 		}
+ 	}
+-	if (!ret)
+-		ret = wait_value(bus, AUTO_COPY, 0, 0, 200, 1000);
+-	if (!ret)
+-		ret = write_bytes(bus, event + 0x60, zeros, sizeof(zeros));
+-	if (!ret)
+-		ret = write_bytes(bus, event + 0x50, crc_command, sizeof(crc_command));
+-	if (!ret)
+-		ret = write_value(bus, BOOT_READY, 1, 1);
+-	if (ret)
++	if (!ret && (ret = wait_value(bus, AUTO_COPY, 0, 0, 200, 1000)))
++		stage = "wait-copy";
++	if (!ret && (ret = write_bytes(bus, event + 0x60, zeros, sizeof(zeros))))
++		stage = "event-clear";
++	if (!ret && (ret = write_bytes(bus, event + 0x50, crc_command, sizeof(crc_command))))
++		stage = "event-crc";
++	if (!ret && (ret = write_value(bus, BOOT_READY, 1, 1)))
++		stage = "boot-ready";
++	if (ret) {
++		dev_notice(&bus->spi->dev, "download stopped at %s: %d\n", stage, ret);
+ 		return ret;
++	}
+ 	usleep_range(5000, 5500);
+ 	ret = wait_value(bus, event + 0x60, 0xa0, 0xaf, 11, 10000);
+-	if (!ret)
+-		ret = read_bytes(bus, event + 0x78, version, sizeof(version));
++	if (ret) {
++		dev_notice(&bus->spi->dev, "firmware start poll failed at event %#x: %d\n",
++			   event, ret);
++		return ret;
++	}
++	ret = read_bytes(bus, event + 0x78, version, sizeof(version));
+ 	if (!ret && (version[0] != fw->data[fw->size - 4096] ||
+-		     version[0] + version[1] != 255))
++		     version[0] + version[1] != 255)) {
++		dev_notice(&bus->spi->dev, "firmware version %*ph mismatch\n",
++			   (int)sizeof(version), version);
+ 		return -EBADMSG;
++	}
+ 	return ret;
+ }
+ 
+@@ -238,11 +330,14 @@
+ 		segments[i].addr = get_unaligned_le32(entry + (i < 2 ? 4 : 0));
+ 		segments[i].last = get_unaligned_le32(entry + (i < 2 ? 8 : 4));
+ 		segments[i].crc = get_unaligned_le32(entry + 12);
++		dev_notice(&spi->dev, "segment %d addr=%#x last=%#x crc=%#x source=%#x\n",
++			   i, segments[i].addr, segments[i].last, segments[i].crc,
++			   segments[i].source);
+ 	}
+ 	/* Keep subsequent commands at the same offset within a 128-byte page. */
+ 	bus.chunk = round_down(min_t(size_t, CHUNK, max - 1), 128);
+ 	bus.tx = kmalloc(bus.chunk + 1, GFP_KERNEL);
+-	bus.rx = kmalloc(8, GFP_KERNEL);
++	bus.rx = kmalloc(32, GFP_KERNEL);
+ 	if (!bus.tx || !bus.rx) {
+ 		ret = -ENOMEM;
+ 		goto out;
+@@ -255,9 +350,11 @@
+ 				break;
+ 		}
+ 	}
+-	/* Stock nvt_ts_resume waits for REK (0xa1) after SRAM download. */
++	/* The stock resume path leaves the firmware in REK (0xa0) and then
++	 * brings the pipeline up once the event page reports that state.
++	 */
+ 	if (!ret)
+-		ret = wait_value(&bus, event + 0x60, 0xa1, 0xaf, 51, 10000);
++		ret = wait_value(&bus, event + 0x60, 0xa0, 0xaf, 51, 10000);
+ 	if (!ret)
+ 		dev_info(&spi->dev, "CSOT firmware ready, event page %#x\n", event);
+ out:
+--- a/drivers/input/touchscreen/nt36536e/nt36536-fw.h
++++ b/drivers/input/touchscreen/nt36536e/nt36536-fw.h
+@@ -2,5 +2,7 @@
+ #ifndef NT36536_FW_H
+ #define NT36536_FW_H
+ struct spi_device;
++/* Receiver bit offset measured on the trim-ID read; capture reads reuse it. */
++extern u8 nt36536_read_shift;
+ int nt36536_load_turner_firmware(struct spi_device *spi);
+ #endif
+--- a/drivers/input/touchscreen/nt36536e/capture.c
++++ b/drivers/input/touchscreen/nt36536e/capture.c
+@@ -74,6 +74,15 @@
+ 	ret = spi_sync(state->dev->spi, &msg);
+ 	if (!ret && msg.actual_length != state->len)
+ 		ret = -EIO;
++	if (!ret && nt36536_read_shift) {
++		u8 shift = nt36536_read_shift;
++		size_t i;
++
++		for (i = state->len - 1; i > 0; i--)
++			state->rx[i] = (state->rx[i] >> shift) |
++				       (state->rx[i - 1] << (8 - shift));
++		state->rx[0] >>= shift;
++	}
+ 	return ret;
+ }
+ 

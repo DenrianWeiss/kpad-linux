@@ -1,0 +1,42 @@
+From 342e8d48c5d1284db33fd78546b552dfdf6f4223 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 07:10:53 +0800
+Subject: [PATCH 63/65] dt-bindings: clock: describe the MT6991 VLP clock
+ controller
+
+---
+ .../devicetree/bindings/clock/mediatek,mt8196-sys-clock.yaml | 1 +
+ include/dt-bindings/clock/mediatek,mt6991-clock.h            | 5 +++++
+ 2 files changed, 6 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt8196-sys-clock.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt8196-sys-clock.yaml
+index 5b1d1e1..da71a18 100644
+--- a/Documentation/devicetree/bindings/clock/mediatek,mt8196-sys-clock.yaml
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt8196-sys-clock.yaml
+@@ -29,6 +29,7 @@ properties:
+       - enum:
+           - mediatek,mt6991-apmixedsys
+           - mediatek,mt6991-topckgen
++          - mediatek,mt6991-vlpckgen
+           - mediatek,mt8196-apmixedsys
+           - mediatek,mt8196-armpll-b-pll-ctrl
+           - mediatek,mt8196-armpll-bl-pll-ctrl
+diff --git a/include/dt-bindings/clock/mediatek,mt6991-clock.h b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+index 1ae79c7..a511871 100644
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -42,6 +42,11 @@
+ #define MT6991_CLK_TOP_USB_XHCI_1P            32
+ #define MT6991_CLK_TOP_USB_FMCNT_P1           33
+ 
++#define MT6991_CLK_TOP_MAINPLL_D9            34
++
++#define MT6991_CLK_VLP_USB_TOP                0
++#define MT6991_CLK_VLP_USB_XHCI               1
++
+ #define MT6991_CLK_PERI_UART0_BCLK         0
+ #define MT6991_CLK_PERI_SPI6_BCLK          1
+ 
+-- 
+2.50.1 (Apple Git-155)
+

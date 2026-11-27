@@ -1,0 +1,2280 @@
+Subject: [RFC PATCH] drm/mediatek: add Turner MT6991 dual DSI KMS bring-up driver
+
+Build the tested atomic primary plane, shared DMA scan buffers, dual DSI
+video path and CSOT mode list against Linux 7.3. The Turner firmware
+kexec handoff and display power providers are required at runtime.
+
+--- a/drivers/gpu/drm/mediatek/Kconfig
++++ b/drivers/gpu/drm/mediatek/Kconfig
+@@ -57,3 +57,11 @@
+ 	  This driver can also be built as a module. If so, the HDMIv2
+ 	  module will be called "mtk_hdmi_v2", and the DDCv2 module
+ 	  will be called "mtk_hdmi_ddc_v2".
++
++config DRM_MEDIATEK_TURNER
++	tristate "Turner MT6991 dual DSI display"
++	depends on DRM_MEDIATEK && OF && I2C && IOMMU_API
++	select DRM_GEM_SHMEM_HELPER
++	help
++	  Enable the native KMS primary plane for the Redmi K Pad panel
++	  using two EXDMA engines, DSC encoders and DSI links.
+--- a/drivers/gpu/drm/mediatek/Makefile
++++ b/drivers/gpu/drm/mediatek/Makefile
+@@ -28,3 +28,5 @@
+ obj-$(CONFIG_DRM_MEDIATEK_HDMI_V2) += mtk_hdmi_ddc_v2.o
+ 
+ obj-$(CONFIG_DRM_MEDIATEK_DP) += mtk_dp.o
++
++obj-$(CONFIG_DRM_MEDIATEK_TURNER) += turner/
+--- /dev/null
++++ b/drivers/gpu/drm/mediatek/turner/Makefile
+@@ -0,0 +1 @@
++obj-$(CONFIG_DRM_MEDIATEK_TURNER) += command-host.o
+--- /dev/null
++++ b/drivers/gpu/drm/mediatek/turner/command-host.c
+@@ -0,0 +1,756 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Dual-host command-mode bring-up on the Turner firmware tree. */
++#include <linux/i2c.h>
++#include <linux/dma-mapping.h>
++#include <linux/iommu.h>
++#include <linux/regmap.h>
++#include <linux/arm-smccc.h>
++#include <linux/clk.h>
++#include <linux/soc/mediatek/mtk_sip_svc.h>
++#include <linux/module.h>
++#include <linux/of_graph.h>
++#include <linux/of_address.h>
++#include <linux/of_platform.h>
++#include <linux/phy/phy.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <drm/drm_panel.h>
++#include "mt6991-dsi-cmdq.h"
++#include "mt6991-dsi-size.h"
++#include "mt6991-dsc-engine.h"
++#include "turner-dsc.h"
++#include "turner-modes.h"
++
++static const u16 timing_regs[] = {
++	MT6991_DSI_VACT_NL, MT6991_DSI_PSCTRL, MT6991_DSI_SIZE_CON,
++	0x60, 0x64, 0x68, 0x80, 0x84, 0x88,
++};
++
++#include "kms.h"
++static bool kms_stop;
++struct turner_host {
++	struct turner_kms *kms;
++	bool fetch_unsettled;
++	struct mipi_dsi_host host;
++	struct mipi_dsi_device *panel;
++	void __iomem *regs;
++	struct clk *hs;
++	struct clk_bulk_data clocks[2];
++	struct phy *phy;
++	struct turner_host *peer;
++	bool powered;
++	u32 control, lanes, pattern, clock_lane, data_lane, shadow, timing[ARRAY_SIZE(timing_regs)];
++	unsigned int transfers;
++};
++
++static int attach(struct mipi_dsi_host *host, struct mipi_dsi_device *dsi)
++{
++	struct turner_host *ctx = container_of(host, struct turner_host, host);
++
++	if (ctx->panel || dsi->channel || dsi->lanes != 4)
++		return -EINVAL;
++	ctx->panel = dsi;
++	dev_notice(host->dev, "attached panel %pOF, VC %u, %u lanes\n",
++		   dsi->dev.of_node, dsi->channel, dsi->lanes);
++	return 0;
++}
++
++static int detach(struct mipi_dsi_host *host, struct mipi_dsi_device *dsi)
++{
++	container_of(host, struct turner_host, host)->panel = NULL;
++	return 0;
++}
++
++static void snapshot(struct device *dev, void __iomem *base, const char *phase)
++{
++	u32 shadow = readl(base + 0xd0);
++	u32 ctrl, lanes, mode;
++
++	writel(shadow & ~BIT(2), base + 0xd0);
++	ctrl = readl(base + 0x30);
++	lanes = readl(base + 0x38);
++	mode = readl(base + 0x34);
++
++	writel(shadow | BIT(2), base + 0xd0);
++	dev_notice(dev, "%s ctrl=%#x/%#x lanes=%#x/%#x mode=%#x/%#x irq=%#x shadow=%#x\n",
++		   phase, ctrl, readl(base + 0x30), lanes, readl(base + 0x38),
++		   mode, readl(base + 0x34), readl(base + 0xc), shadow);
++	writel(shadow, base + 0xd0);
++}
++
++static int power_up(struct turner_host *ctx);
++static void power_down(struct turner_host *ctx);
++
++static ssize_t transfer(struct mipi_dsi_host *host, const struct mipi_dsi_msg *msg)
++{
++	struct turner_host *ctx = container_of(host, struct turner_host, host);
++	ssize_t ret;
++
++	if (!ctx->peer)
++		return -EHOSTDOWN;
++	if (!ctx->powered) {
++		ret = power_up(ctx->peer);
++		if (ret)
++			return ret;
++		ret = power_up(ctx);
++		if (ret) {
++			power_down(ctx->peer);
++			return ret;
++		}
++		ctx->powered = true;
++	}
++	if (!ctx->transfers) {
++		snapshot(host->dev, ctx->regs, "primary before packet");
++		snapshot(host->dev, ctx->peer->regs, "secondary before packet");
++	}
++	ret = mt6991_dsi_dual_transfer(ctx->regs, ctx->peer->regs, 4, msg);
++	ctx->transfers++;
++	if (ret < 0 || msg->rx_len)
++		dev_notice(host->dev, "command %u type=%#x ret=%zd irq=%#x rx=%#x\n",
++			   ctx->transfers, msg->type, ret, readl(ctx->regs + 0xc),
++			   readl(ctx->regs + 0xa4));
++	if (ret < 0) {
++		void __iomem *ports[] = { ctx->regs, ctx->peer->regs };
++		unsigned int i;
++
++		for (i = 0; i < ARRAY_SIZE(ports); i++) {
++			void __iomem *base = ports[i];
++
++			dev_notice(host->dev, "port=%u ctrl=%#x mode=%#x lanes=%#x irq=%#x cmctl=%#x words=%#x lines=%#x queue=%#x header=%#x lc=%#x ld=%#x\n",
++				   i, readl(base + 0x30), readl(base + 0x34),
++				   readl(base + 0x38), readl(base + 0xc), readl(base + 0x274),
++				   readl(base + 0x27c), readl(base + 0x280), readl(base + 0x44),
++				   readl(base + 0x400), readl(base + 0x1d0), readl(base + 0x1d4));
++		}
++	}
++	return ret;
++}
++
++static const struct mipi_dsi_host_ops ops = {
++	.attach = attach, .detach = detach, .transfer = transfer,
++};
++
++/* Follow the MT6991 host sleep-out trigger after the PHY PLL starts. */
++static int exit_ulps(struct turner_host *ctx)
++{
++	void __iomem *regs = ctx->regs;
++	u32 mode = readl(regs + 0x34), data = readl(regs + 0x1d4);
++	u32 irq = readl(regs + 8), timer = readl(regs + 0x200);
++	u32 ctrl = readl(regs + 0x30), status, wake;
++	int ret;
++
++	wake = clk_get_rate(ctx->hs) / (1024 * 8 * 1000) + 1;
++	writel(ctrl | BIT(2), regs + 0x30);
++	writel(ctrl, regs + 0x30);
++	writel(readl(regs + 0xc) & ~BIT(6), regs + 0xc);
++	writel(irq | BIT(6), regs + 8);
++	writel(data | BIT(3), regs + 0x1d4);
++	writel(mode | BIT(20), regs + 0x34);
++	writel((timer & ~0xffff) | wake, regs + 0x200);
++	writel(0, regs);
++	writel(BIT(2), regs);
++	ret = readl_poll_timeout(regs + 0xc, status, status & BIT(6), 20, 100000);
++	dev_notice(ctx->host.dev, "ULPS exit=%d status=%#x wake=%u engine=%lu digital=%lu state=%#x\n",
++		   ret, status, wake, clk_get_rate(ctx->clocks[0].clk),
++		   clk_get_rate(ctx->clocks[1].clk), readl(regs + 0x278));
++	writel(irq, regs + 8);
++	writel(data, regs + 0x1d4);
++	writel(mode, regs + 0x34);
++	writel(0, regs);
++	writel(timer, regs + 0x200);
++	writel(ctrl | BIT(0), regs + 0x30);
++	writel(ctrl, regs + 0x30);
++	return ret;
++}
++
++static int power_up(struct turner_host *ctx)
++{
++	struct device *dev = ctx->host.dev;
++	void __iomem *regs = ctx->regs;
++	unsigned int i;
++	int ret;
++
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return ret;
++	ret = clk_set_rate(ctx->hs, 1173586000);
++	if (ret)
++		goto suspend;
++	ret = phy_init(ctx->phy);
++	if (ret)
++		goto suspend;
++	ret = phy_power_on(ctx->phy);
++	if (ret)
++		goto exit_phy;
++	ret = clk_bulk_prepare_enable(2, ctx->clocks);
++	if (ret)
++		goto power_off;
++	ctx->control = readl(regs + 0x30);
++	ctx->lanes = readl(regs + 0x38);
++	dev_notice(dev, "start=%#x status=%#x ctrl=%#x mode=%#x lanes=%#x tim0=%#x tim1=%#x tim2=%#x tim3=%#x swap=%#x\n",
++		   readl(regs), readl(regs + 0xc), ctx->control, readl(regs + 0x34), ctx->lanes,
++		   readl(regs + 0x600), readl(regs + 0x604), readl(regs + 0x608),
++		   readl(regs + 0x60c), readl(regs + 0x618));
++	if (readl(regs) || (readl(regs + 0xc) & BIT(31)) || (readl(regs + 0x34) & 3)) {
++		ret = -EBUSY;
++		goto disable;
++	}
++	ctx->shadow = readl(regs + 0xd0);
++	ctx->pattern = readl(regs + 0x610);
++	ctx->clock_lane = readl(regs + 0x1d0);
++	ctx->data_lane = readl(regs + 0x1d4);
++	writel(ctx->shadow & ~BIT(1), regs + 0xd0);
++	writel(ctx->control | BIT(1), regs + 0x30);
++	writel(ctx->lanes | GENMASK(5, 2), regs + 0x38);
++	for (i = 0; i < ARRAY_SIZE(timing_regs); i++)
++		ctx->timing[i] = readl(regs + timing_regs[i]);
++	ret = mt6991_dsi_dual_dsc_timing(regs, &turner_modes[0], &turner_dsc);
++	if (!ret)
++		ret = exit_ulps(ctx);
++	if (!ret) {
++		writel(0x55, regs + 0x610);
++		for (i = 0; i < 2; i++) {
++			void __iomem *lane = regs + 0x1d0 + i * 4;
++			u32 control = readl(lane) & ~(BIT(1) | BIT(2));
++
++			writel(control, lane);
++			writel(control | BIT(2), lane);
++			writel(control, lane);
++		}
++		dev_notice(dev, "lane wake lc=%#x ld=%#x clock-before=%#x data-before=%#x\n",
++			   readl(regs + 0x1d0), readl(regs + 0x1d4),
++			   ctx->clock_lane, ctx->data_lane);
++		snapshot(dev, regs, "after ULPS");
++		return 0;
++	}
++	for (i = 0; i < ARRAY_SIZE(timing_regs); i++)
++		writel(ctx->timing[i], regs + timing_regs[i]);
++	writel(ctx->shadow, regs + 0xd0);
++	writel(ctx->lanes, regs + 0x38);
++	writel(ctx->control, regs + 0x30);
++disable:
++	clk_bulk_disable_unprepare(2, ctx->clocks);
++power_off:
++	phy_power_off(ctx->phy);
++exit_phy:
++	phy_exit(ctx->phy);
++suspend:
++	pm_runtime_put_sync(dev);
++	return ret;
++}
++
++static void power_down(struct turner_host *ctx)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(timing_regs); i++)
++		writel(ctx->timing[i], ctx->regs + timing_regs[i]);
++	writel(ctx->clock_lane, ctx->regs + 0x1d0);
++	writel(ctx->data_lane, ctx->regs + 0x1d4);
++	writel(ctx->pattern, ctx->regs + 0x610);
++	writel(ctx->shadow, ctx->regs + 0xd0);
++	writel(ctx->lanes, ctx->regs + 0x38);
++	writel(ctx->control, ctx->regs + 0x30);
++	clk_bulk_disable_unprepare(2, ctx->clocks);
++	phy_power_off(ctx->phy);
++	phy_exit(ctx->phy);
++	pm_runtime_put_sync(ctx->host.dev);
++}
++
++/* The powered DSI hosts hold DIS1 throughout this register test. */
++static int exercise_encoder(struct device *dev, const char *path)
++{
++	struct device_node *node __free(device_node) = of_find_node_by_path(path);
++	struct resource resource;
++	void __iomem *regs;
++	struct clk *clk;
++	u32 pps[20] = {}, old_pps[20], old[ARRAY_SIZE(turner_dsc_config)];
++	unsigned int i;
++	int ret;
++
++	if (!node || of_address_to_resource(node, 0, &resource))
++		return -ENODEV;
++	clk = of_clk_get(node, 0);
++	if (IS_ERR(clk))
++		return PTR_ERR(clk);
++	ret = clk_prepare_enable(clk);
++	if (ret)
++		goto put_clk;
++	regs = of_io_request_and_map(node, 0, "Turner DSC validation");
++	if (IS_ERR(regs)) {
++		ret = PTR_ERR(regs);
++		goto disable;
++	}
++	if (readl(regs) & BIT(0)) {
++		ret = -EBUSY;
++		goto unmap;
++	}
++	turner_dsc_pack_pps(&turner_dsc, pps);
++	for (i = 0; i < ARRAY_SIZE(turner_dsc_config); i++) {
++		const struct turner_dsc_write *w = &turner_dsc_config[i];
++
++		old[i] = readl(regs + w->offset);
++		writel((old[i] & ~w->mask) | (w->value & w->mask), regs + w->offset);
++	}
++	for (i = 0; i < ARRAY_SIZE(pps); i++) {
++		old_pps[i] = readl(regs + 0x80 + i * 4);
++		writel(pps[i], regs + 0x80 + i * 4);
++	}
++	for (i = 0; i < ARRAY_SIZE(pps); i++)
++		if (readl(regs + 0x80 + i * 4) != pps[i])
++			ret = -EIO;
++	dev_notice(dev, "DSC %pOF clk=%lu pic_w=%#x pic_h=%#x slice_w=%#x PPS match=%d\n",
++		   node, clk_get_rate(clk), readl(regs + 0x18), readl(regs + 0x1c),
++		   readl(regs + 0x20), !ret);
++	for (i = 0; i < ARRAY_SIZE(pps); i++)
++		writel(old_pps[i], regs + 0x80 + i * 4);
++	for (i = ARRAY_SIZE(turner_dsc_config); i > 0; i--)
++		writel(old[i - 1], regs + turner_dsc_config[i - 1].offset);
++unmap:
++	iounmap(regs);
++	release_mem_region(resource.start, resource_size(&resource));
++disable:
++	clk_disable_unprepare(clk);
++put_clk:
++	clk_put(clk);
++	return ret;
++}
++
++/* Establish access to the real fetch engine before enabling memory reads. */
++static int exercise_fetch_geometry(struct device *dev, const char *path)
++{
++	struct device_node *node __free(device_node) = of_find_node_by_path(path);
++	struct resource resource;
++	struct clk *clk;
++	void __iomem *regs;
++	u32 size, pitch;
++	int ret;
++
++	if (!node || of_address_to_resource(node, 0, &resource))
++		return -ENODEV;
++	clk = of_clk_get(node, 0);
++	if (IS_ERR(clk))
++		return PTR_ERR(clk);
++	ret = clk_prepare_enable(clk);
++	if (ret)
++		goto put;
++	regs = of_io_request_and_map(node, 0, "Turner fetch geometry");
++	if (IS_ERR(regs)) {
++		ret = PTR_ERR(regs);
++		goto disable;
++	}
++	if (readl(regs + 0x40) & BIT(0)) {
++		ret = -EBUSY;
++		goto unmap;
++	}
++	size = readl(regs + 0x48);
++	pitch = readl(regs + 0x2f4);
++	writel(1880 * 4, regs + 0x2f4);
++	writel((3008 << 16) | 1880, regs + 0x48);
++	ret = readl(regs + 0x48) == ((3008 << 16) | 1880) &&
++	      readl(regs + 0x2f4) == 1880 * 4 ? 0 : -EIO;
++	dev_notice(dev, "EXDMA %pOF clk=%lu size=%#x pitch=%u result=%d\n",
++		   node, clk_get_rate(clk), readl(regs + 0x48), readl(regs + 0x2f4), ret);
++	writel(size, regs + 0x48);
++	writel(pitch, regs + 0x2f4);
++unmap:
++	iounmap(regs);
++	release_mem_region(resource.start, resource_size(&resource));
++disable:
++	clk_disable_unprepare(clk);
++put:
++	clk_put(clk);
++	return ret;
++}
++
++#include "scan-path.h"
++#include "fetch.h"
++
++/* Exercise sync-pulse video between a verified prepare and unprepare. */
++static void sample_video(struct turner_host *ctx, const struct drm_display_mode *profile,
++			 unsigned int duration_ms, const dma_addr_t addr[2])
++{
++	struct turner_host *ports[] = { ctx, ctx->peer };
++	u32 clock[2], mode[2], dual = readl(ctx->peer->regs + 0x30);
++	unsigned int i, frame[2] = {}, max_y[2] = {}, moving[2] = {}, prev[2] = {};
++	u32 fifo[2][3], reset_select[2], reserved[2];
++	unsigned int reported = 0, drained = 0;
++	ktime_t deadline = 0;
++	s64 first_us[2] = {}, last_us[2] = {};
++	u32 status;
++
++	struct scan_path *path __free(kfree) = kzalloc(sizeof(*path), GFP_KERNEL);
++	int ret;
++
++	if (!path)
++		return;
++	ret = start_scan_path(path, ctx->host.dev);
++	dev_notice(ctx->host.dev, "dual color scan setup=%d\n", ret);
++	if (ret) {
++		close_scan_path(path);
++		return;
++	}
++	for (i = 0; i < 2; i++) {
++		void __iomem *base = ports[i]->regs;
++
++		mt6991_dsi_dual_dsc_timing(base, profile, &turner_dsc);
++		/* Clear only the previous frame-done latch, as in the OEM DSC ISR. */
++		writel(BIT(0), path->block[DSC_L+i].base + 0xc);
++		writel(0, path->block[DSC_L+i].base + 0xc);
++		clock[i] = readl(base + 0x1d0);
++		mode[i] = readl(base + 0x34);
++		fifo[i][0] = readl(base + 0x300);
++		fifo[i][1] = readl(base + 0x304);
++		fifo[i][2] = readl(base + 0x310);
++		reset_select[i] = readl(base + 0x274);
++		reserved[i] = readl(base + 0x3f8);
++		writel(reset_select[i] | BIT(10), base + 0x274);
++		writel(reserved[i] & ~BIT(29), base + 0x3f8);
++		dev_notice(ctx->host.dev, "DSI%u mmreset=%#x->%#x reserved=%#x->%#x size=%#x ps=%#x vact=%u\n",
++			   i, reset_select[i], readl(base + 0x274), reserved[i],
++			   readl(base + 0x3f8), readl(base + 0x2c), readl(base + 0x3c),
++			   readl(base + 0x6c));
++		/* Working Turner snapshot: bypass shadow in video mode. */
++		writel(readl(base + 0xd0) | BIT(1), base + 0xd0);
++		ret = turner_dsi_video_frame_lp(base);
++		if (ret)
++			dev_warn(ctx->host.dev, "DSI%u invalid frame LP timing: %d\n", i, ret);
++		dev_notice(ctx->host.dev, "DSI%u per-frame LP hfp=%#x shadow=%#x\n", i,
++			   readl(base + 0x88), readl(base + 0xd0));
++		mt6991_dsi_enable_video_fifo(base);
++		dev_notice(ctx->host.dev, "DSI%u fifo before=%#x enabled=%#x transfers=%u\n",
++			   i, fifo[i][0], readl(base + 0x300), readl(base + 0x310));
++		writel(0, base);
++		writel((mode[i] & ~3) | 1, base + 0x34);
++		writel(clock[i] | BIT(0), base + 0x1d0);
++		writel(readl(base + 0xc) & ~(BIT(4) | BIT(12)), base + 0xc);
++	}
++	turner_program_fetch(path, addr);
++	/* Match the stock prepare / mutex / trigger packet ordering. */
++	static const enum block_id trigger_order[] = {
++		MUT_DIS0, MUT_OVL0, MUT_DIS1, MUT_OVL1,
++	};
++	for (i = 0; i < ARRAY_SIZE(trigger_order); i++)
++		scan_write(&path->block[trigger_order[i]], 0x20, U32_MAX, 1);
++	writel(dual | BIT(4), ctx->peer->regs + 0x30);
++	writel(0, ctx->regs);
++	writel(1, ctx->regs);
++
++	do {
++		for (i = 0; i < 2; i++) {
++			void __iomem *base = ports[i]->regs;
++
++			u32 pos = readl(base + 0x244);
++			max_y[i] = max(max_y[i], (pos >> 16) & 0x1fff);
++			moving[i] += pos != prev[i];
++			prev[i] = pos;
++			status = readl(base + 0xc);
++			if (status & BIT(4)) {
++				writel(status & ~BIT(4), base + 0xc);
++				frame[i]++;
++				if (deadline)
++					drained |= BIT(i);
++				if (!i) {
++					struct turner_kms *k = ctx->kms;
++					mutex_lock(&k->flip_lock);
++					k->retiring = -1;
++					if (k->pending >= 0) {
++						const dma_addr_t *next = k->slot[k->pending].addr;
++						writel(lower_32_bits(next[0]), path->block[FETCH_L].base+0xf40);
++						writel(lower_32_bits(next[1]+3760), path->block[FETCH_R].base+0xf40);
++						k->retiring = k->front;
++						k->front = k->pending;
++						k->pending = -1;
++					}
++					mutex_unlock(&k->flip_lock);
++					wake_up_all(&k->flip_wait);
++					drm_crtc_handle_vblank(&k->crtc);
++					if (reported != READ_ONCE(ctx->kms->sequence) && frame[i] % (reported < 4 ? 8 : 256) == 0) {
++						reported = READ_ONCE(ctx->kms->sequence);
++						dev_notice(ctx->host.dev, "KMS frame %u rate=%d pixels=%06x/%06x\n",
++							   reported, drm_mode_vrefresh(profile),
++							   (readl(path->block[FETCH_L].base+0x24c)>>4)&0xffffff,
++							   (readl(path->block[FETCH_R].base+0x24c)>>4)&0xffffff);
++					}
++				}
++				last_us[i] = ktime_to_us(ktime_get());
++				if (frame[i] == 1)
++					first_us[i] = last_us[i];
++			}
++		}
++		usleep_range(250, 450);
++		if (READ_ONCE(kms_stop))
++			schedule_work(&ctx->kms->shutdown);
++		if (!deadline && (READ_ONCE(ctx->kms->finished) ||
++		    READ_ONCE(ctx->kms->hz) != drm_mode_vrefresh(profile)))
++			deadline = ktime_add_ms(ktime_get(), 100);
++	} while (!deadline || (drained != 3 && ktime_before(ktime_get(), deadline)));
++	for (i = 0; i < 2; ++i) {
++		void __iomem *f = path->block[FETCH_L+i].base;
++		u32 data = readl(f + 0x24c);
++		dev_notice(ctx->host.dev, "memory frame side=%u addr=%#x:%08x rdma=%#x pixel_bus=%#x pos=%#x\n",
++			   i, readl(f+0xf4c), readl(f+0xf40), readl(f+0x100),
++			   (data >> 4) & 0xffffff, readl(f+0x244));
++	}
++	report_scan_path(path, ctx->host.dev);
++	for (i = 0; i < 2; i++) {
++		void __iomem *base = ports[i]->regs;
++
++		dev_notice(ctx->host.dev, "video result port=%u frames=%u irq=%#x vstate=%#x lines=%#x\n",
++			   i, frame[i], readl(base + 0xc), readl(base + 0x278), readl(base + 0x280));
++		dev_notice(ctx->host.dev, "scan rate=%d port=%u frames=%u elapsed_us=%lld dsc_irq=%#x underrun=%u max_y=%u\n",
++			   drm_mode_vrefresh(profile), i, frame[i], last_us[i] - first_us[i],
++			   readl(path->block[DSC_L+i].base + 8), !!(readl(base + 0xc) & BIT(12)), max_y[i]);
++		writel(mode[i], base + 0x34);
++	}
++	for (i = 0; i < ARRAY_SIZE(ports); i++)
++		writel(0, ports[i]->regs);
++	for (i = 0; i < ARRAY_SIZE(ports); i++) {
++		void __iomem *base = ports[i]->regs;
++		int ret = readl_poll_timeout(base + 0xc, status, !(status & BIT(31)),
++					     100, 100000);
++
++		dev_notice(ctx->host.dev, "video stop port=%u idle=%d status=%#x\n",
++			   i, !ret, status);
++		dev_notice(ctx->host.dev, "DSI%u input max_y=%u changes=%u last=%#x\n",
++			   i, max_y[i], moving[i], prev[i]);
++		writel(ports[i]->shadow & ~BIT(1), base + 0xd0);
++		writel(reset_select[i], base + 0x274);
++		writel(reserved[i], base + 0x3f8);
++		writel(fifo[i][0], base + 0x300);
++		writel(fifo[i][1], base + 0x304);
++		writel(fifo[i][2], base + 0x310);
++		writel(clock[i], base + 0x1d0);
++	}
++	writel(dual, ctx->peer->regs + 0x30);
++	for (i = 0; i < 2; ++i) {
++		void __iomem *f = path->block[FETCH_L+i].base;
++		/* The OEM stop sequence clears engine enable and resets the layer. */
++		writel(readl(f + 0x20) & ~BIT(0), f + 0x20);
++		writel(1, f + 0x24);
++		writel(0, f + 0x24);
++		writel(0, f + 0x40);
++		writel(0, f + 0x100);
++		ret = readl_poll_timeout(f + 0x240, status, status & BIT(19), 10, 100000);
++		if (ret) {
++			ctx->fetch_unsettled = true;
++			dev_err(ctx->host.dev, "fetch side %u did not report idle\n", i);
++		}
++	}
++	close_scan_path(path);
++}
++
++// SPDX-License-Identifier: GPL-2.0-only
++
++#include "service.h"
++
++static int turner_memory_frame(struct turner_host *ctx)
++{
++	struct device_node *ln __free(device_node) = of_find_node_by_path("/soc/disp-ovl0-exdma3@32860000");
++	struct device_node *rn __free(device_node) = of_find_node_by_path("/soc/disp-ovl1-exdma3@32c60000");
++	struct device_node *sn __free(device_node) = of_parse_phandle(rn, "mtk,smmu-shared", 0);
++	struct platform_device *left = of_find_device_by_node(ln), *right = of_find_device_by_node(sn);
++	int ret = -EPROBE_DEFER;
++
++	if (left && right) {
++		for (int retry = 0; retry < 100 && ret == -EPROBE_DEFER; retry++) {
++			msleep(20);
++			ret = turner_check_buffer(&left->dev, &right->dev, ctx);
++		}
++	}
++	if (right)
++		put_device(&right->dev);
++	if (left)
++		put_device(&left->dev);
++	return ret;
++}
++
++/* Query the non-secure MM SMMU only while TF-A holds its power reference. */
++static void inspect_backlight(struct mipi_dsi_device *panel, bool enabled)
++{
++	struct device_node *node __free(device_node) =
++		of_parse_phandle(panel->dev.of_node, "backlight", 0);
++	struct i2c_client *client;
++	struct regmap *map;
++	unsigned int low, high, control, bias, cfg;
++	u8 pwm[2];
++	int ret;
++
++	if (!of_device_is_compatible(node, "xiaomi,turner-ktz8866"))
++		return;
++	client = of_find_i2c_device_by_node(node);
++	if (!client)
++		return;
++	map = dev_get_regmap(&client->dev, NULL);
++	ret = map ? regmap_read(map, 0x04, &low) : -ENODEV;
++	if (!ret)
++		ret = regmap_read(map, 0x05, &high);
++	if (!ret)
++		ret = regmap_read(map, 0x08, &control);
++	if (!ret)
++		ret = regmap_read(map, 0x09, &bias);
++	if (!ret)
++		ret = regmap_read(map, 0x02, &cfg);
++	if (!ret)
++		ret = regmap_bulk_read(map, 0x12, pwm, sizeof(pwm));
++	if (ret)
++		dev_warn(&client->dev, "panel backlight readback failed: %d\n", ret);
++	else
++		dev_notice(&client->dev, "panel on=%u backlight code=%u enable=%#x bias=%#x cfg=%#x pwm=%u\n",
++			   enabled, (high << 3) | (low & 7), control, bias, cfg,
++			   ((pwm[1] & 7) << 8) | pwm[0]);
++	put_device(&client->dev);
++}
++
++static void inspect_mm_smmu(struct device *dev)
++{
++	struct device_node *np __free(device_node) =
++		of_find_compatible_node(NULL, NULL, "mediatek,mt6991-mm-smmu");
++	struct arm_smccc_res reply;
++	struct resource res;
++	void __iomem *base;
++
++	if (!np || of_address_to_resource(np, 0, &res) || resource_size(&res) < SZ_4K)
++		return;
++	base = ioremap(res.start, SZ_4K);
++	if (!base)
++		return;
++	/* MT6991 firmware MM instance = 0, secure service bit 11, PM_GET/PUT = 3/4. */
++	arm_smccc_smc(MTK_SIP_KERNEL_IOMMU_CONTROL, BIT(11) | 3, 0, 0, 0, 0, 0, 0, &reply);
++	dev_notice(dev, "MM SMMU PM_GET=%ld\n", (long)reply.a0);
++	if (!reply.a0) {
++		dev_notice(dev, "MM SMMU IDR0=%#x IDR1=%#x IDR5=%#x CR0=%#x CR0ACK=%#x GERROR=%#x\n",
++			   readl(base), readl(base + 4), readl(base + 0x14),
++			   readl(base + 0x20), readl(base + 0x24), readl(base + 0x60));
++		/* Non-destructive handoff snapshot of the non-secure SMMUv3 queue. */
++		dev_notice(dev, "MM handoff CR1=%#x CR2=%#x STRTAB=%#llx CFG=%#x CMDQ=%#llx PROD=%#x CONS=%#x\n",
++			   readl(base + 0x28), readl(base + 0x2c), readq(base + 0x80),
++			   readl(base + 0x88), readq(base + 0x90),
++			   readl(base + 0x98), readl(base + 0x9c));
++		arm_smccc_smc(MTK_SIP_KERNEL_IOMMU_CONTROL, BIT(11) | 4, 0, 0, 0, 0, 0, 0, &reply);
++		dev_notice(dev, "MM SMMU PM_PUT=%ld\n", (long)reply.a0);
++	}
++	iounmap(base);
++}
++
++static ssize_t exercise_store(struct device *dev, struct device_attribute *attr,
++			      const char *buf, size_t len)
++{
++	struct turner_host *ctx = dev_get_drvdata(dev), *peer;
++	struct device_node *node __free(device_node) =
++		of_graph_get_remote_node(dev->of_node, 1, 0);
++	struct platform_device *pdev = of_find_device_by_node(node);
++	struct drm_panel *panel;
++	int ret = -ENODEV;
++
++	if (!pdev)
++		return -ENODEV;
++	device_lock(&pdev->dev);
++	peer = platform_get_drvdata(pdev);
++	if (!peer || !ctx->panel || !sysfs_streq(buf, "prepare"))
++		goto unlock;
++	panel = mipi_dsi_get_drvdata(ctx->panel);
++	if (!panel || panel->prepared)
++		goto unlock;
++	/* Supply and reset the panel before driving the physical lanes. */
++	ctx->peer = peer;
++	ctx->transfers = 0;
++	drm_panel_prepare(panel);
++	ret = panel->prepared ? 0 : -EIO;
++	dev_notice(dev, "panel prepare=%d transactions=%u\n", ret, ctx->transfers);
++	if (panel->prepared) {
++		drm_panel_enable(panel);
++		inspect_backlight(ctx->panel, panel->enabled);
++		inspect_mm_smmu(dev);
++		dev_notice(dev, "panel enabled=%d raw RX primary=%#x secondary=%#x\n",
++			   panel->enabled, readl(ctx->regs + 0xa4), readl(peer->regs + 0xa4));
++		dev_notice(dev, "primary DSC config=%d\n",
++			   exercise_encoder(dev, "/soc/disp1-dsc-wrap0@32450000"));
++		dev_notice(dev, "secondary DSC config=%d\n",
++			   exercise_encoder(dev, "/soc/disp1-dsc-wrap1@32460000"));
++		dev_notice(dev, "first EXDMA geometry=%d\n",
++			   exercise_fetch_geometry(dev, "/soc/disp-ovl0-exdma3@32860000"));
++		dev_notice(dev, "second EXDMA geometry=%d\n",
++			   exercise_fetch_geometry(dev, "/soc/disp-ovl1-exdma3@32c60000"));
++		ret = turner_memory_frame(ctx);
++		dev_notice(dev, "memory frame test=%d\n", ret);
++		inspect_backlight(ctx->panel, panel->enabled);
++		drm_panel_disable(panel);
++		inspect_backlight(ctx->panel, panel->enabled);
++		drm_panel_unprepare(panel);
++		dev_notice(dev, "panel teardown enabled=%u prepared=%u transactions=%u\n",
++			   panel->enabled, panel->prepared, ctx->transfers);
++	}
++	if (ctx->powered) {
++		power_down(ctx);
++		power_down(peer);
++		ctx->powered = false;
++	}
++	ctx->peer = NULL;
++unlock:
++	device_unlock(&pdev->dev);
++	put_device(&pdev->dev);
++	return ret ? ret : len;
++}
++static DEVICE_ATTR_WO(exercise);
++
++static int probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct turner_host *ctx;
++	int ret;
++
++	if (!dev->pm_domain)
++		return -EPROBE_DEFER;
++	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
++	if (!ctx)
++		return -ENOMEM;
++	ctx->regs = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(ctx->regs))
++		return PTR_ERR(ctx->regs);
++	ctx->phy = devm_phy_get(dev, "dphy");
++	if (IS_ERR(ctx->phy))
++		return PTR_ERR(ctx->phy);
++	ctx->hs = devm_clk_get(dev, "hs");
++	if (IS_ERR(ctx->hs))
++		return PTR_ERR(ctx->hs);
++	ctx->clocks[0].id = "engine";
++	ctx->clocks[1].id = "digital";
++	ret = devm_clk_bulk_get(dev, 2, ctx->clocks);
++	if (ret)
++		return ret;
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++	ctx->host.dev = dev;
++	ctx->host.ops = &ops;
++	platform_set_drvdata(pdev, ctx);
++	if (of_property_read_bool(dev->of_node, "mediatek,dual-dsi-slave"))
++		return 0;
++	ret = mipi_dsi_host_register(&ctx->host);
++	if (ret)
++		return ret;
++	ret = device_create_file(dev, &dev_attr_exercise);
++	if (ret)
++		mipi_dsi_host_unregister(&ctx->host);
++	return ret;
++}
++static void remove_host(struct platform_device *pdev)
++{
++	struct turner_host *ctx = platform_get_drvdata(pdev);
++
++	if (of_property_read_bool(pdev->dev.of_node, "mediatek,dual-dsi-slave"))
++		return;
++	device_remove_file(&pdev->dev, &dev_attr_exercise);
++	mipi_dsi_host_unregister(&ctx->host);
++}
++static const struct of_device_id match[] = {
++	{ .compatible = "mediatek,mt6991-dsi" }, {}
++};
++static struct platform_driver turner_command_driver = {
++	.probe = probe, .remove = remove_host,
++	.driver = { .name = "turner-command-host", .of_match_table = match },
++};
++module_platform_driver(turner_command_driver);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("Turner primary DSI command-mode panel bring-up");
+--- /dev/null
++++ b/drivers/gpu/drm/mediatek/turner/fetch.h
+@@ -0,0 +1,32 @@
++/* Acquired by the scan fixture after checking both DMA mappings. */
++static void turner_program_fetch(struct scan_path *path, const dma_addr_t addr[2])
++{
++	const u32 shape = (3008 << 16) | 940;
++	unsigned int side;
++
++	for (side = 0; side < 2; ++side) {
++		struct scan_block *fetch = &path->block[FETCH_L + side];
++		struct scan_block *blend = &path->block[BLEND_L + side];
++		struct scan_block *mutex = &path->block[MUT_OVL0 + side];
++		dma_addr_t start = addr[side] + side * 940 * sizeof(u32);
++
++		scan_write(fetch, 0x28, BIT(2), BIT(2));
++		scan_write(fetch, 0x30, U32_MAX, shape);
++		scan_write(fetch, 0x44, U32_MAX, 0);
++		scan_write(fetch, 0x48, U32_MAX, shape);
++		scan_write(fetch, 0x50, U32_MAX, 2); /* XR24 */
++		scan_write(fetch, 0x300, U32_MAX, 0x1ff);
++		scan_write(fetch, 0x2f4, U32_MAX, BIT(28) | 7520);
++		scan_write(fetch, 0xf40, U32_MAX, lower_32_bits(start));
++		scan_write(fetch, 0xf4c, GENMASK(3, 0), upper_32_bits(start));
++		scan_write(fetch, 0x100, BIT(0), BIT(0));
++		scan_write(fetch, 0x40, BIT(0), BIT(0));
++		scan_write(fetch, 0x20, BIT(0), BIT(0));
++		scan_write(blend, 0x48, U32_MAX, shape);
++		scan_write(blend, 0x50, U32_MAX, 2);
++		scan_write(blend, 0x200, U32_MAX, 0x10ff);
++		scan_write(blend, 0x10, GENMASK(5, 4), BIT(4));
++		scan_write(blend, 0x40, BIT(0), BIT(0));
++		scan_write(mutex, 0x34, BIT(3), BIT(3));
++	}
++}
+--- /dev/null
++++ b/drivers/gpu/drm/mediatek/turner/kms.h
+@@ -0,0 +1,247 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/reboot.h>
++#include <drm/drm_atomic.h>
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_drv.h>
++#include <drm/drm_print.h>
++#include <drm/drm_fourcc.h>
++#include <drm/drm_framebuffer.h>
++#include <drm/drm_gem_atomic_helper.h>
++#include <drm/drm_gem_framebuffer_helper.h>
++#include <drm/drm_gem_shmem_helper.h>
++#include <drm/drm_probe_helper.h>
++#include <drm/drm_vblank.h>
++#include <drm/drm_vblank_helper.h>
++
++struct turner_slot {
++	void *cpu;
++	dma_addr_t addr[2];
++	struct sg_table table;
++	bool mapped;
++};
++struct turner_kms {
++	struct drm_device drm;
++	struct drm_plane plane;
++	struct drm_crtc crtc;
++	struct drm_encoder encoder;
++	struct drm_connector connector;
++	struct turner_slot slot[2];
++	struct device *right;
++	struct mutex flip_lock;
++	wait_queue_head_t flip_wait;
++	int front, pending, retiring;
++	bool running, finished;
++	struct work_struct shutdown;
++	unsigned int hz;
++	unsigned int sequence;
++};
++
++#define TURNER_PITCH (1880U * 4)
++#define TURNER_BYTES (TURNER_PITCH * 3008U)
++static inline struct turner_kms *to_kms(struct drm_device *drm)
++{
++	return container_of(drm, struct turner_kms, drm);
++}
++
++static int turner_plane_check(struct drm_plane *plane, struct drm_atomic_commit *state)
++{
++	struct drm_plane_state *ps = drm_atomic_get_new_plane_state(state, plane);
++	struct drm_crtc_state *cs = ps->crtc ? drm_atomic_get_new_crtc_state(state, ps->crtc) : NULL;
++
++	if (ps->fb && (ps->src_x || ps->src_y || ps->fb->width != 1880 || ps->fb->height != 3008))
++		return -EINVAL;
++	return drm_atomic_helper_check_plane_state(ps, cs, DRM_PLANE_NO_SCALING,
++						  DRM_PLANE_NO_SCALING, false, false);
++}
++
++static void turner_plane_update(struct drm_plane *plane, struct drm_atomic_commit *state)
++{
++	struct turner_kms *kms = to_kms(plane->dev);
++	struct drm_plane_state *ps = drm_atomic_get_new_plane_state(state, plane);
++	struct drm_shadow_plane_state *shadow = to_drm_shadow_plane_state(ps);
++	struct drm_framebuffer *fb = ps->fb;
++	unsigned int y;
++	int idx, back;
++	struct turner_slot *slot;
++
++	if (!fb || !ps->visible || !drm_dev_enter(plane->dev, &idx))
++		return;
++	mutex_lock(&kms->flip_lock);
++	while (kms->pending >= 0 || kms->retiring >= 0) {
++		mutex_unlock(&kms->flip_lock);
++		if (!wait_event_timeout(kms->flip_wait,
++					READ_ONCE(kms->pending) < 0 && READ_ONCE(kms->retiring) < 0,
++					msecs_to_jiffies(500))) {
++			drm_err(plane->dev, "scan buffer retirement timed out\n");
++			goto out;
++		}
++		mutex_lock(&kms->flip_lock);
++	}
++	back = 1 - kms->front;
++	slot = &kms->slot[back];
++	if (!drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE)) {
++		dma_sync_sgtable_for_cpu(kms->right, &slot->table, DMA_TO_DEVICE);
++		for (y = 0; y < 3008; y++)
++			iosys_map_memcpy_from(slot->cpu + y * TURNER_PITCH, &shadow->data[0],
++					      y * fb->pitches[0], TURNER_PITCH);
++		dma_wmb();
++		dma_sync_sgtable_for_device(kms->right, &slot->table, DMA_TO_DEVICE);
++		drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
++		if (kms->running)
++			kms->pending = back;
++		else
++			kms->front = back;
++		WRITE_ONCE(kms->sequence, kms->sequence + 1);
++	}
++	mutex_unlock(&kms->flip_lock);
++out:
++	drm_dev_exit(idx);
++}
++
++static const struct drm_plane_funcs turner_plane_funcs = {
++	.update_plane = drm_atomic_helper_update_plane,
++	.disable_plane = drm_atomic_helper_disable_plane,
++	.destroy = drm_plane_cleanup,
++	DRM_GEM_SHADOW_PLANE_FUNCS
++};
++static const struct drm_plane_helper_funcs turner_plane_helpers = {
++	DRM_GEM_SHADOW_PLANE_HELPER_FUNCS,
++	.atomic_check = turner_plane_check,
++	.atomic_update = turner_plane_update,
++};
++
++static void turner_crtc_enable(struct drm_crtc *crtc, struct drm_atomic_commit *state)
++{
++	WRITE_ONCE(to_kms(crtc->dev)->hz, drm_mode_vrefresh(&crtc->state->mode));
++	drm_crtc_vblank_on(crtc);
++}
++
++static void turner_crtc_disable(struct drm_crtc *crtc, struct drm_atomic_commit *state)
++{
++	WRITE_ONCE(to_kms(crtc->dev)->hz, 0);
++	drm_crtc_vblank_off(crtc);
++}
++
++static int turner_vblank_enable(struct drm_crtc *crtc) { return 0; }
++static void turner_vblank_disable(struct drm_crtc *crtc) { }
++
++static const struct drm_crtc_funcs turner_crtc_funcs = {
++	.reset = drm_atomic_helper_crtc_reset,
++	.destroy = drm_crtc_cleanup,
++	.set_config = drm_atomic_helper_set_config,
++	.page_flip = drm_atomic_helper_page_flip,
++	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
++	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
++	.enable_vblank = turner_vblank_enable,
++	.disable_vblank = turner_vblank_disable,
++};
++static const struct drm_crtc_helper_funcs turner_crtc_helpers = {
++	.atomic_enable = turner_crtc_enable,
++	.atomic_disable = turner_crtc_disable,
++	.atomic_flush = drm_crtc_vblank_atomic_flush,
++};
++
++static int turner_get_modes(struct drm_connector *connector)
++{
++	unsigned int i;
++	for (i = 0; i < ARRAY_SIZE(turner_modes); i++) {
++		struct drm_display_mode *m = drm_mode_duplicate(connector->dev, &turner_modes[i]);
++
++		if (!m)
++			break;
++		m->type = DRM_MODE_TYPE_DRIVER | (i == 0 ? DRM_MODE_TYPE_PREFERRED : 0);
++		drm_mode_set_name(m);
++		drm_mode_probed_add(connector, m);
++	}
++	return i;
++}
++
++static enum drm_mode_status turner_validate_mode(struct drm_device *drm,
++						const struct drm_display_mode *mode)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(turner_modes); i++)
++		if (drm_mode_equal(mode, &turner_modes[i]))
++			return MODE_OK;
++	return MODE_BAD;
++}
++
++static const struct drm_connector_funcs turner_connector_funcs = {
++	.fill_modes = drm_helper_probe_single_connector_modes,
++	.destroy = drm_connector_cleanup,
++	.reset = drm_atomic_helper_connector_reset,
++	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
++	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
++};
++static const struct drm_connector_helper_funcs turner_connector_helpers = {
++	.get_modes = turner_get_modes,
++};
++static const struct drm_encoder_funcs turner_encoder_funcs = { .destroy = drm_encoder_cleanup };
++static const struct drm_mode_config_funcs turner_config_funcs = {
++	.fb_create = drm_gem_fb_create_with_dirty,
++	.mode_valid = turner_validate_mode,
++	.atomic_check = drm_atomic_helper_check,
++	.atomic_commit = drm_atomic_helper_commit,
++};
++DEFINE_DRM_GEM_FOPS(turner_fops);
++static const struct drm_driver turner_driver = {
++	.driver_features = DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
++	.fops = &turner_fops,
++	DRM_GEM_SHMEM_DRIVER_OPS,
++	.name = "turner-display", .desc = "MT6991 dual DSI", .major = 1,
++};
++
++static int turner_register_kms(struct turner_kms *k)
++{
++	static const u32 formats[] = { DRM_FORMAT_XRGB8888 };
++	static const u64 modifiers[] = { DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_MOD_INVALID };
++	struct drm_device *drm = &k->drm;
++	int ret = drmm_mode_config_init(drm);
++
++	if (ret)
++		return ret;
++	drm->mode_config.funcs = &turner_config_funcs;
++	drm->mode_config.max_width = 1880;
++	drm->mode_config.max_height = 3008;
++	ret = drm_universal_plane_init(drm, &k->plane, 1, &turner_plane_funcs, formats,
++				       ARRAY_SIZE(formats), modifiers, DRM_PLANE_TYPE_PRIMARY, NULL);
++	if (ret)
++		return ret;
++	drm_plane_helper_add(&k->plane, &turner_plane_helpers);
++	ret = drm_crtc_init_with_planes(drm, &k->crtc, &k->plane, NULL, &turner_crtc_funcs, NULL);
++	if (ret)
++		return ret;
++	drm_crtc_helper_add(&k->crtc, &turner_crtc_helpers);
++	ret = drm_encoder_init(drm, &k->encoder, &turner_encoder_funcs, DRM_MODE_ENCODER_DSI, NULL);
++	if (ret)
++		return ret;
++	k->encoder.possible_crtcs = drm_crtc_mask(&k->crtc);
++	ret = drm_connector_init(drm, &k->connector, &turner_connector_funcs, DRM_MODE_CONNECTOR_DSI);
++	if (ret)
++		return ret;
++	k->connector.display_info.width_mm = 118;
++	k->connector.display_info.height_mm = 189;
++	drm_connector_helper_add(&k->connector, &turner_connector_helpers);
++	ret = drm_connector_attach_encoder(&k->connector, &k->encoder);
++	if (ret)
++		return ret;
++	ret = drm_vblank_init(drm, 1);
++	if (ret)
++		return ret;
++	drm_mode_config_reset(drm);
++	return drm_dev_register(drm, 0);
++}
++
++
++/* Disable the CRTC while the scan thread can still deliver vblank events. */
++static void turner_shutdown_work(struct work_struct *work)
++{
++	struct turner_kms *kms = container_of(work, struct turner_kms, shutdown);
++
++	if (READ_ONCE(kms->finished))
++		return;
++	drm_dev_unplug(&kms->drm);
++	drm_atomic_helper_shutdown(&kms->drm);
++	WRITE_ONCE(kms->finished, true);
++}
+--- /dev/null
++++ b/drivers/gpu/drm/mediatek/turner/mt6991-dsc-engine.h
+@@ -0,0 +1,147 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef MT6991_DSC_ENGINE_H
++#define MT6991_DSC_ENGINE_H
++
++#include <drm/display/drm_dsc.h>
++
++#include "mt6991-dsi-video.h"
++
++/* Turner CSOT, 1880x3008 full-frame video, 470x8 slices, 10 bpc / 8 bpp.
++ * This profile is for one MT6991 wrapper, with its clock and domain held.
++ * The display owner synchronizes the packet, start, and trigger with scanout.
++ */
++enum turner_dsc_phase {
++	TURNER_DSC_CONFIG,
++	TURNER_DSC_START,
++	TURNER_DSC_TRIGGER,
++	TURNER_DSC_STOP,
++};
++
++struct turner_dsc_write {
++	u16 offset;
++	u32 value;
++	u32 mask;
++};
++
++/* The wrapper packs the min/max QP and signed six-bit BPG fields in a
++ * different bit order from a wire-format DSC PPS. The final halfword is 0.
++ */
++static inline void turner_dsc_pack_pps(const struct drm_dsc_config *cfg, u32 words[20])
++{
++	unsigned int i;
++
++	words[0] = cfg->line_buf_depth | (cfg->bits_per_component << 4) |
++		   (cfg->bits_per_pixel << 8) | ((u32)cfg->convert_rgb << 18) |
++		   ((u32)cfg->block_pred_enable << 19);
++	words[1] = cfg->initial_xmit_delay | ((u32)cfg->initial_dec_delay << 16);
++	words[2] = cfg->initial_scale_value | ((u32)cfg->scale_increment_interval << 16);
++	words[3] = cfg->scale_decrement_interval | ((u32)cfg->first_line_bpg_offset << 16);
++	words[4] = cfg->nfl_bpg_offset | ((u32)cfg->slice_bpg_offset << 16);
++	words[5] = cfg->initial_offset | ((u32)cfg->final_offset << 16);
++	words[6] = cfg->flatness_min_qp | (cfg->flatness_max_qp << 8) |
++		   ((u32)cfg->rc_model_size << 16);
++	words[7] = cfg->rc_edge_factor | (cfg->rc_quant_incr_limit0 << 8) |
++		   ((u32)cfg->rc_quant_incr_limit1 << 16) |
++		   ((u32)cfg->rc_tgt_offset_high << 28) | ((u32)cfg->rc_tgt_offset_low << 24);
++	for (i = 0; i < ARRAY_SIZE(cfg->rc_buf_thresh); i++)
++		words[8 + i / 4] |= (u32)cfg->rc_buf_thresh[i] << ((i % 4) * 8);
++	for (i = 0; i < ARRAY_SIZE(cfg->rc_range_params); i++) {
++		const struct drm_dsc_rc_range_parameters *range = &cfg->rc_range_params[i];
++		u32 value = range->range_min_qp | (range->range_max_qp << 5) |
++			    ((range->range_bpg_offset & 0x3f) << 10);
++
++		words[12 + i / 2] |= value << ((i % 2) * 16);
++	}
++}
++
++static const struct turner_dsc_write turner_dsc_config[] = {
++	{ 0x014, 0x00000000, U32_MAX },
++	{ 0x070, 0x800002d9, U32_MAX },
++	{ 0x03c, 0x03ac01d6, U32_MAX },
++	{ 0x000, 0x00010080, U32_MAX },
++	{ 0x018, 0x013903ac, U32_MAX },
++	{ 0x01c, 0x0bbf0bbf, U32_MAX },
++	{ 0x020, 0x009c01d6, U32_MAX },
++	{ 0x024, 0x81770007, U32_MAX },
++	{ 0x028, 0x013a01d6, U32_MAX },
++	{ 0x038, 0x00000002, U32_MAX },
++	{ 0x02c, 0x00000eb0, U32_MAX },
++	{ 0x030, 0x00000001, 0xffff },
++	{ 0x034, 0x00000028, U32_MAX },
++	{ 0x060, 0x00000200, 0x200 },
++	{ 0x200, 0x00000040, 0x60 },
++};
++
++static inline int turner_dsc_engine_append(struct cmdq_pkt *pkt, u32 base,
++					  enum turner_dsc_phase phase,
++					  const struct drm_dsc_config *cfg)
++{
++	static const struct turner_dsc_write start[] = {
++		{ 0x228, 0x00000001, 0x3 },
++		{ 0x000, 0x00000001, 0x1 },
++	};
++	static const struct turner_dsc_write trigger[] = {
++		{ 0x000, 0x00000100, 0x100 },
++		{ 0x000, 0x00000000, 0x100 },
++	};
++	static const struct turner_dsc_write stop[] = {
++		{ 0x000, 0x00000000, 0x1 },
++	};
++	static const struct {
++		const struct turner_dsc_write *writes;
++		unsigned int count;
++	} phases[] = {
++		[TURNER_DSC_CONFIG] = { turner_dsc_config, ARRAY_SIZE(turner_dsc_config) },
++		[TURNER_DSC_START] = { start, ARRAY_SIZE(start) },
++		[TURNER_DSC_TRIGGER] = { trigger, ARRAY_SIZE(trigger) },
++		[TURNER_DSC_STOP] = { stop, ARRAY_SIZE(stop) },
++	};
++	const struct turner_dsc_write *writes;
++	unsigned int count, i, instructions;
++	u32 pps[20] = {};
++	size_t before;
++	int ret;
++
++	if (!base || (base & 0xffff) || (unsigned int)phase >= ARRAY_SIZE(phases))
++		return -EINVAL;
++	writes = phases[phase].writes;
++	count = phases[phase].count;
++	instructions = 2 * count;
++	for (i = 0; i < count; i++)
++		instructions += writes[i].mask != U32_MAX;
++	if (phase == TURNER_DSC_CONFIG) {
++		if (!cfg || cfg->pic_width != 1880 || cfg->pic_height != 3008 ||
++		    cfg->slice_width != 470 || cfg->slice_height != 8 ||
++		    cfg->slice_chunk_size != 470 || cfg->bits_per_component != 10 ||
++		    cfg->bits_per_pixel != 128)
++			return -EINVAL;
++		instructions += 2 * ARRAY_SIZE(pps);
++		turner_dsc_pack_pps(cfg, pps);
++	}
++	ret = mt6991_video_room(pkt, instructions);
++	if (ret)
++		return ret;
++	before = pkt->cmd_buf_size;
++	for (i = 0; i < count; i++) {
++		if (writes[i].mask == U32_MAX)
++			ret = cmdq_pkt_write_pa(pkt, 0, base, writes[i].offset, writes[i].value);
++		else
++			ret = cmdq_pkt_write_mask_pa(pkt, 0, base, writes[i].offset,
++						     writes[i].value, writes[i].mask);
++		if (ret) {
++			pkt->cmd_buf_size = before;
++			return ret;
++		}
++	}
++	if (phase == TURNER_DSC_CONFIG) {
++		for (i = 0; i < ARRAY_SIZE(pps); i++) {
++			ret = cmdq_pkt_write_pa(pkt, 0, base, 0x80 + i * 4, pps[i]);
++			if (ret) {
++				pkt->cmd_buf_size = before;
++				return ret;
++			}
++		}
++	}
++	return 0;
++}
++#endif
+--- /dev/null
++++ b/drivers/gpu/drm/mediatek/turner/mt6991-dsi-cmdq.h
+@@ -0,0 +1,274 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef MT6991_DSI_CMDQ_H
++#define MT6991_DSI_CMDQ_H
++
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/unaligned.h>
++#include <drm/drm_mipi_dsi.h>
++#include <video/mipi_display.h>
++
++#define MT6991_DSI_RX_BYTES	10
++
++static inline bool mt6991_dsi_is_read(u8 type)
++{
++	return type == MIPI_DSI_DCS_READ ||
++	       type == MIPI_DSI_GENERIC_READ_REQUEST_0_PARAM ||
++	       type == MIPI_DSI_GENERIC_READ_REQUEST_1_PARAM ||
++	       type == MIPI_DSI_GENERIC_READ_REQUEST_2_PARAM;
++}
++
++/* CPU command queue, while the host is idle in command mode.
++ * The caller holds the host lock, supplies the verified queue capacity,
++ * and owns start, completion and restoration of the video stream.
++ */
++static inline int mt6991_dsi_queue_write(void __iomem *regs, unsigned int capacity,
++					 const struct mipi_dsi_msg *msg)
++{
++	const u8 *data = msg->tx_buf;
++	void __iomem *queue = regs + 0x400;
++	size_t len = msg->tx_len, offset;
++	u32 header, value, size;
++
++	if (msg->channel || (msg->flags & ~MIPI_DSI_MSG_USE_LPM))
++		return -EOPNOTSUPP;
++	if (mt6991_dsi_is_read(msg->type) != !!msg->rx_len ||
++	    (msg->rx_len && !msg->rx_buf))
++		return -EINVAL;
++	if (len && !data)
++		return -EINVAL;
++	switch (msg->type) {
++	case MIPI_DSI_GENERIC_READ_REQUEST_0_PARAM:
++	case MIPI_DSI_GENERIC_SHORT_WRITE_0_PARAM:
++		if (len)
++			return -EINVAL;
++		break;
++	case MIPI_DSI_GENERIC_READ_REQUEST_1_PARAM:
++	case MIPI_DSI_DCS_READ:
++	case MIPI_DSI_GENERIC_SHORT_WRITE_1_PARAM:
++	case MIPI_DSI_DCS_SHORT_WRITE:
++		if (len != 1)
++			return -EINVAL;
++		break;
++	case MIPI_DSI_GENERIC_READ_REQUEST_2_PARAM:
++	case MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE:
++	case MIPI_DSI_GENERIC_SHORT_WRITE_2_PARAM:
++	case MIPI_DSI_DCS_SHORT_WRITE_PARAM:
++		if (len != 2)
++			return -EINVAL;
++		break;
++	case MIPI_DSI_DCS_LONG_WRITE:
++	case MIPI_DSI_GENERIC_LONG_WRITE:
++		if (len < 3)
++			return -EINVAL;
++		break;
++	default:
++		return -EOPNOTSUPP;
++	}
++
++	/* One header and at most 254 payload words fit the size field. */
++	if (len > 254 * 4)
++		return -EMSGSIZE;
++	size = len > 2 ? 1 + DIV_ROUND_UP(len, 4) : 1;
++	if (size > capacity)
++		return -EMSGSIZE;
++
++	header = (msg->type << 8) | (msg->rx_len ? BIT(2) : 0);
++	if (len <= 2) {
++		if (len)
++			header |= (u32)data[0] << 16;
++		if (len == 2)
++			header |= (u32)data[1] << 24;
++	} else {
++		header |= (len << 16) | BIT(1);
++		for (offset = 0; offset + 4 <= len; offset += 4)
++			writel(get_unaligned_le32(data + offset), queue + 4 + offset);
++		if (offset < len) {
++			void __iomem *tail = queue + 4 + offset;
++			unsigned int shift = 0;
++
++			value = readl(tail);
++			while (offset < len) {
++				value &= ~(0xffU << shift);
++				value |= (u32)data[offset++] << shift;
++				shift += 8;
++			}
++			writel(value, tail);
++		}
++	}
++	writel(header, queue);
++	value = readl(regs + 0x44);
++	value = (value & ~0xffU) | size;
++	writel(value, regs + 0x44);
++	writel(value | BIT(15), regs + 0x44);
++	return 0;
++}
++/* MT6991 uses the four direct RX words at 0xa4, without RX SRAM banking. */
++static inline ssize_t mt6991_dsi_copy_response(void __iomem *regs,
++					       const struct mipi_dsi_msg *msg)
++{
++	u8 type = readb(regs + 0xa4);
++	bool dcs = msg->type == MIPI_DSI_DCS_READ;
++	unsigned int skip = 1;
++	size_t len, i;
++
++	switch (type) {
++	case MIPI_DSI_RX_GENERIC_SHORT_READ_RESPONSE_1BYTE:
++	case MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_1BYTE:
++		len = 1;
++		break;
++	case MIPI_DSI_RX_GENERIC_SHORT_READ_RESPONSE_2BYTE:
++	case MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_2BYTE:
++		len = 2;
++		break;
++	case MIPI_DSI_RX_DCS_LONG_READ_RESPONSE:
++	case MIPI_DSI_RX_GENERIC_LONG_READ_RESPONSE:
++		len = readb(regs + 0xa5) | (readb(regs + 0xa6) << 8);
++		if (!len || len > MT6991_DSI_RX_BYTES)
++			return -EPROTO;
++		skip = 4;
++		break;
++	default:
++		return -EPROTO;
++	}
++	if (dcs != (type == MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_1BYTE ||
++		    type == MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_2BYTE ||
++		    type == MIPI_DSI_RX_DCS_LONG_READ_RESPONSE))
++		return -EPROTO;
++	len = min(len, msg->rx_len);
++	for (i = 0; i < len; i++)
++		((u8 *)msg->rx_buf)[i] = readb(regs + 0xa4 + skip + i);
++	return len;
++}
++
++/* The caller has already configured the PHY, clocks and command mode.
++ * Polling owns the read-ready event; an IRQ handler must not consume it.
++ */
++static inline ssize_t mt6991_dsi_submit(void __iomem *regs, unsigned int capacity,
++					const struct mipi_dsi_msg *msg)
++{
++	u32 status;
++	int ret, ready = 0;
++
++	ret = readl_poll_timeout(regs + 0x0c, status, !(status & BIT(31)), 1, 100000);
++	if (ret)
++		return ret;
++	ret = mt6991_dsi_queue_write(regs, capacity, msg);
++	if (ret)
++		return ret;
++	if (msg->rx_len && (status & BIT(0)))
++		writel(status & ~BIT(0), regs + 0x0c);
++	writel(0, regs);
++	writel(1, regs);
++	writel(0, regs);
++	if (msg->rx_len) {
++		ready = readl_poll_timeout(regs + 0x0c, status, status & BIT(0), 100, 100000);
++		writel(status & ~BIT(0), regs + 0x0c);
++		writel(readl(regs + 0xb4) | BIT(0), regs + 0xb4);
++	}
++	ret = readl_poll_timeout(regs + 0x0c, status, !(status & BIT(31)), 1, 100000);
++	if (ready || ret)
++		return -ETIMEDOUT;
++	if (msg->rx_len)
++		return mt6991_dsi_copy_response(regs, msg);
++	return msg->tx_len;
++}
++
++static inline int mt6991_dsi_set_return_size(void __iomem *regs, unsigned int capacity,
++					    const struct mipi_dsi_msg *msg)
++{
++	u8 size[2] = { msg->rx_len, 0 };
++	struct mipi_dsi_msg limit = {
++		.type = MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE,
++		.flags = msg->flags, .tx_len = sizeof(size), .tx_buf = size,
++	};
++	size_t params = msg->type == MIPI_DSI_DCS_READ ? 1 : msg->type >> 4;
++	ssize_t ret;
++
++	if (msg->channel || (msg->flags & ~MIPI_DSI_MSG_USE_LPM))
++		return -EOPNOTSUPP;
++	if (!msg->rx_len || !msg->rx_buf || msg->tx_len != params ||
++	    (params && !msg->tx_buf))
++		return -EINVAL;
++	if (msg->rx_len > MT6991_DSI_RX_BYTES)
++		return -EMSGSIZE;
++	ret = mt6991_dsi_submit(regs, capacity, &limit);
++	return ret < 0 ? ret : 0;
++}
++
++static inline ssize_t mt6991_dsi_host_transfer(void __iomem *regs, unsigned int capacity,
++					       const struct mipi_dsi_msg *msg)
++{
++	if (mt6991_dsi_is_read(msg->type)) {
++		int ret = mt6991_dsi_set_return_size(regs, capacity, msg);
++
++		if (ret)
++			return ret;
++	}
++	return mt6991_dsi_submit(regs, capacity, msg);
++}
++
++/* Turner routes panel commands to both halves with one primary START.
++ * SET_MAXIMUM_RETURN_PACKET_SIZE and the returned RX words use the primary.
++ * Both hosts must be powered, in command mode, and exclusively owned.
++ */
++static inline ssize_t mt6991_dsi_dual_transfer(void __iomem *primary,
++				void __iomem *secondary, unsigned int capacity,
++				const struct mipi_dsi_msg *msg)
++{
++	bool read = mt6991_dsi_is_read(msg->type);
++	u32 status, control;
++	int ret;
++
++	if (read) {
++		ret = mt6991_dsi_set_return_size(primary, capacity, msg);
++		if (ret < 0)
++			return ret;
++	}
++	ret = readl_poll_timeout(primary + 0xc, status, !(status & BIT(31)), 1, 100000);
++	if (ret)
++		return ret;
++	ret = readl_poll_timeout(secondary + 0xc, status, !(status & BIT(31)), 1, 100000);
++	if (ret)
++		return ret;
++	ret = mt6991_dsi_queue_write(primary, capacity, msg);
++	if (ret)
++		return ret;
++	ret = mt6991_dsi_queue_write(secondary, capacity, msg);
++	if (ret)
++		return ret;
++	if (read) {
++		writel(readl(primary + 0xc) & ~BIT(0), primary + 0xc);
++		writel(readl(secondary + 0xc) & ~BIT(0), secondary + 0xc);
++	}
++	control = readl(secondary + 0x30);
++	writel(control | BIT(4), secondary + 0x30);
++	writel(0, primary);
++	writel(1, primary);
++	writel(0, primary);
++	if (read) {
++		void __iomem *ports[] = { primary, secondary };
++		unsigned int i;
++
++		/* Both receivers must release the return bus before testing BUSY. */
++		for (i = 0; i < ARRAY_SIZE(ports); i++) {
++			void __iomem *port = ports[i];
++			int ready = readl_poll_timeout(port + 0xc, status, status & BIT(0),
++						       100, 100000);
++
++			writel(status & ~BIT(0), port + 0xc);
++			writel(readl(port + 0xb4) | BIT(0), port + 0xb4);
++			if (ready)
++				ret = ready;
++		}
++	}
++	if (!ret)
++		ret = readl_poll_timeout(primary + 0xc, status, !(status & BIT(31)), 1, 100000);
++	if (!ret)
++		ret = readl_poll_timeout(secondary + 0xc, status, !(status & BIT(31)), 1, 100000);
++	writel(control, secondary + 0x30);
++	if (ret)
++		return ret;
++	return read ? mt6991_dsi_copy_response(primary, msg) : (ssize_t)msg->tx_len;
++}
++#endif
+--- /dev/null
++++ b/drivers/gpu/drm/mediatek/turner/mt6991-dsi-size.h
+@@ -0,0 +1,109 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#ifndef MT6991_DSI_SIZE_H
++#define MT6991_DSI_SIZE_H
++
++#include <linux/bitfield.h>
++#include <linux/io.h>
++#include <drm/display/drm_dsc.h>
++#include <drm/drm_modes.h>
++
++#define MT6991_DSI_PSCTRL	0x3c
++#define MT6991_DSI_SIZE_CON	0x2c
++#define MT6991_DSI_VACT_NL	0x6c
++#define MT6991_DSI_PS_WC	GENMASK(14, 0)
++#define MT6991_DSI_PS_SEL	GENMASK(19, 16)
++
++/* Program one idle host in full-frame dual-link DSC video mode. */
++static inline int mt6991_dsi_dual_dsc_size(void __iomem *regs,
++					   const struct drm_dsc_config *dsc)
++{
++	u32 count, bytes, ctrl;
++
++	if (!dsc->pic_height || !dsc->slice_count || dsc->slice_count % 2 ||
++	    !dsc->slice_chunk_size || !dsc->slice_width ||
++	    dsc->slice_width * dsc->slice_count != dsc->pic_width)
++		return -EINVAL;
++	count = dsc->slice_count / 2;
++	bytes = count * dsc->slice_chunk_size;
++	if (!FIELD_FIT(MT6991_DSI_PS_WC, bytes))
++		return -ERANGE;
++	ctrl = readl(regs + MT6991_DSI_PSCTRL);
++	ctrl &= ~(MT6991_DSI_PS_WC | MT6991_DSI_PS_SEL);
++	ctrl |= FIELD_PREP(MT6991_DSI_PS_WC, bytes) | FIELD_PREP(MT6991_DSI_PS_SEL, 5);
++	writel(dsc->pic_height, regs + MT6991_DSI_VACT_NL);
++	writel(ctrl, regs + MT6991_DSI_PSCTRL);
++	/* In DSC mode the input FIFO counts three compressed bytes per word. */
++	writel(((u32)dsc->pic_height << 16) | DIV_ROUND_UP(bytes, 3),
++	       regs + MT6991_DSI_SIZE_CON);
++	return 0;
++}
++
++/* Full-frame RGB888, D-PHY, sync-pulse video with static porch timings.
++ * Both links receive the same blanking intervals. Only DSC payload is split.
++ */
++static inline int mt6991_dsi_dual_dsc_timing(void __iomem *regs,
++					     const struct drm_display_mode *mode,
++					     const struct drm_dsc_config *dsc)
++{
++	u32 hsa, hbp, hfp;
++	int ret;
++
++	if (mode->hdisplay != dsc->pic_width || mode->vdisplay != dsc->pic_height ||
++	    mode->hdisplay >= mode->hsync_start || mode->hsync_start >= mode->hsync_end ||
++	    mode->hsync_end >= mode->htotal || mode->vdisplay > mode->vsync_start ||
++	    mode->vsync_start >= mode->vsync_end || mode->vsync_end > mode->vtotal)
++		return -EINVAL;
++
++	hsa = (mode->hsync_end - mode->hsync_start) * 3;
++	hbp = (mode->htotal - mode->hsync_end) * 3;
++	hfp = (mode->hsync_start - mode->hdisplay) * 3;
++	if (hsa < 10 || hbp < 10 || hfp < 12 ||
++	    hsa - 10 > 0x7fff || hbp - 10 > 0x7fff || hfp - 12 > 0x7fff)
++		return -ERANGE;
++
++	ret = mt6991_dsi_dual_dsc_size(regs, dsc);
++	if (ret)
++		return ret;
++
++	writel(mode->vsync_end - mode->vsync_start, regs + 0x60);
++	writel(mode->vtotal - mode->vsync_end, regs + 0x64);
++	writel(mode->vsync_start - mode->vdisplay, regs + 0x68);
++	writel(hsa - 10, regs + 0x80);
++	writel(hbp - 10, regs + 0x84);
++	writel(hfp - 12, regs + 0x88);
++	return 0;
++}
++
++/* Turner uses high-speed blanking in VFP and returns to LP once per frame.
++ * Account for the programmed D-PHY entry/exit time on all four data lanes.
++ */
++static inline int turner_dsi_video_frame_lp(void __iomem *regs)
++{
++	u32 tim0 = readl(regs + 0x600);
++	u32 tim1 = readl(regs + 0x604);
++	u32 cycles = FIELD_GET(GENMASK(7, 0), tim0) +
++		     FIELD_GET(GENMASK(15, 8), tim0) +
++		     FIELD_GET(GENMASK(23, 16), tim0) +
++		     FIELD_GET(GENMASK(31, 24), tim1) + 2;
++	u32 payload = FIELD_GET(MT6991_DSI_PS_WC, readl(regs + MT6991_DSI_PSCTRL));
++	u32 hfp = readl(regs + 0x88) & GENMASK(14, 0);
++
++	if (payload < 4 * cycles)
++		return -ERANGE;
++	writel(BIT(31) | ((payload - 4 * cycles) << 16) | hfp, regs + 0x88);
++	return 0;
++}
++
++/* Enable the MT6991 128-bit input FIFO for one side of a DSC video stream.
++ * The host must be idle, with its per-port DSC word count already programmed.
++ */
++static inline void mt6991_dsi_enable_video_fifo(void __iomem *regs)
++{
++	u32 bytes = FIELD_GET(MT6991_DSI_PS_WC, readl(regs + MT6991_DSI_PSCTRL));
++	u32 height = readl(regs + MT6991_DSI_VACT_NL);
++
++	writel(readl(regs + 0x304) & ~GENMASK(14, 0), regs + 0x304);
++	writel(DIV_ROUND_UP(bytes * height, 16), regs + 0x310);
++	writel(readl(regs + 0x300) | BIT(0), regs + 0x300);
++}
++#endif
+--- /dev/null
++++ b/drivers/gpu/drm/mediatek/turner/mt6991-dsi-video.h
+@@ -0,0 +1,122 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef MT6991_DSI_VIDEO_H
++#define MT6991_DSI_VIDEO_H
++
++#include <drm/drm_mipi_dsi.h>
++#include <linux/mailbox_client.h>
++#include <linux/mailbox/mtk-cmdq-mailbox.h>
++#include <linux/soc/mediatek/mtk-cmdq.h>
++
++static inline int mt6991_video_room(struct cmdq_pkt *pkt, unsigned int instructions)
++{
++	if (!IS_REACHABLE(CONFIG_MTK_CMDQ))
++		return -EOPNOTSUPP;
++	if (!pkt || !pkt->va_base || pkt->cmd_buf_size % CMDQ_INST_SIZE)
++		return -EINVAL;
++	if (pkt->cmd_buf_size > pkt->buf_size ||
++	    instructions * CMDQ_INST_SIZE > pkt->buf_size - pkt->cmd_buf_size)
++		return -ENOSPC;
++	return 0;
++}
++
++/* Each MT6991 host occupies its own 64 KiB-aligned physical address region.
++ * The caller owns the packet and synchronizes the display pipeline. A zero
++ * secondary address selects a single host. These helpers only append instructions.
++ */
++static inline int mt6991_dsi_video_prepare(struct cmdq_pkt *pkt, u32 primary,
++					  u32 secondary, unsigned long flags)
++{
++	size_t before;
++	u32 mode;
++	int ret;
++
++	if (!primary || ((primary | secondary) & 0xffff) || secondary == primary ||
++	    !(flags & MIPI_DSI_MODE_VIDEO))
++		return -EINVAL;
++	ret = mt6991_video_room(pkt, secondary ? 8 : 4);
++	if (ret)
++		return ret;
++	before = pkt->cmd_buf_size;
++	if (flags & MIPI_DSI_MODE_VIDEO_BURST)
++		mode = 3;
++	else if (flags & MIPI_DSI_MODE_VIDEO_SYNC_PULSE)
++		mode = 1;
++	else
++		mode = 2;
++
++	ret = cmdq_pkt_write_pa(pkt, 0, primary, 0, 0);
++	if (!ret && secondary)
++		ret = cmdq_pkt_write_pa(pkt, 0, secondary, 0, 0);
++	if (!ret)
++		ret = cmdq_pkt_write_pa(pkt, 0, primary, 0x34, mode);
++	if (!ret && secondary)
++		ret = cmdq_pkt_write_pa(pkt, 0, secondary, 0x34, mode);
++	if (ret)
++		pkt->cmd_buf_size = before;
++	return ret;
++}
++
++/* Supply windows in DT reg order (DISP0, DISP1, OVL0, OVL1).
++ * Use zero for inactive optional windows. MOD and SOF must already be set.
++ */
++static inline int mt6991_display_mutex_trigger(struct cmdq_pkt *pkt,
++					      const u32 banks[4], unsigned int slot)
++{
++	static const u8 trigger_order[] = { 0, 2, 1, 3 };
++	unsigned int i, count = 0;
++	size_t before;
++	int ret;
++
++	if (!banks || !banks[0] || (banks[3] && !banks[1]) || slot >= 10)
++		return -EINVAL;
++	for (i = 0; i < ARRAY_SIZE(trigger_order); i++) {
++		if (banks[i] & 0xffff)
++			return -EINVAL;
++		if (banks[i])
++			count++;
++	}
++	ret = mt6991_video_room(pkt, count * 2);
++	if (ret)
++		return ret;
++	before = pkt->cmd_buf_size;
++	for (i = 0; i < ARRAY_SIZE(trigger_order); i++) {
++		u32 bank = banks[trigger_order[i]];
++
++		if (!bank)
++			continue;
++		ret = cmdq_pkt_write_pa(pkt, 0, bank, 0x20 + slot * 0x20, 1);
++		if (ret) {
++			pkt->cmd_buf_size = before;
++			return ret;
++		}
++	}
++	return 0;
++}
++
++/* Append this phase after the display mutex trigger. The secondary gate is
++ * conditional in the stock CRTC path, independently of having a second link.
++ */
++static inline int mt6991_dsi_video_trigger(struct cmdq_pkt *pkt, u32 primary,
++					  u32 secondary, bool arm_secondary)
++{
++	size_t before;
++	int ret = 0;
++
++	if (!primary || ((primary | secondary) & 0xffff) || secondary == primary ||
++	    (arm_secondary && !secondary))
++		return -EINVAL;
++	ret = mt6991_video_room(pkt, arm_secondary ? 7 : 4);
++	if (ret)
++		return ret;
++	before = pkt->cmd_buf_size;
++	if (arm_secondary)
++		ret = cmdq_pkt_write_mask_pa(pkt, 0, secondary, 0x30, BIT(4), BIT(4));
++	if (!ret)
++		ret = cmdq_pkt_write_pa(pkt, 0, primary, 0, 0);
++	if (!ret)
++		ret = cmdq_pkt_write_pa(pkt, 0, primary, 0, 1);
++	if (ret)
++		pkt->cmd_buf_size = before;
++	return ret;
++}
++#endif
+--- /dev/null
++++ b/drivers/gpu/drm/mediatek/turner/scan-path.h
+@@ -0,0 +1,250 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Hardware fixture for the Turner's two half-width display streams. */
++#include <linux/mfd/syscon.h>
++#include <linux/regmap.h>
++
++enum block_id { FETCH_L, FETCH_R, DSC_L, DSC_R, BLEND_L, BLEND_R, OUT_L, OUT_R, MUT_DIS0, MUT_DIS1, MUT_OVL0, MUT_OVL1, BLOCKS };
++struct scan_block {
++	void __iomem *base;
++	struct resource resource;
++	struct clk *clk;
++	struct { u16 reg; u32 value; } saved[48];
++	unsigned int count;
++};
++
++enum route_bank { DISP0, DISP1, OVL0, OVL1, BANKS };
++static const char * const route_node[BANKS] = {
++	"/syscon@32000000", "/syscon@32400000", "/syscon@32800000", "/syscon@32c00000",
++};
++static const struct { u8 bank; u16 reg; u32 val; } route[] = {
++	/* Firmware programs these as set bits before changing routing. */
++	{ DISP0, 0xc30, 0xff0001 }, { DISP1, 0xcf8, 0xff0001 },
++	{ OVL0, 0xca0, 1 }, { OVL1, 0xca0, 1 },
++	{ OVL0, 0xcac, 0x1fe0000 }, { OVL1, 0xcac, 0x1fe0000 },
++	/* Feed OUTPROC0 from BLENDER1's local background, with all layers disabled. */
++	{ OVL0, 0xe04, BIT(0) }, { OVL0, 0xf10, BIT(0) },
++	{ OVL1, 0xe04, BIT(0) }, { OVL1, 0xf10, BIT(0) },
++	{ OVL0, 0x29c, (3008 << 16) | 940 }, { OVL1, 0x29c, (3008 << 16) | 940 },
++	/* DLI0 / DLI8 -> PQ bypass 6 / 7 -> panel crossbar 1 / 2 -> DLO1 / 2. */
++	{ DISP0, 0xdd0, BIT(2) }, { DISP0, 0xe54, BIT(1) }, { DISP0, 0xd84, BIT(1) },
++	{ DISP0, 0xdf0, BIT(3) }, { DISP0, 0xe58, BIT(2) }, { DISP0, 0xd88, BIT(2) },
++	{ OVL0, 0xe70, BIT(2) }, { OVL1, 0xe70, BIT(2) },
++	/* Independent half streams bypass the splitter and go through both encoders. */
++	{ DISP1, 0xeac, BIT(4) }, { DISP1, 0xf5c, BIT(1) },
++	{ DISP1, 0xeb4, BIT(5) }, { DISP1, 0xf64, BIT(3) },
++	{ DISP1, 0xd08, BIT(0) }, { DISP1, 0xdcc, BIT(0) },
++	{ DISP1, 0xd10, BIT(1) }, { DISP1, 0xdd4, BIT(3) },
++};
++static const struct { u8 bank, id; } relay_gates[] = {
++	{ OVL0, 105 }, { OVL1, 105 }, { DISP0, 37 }, { DISP0, 53 },
++	{ DISP0, 71 }, { DISP0, 73 }, { DISP1, 9 }, { DISP1, 11 },
++};
++struct scan_path {
++	struct scan_block block[BLOCKS];
++	struct regmap *map[BANKS];
++	struct clk *clocks[ARRAY_SIZE(relay_gates)];
++	u32 old_route[ARRAY_SIZE(route)];
++	unsigned int route_count, clock_count;
++};
++
++static void scan_write(struct scan_block *b, u16 reg, u32 mask, u32 value)
++{
++	u32 old = readl(b->base + reg);
++
++	if (WARN_ON(b->count >= ARRAY_SIZE(b->saved)))
++		return;
++	b->saved[b->count].reg = reg;
++	b->saved[b->count++].value = old;
++	writel((old & ~mask) | (value & mask), b->base + reg);
++}
++
++static int open_scan_block(struct scan_block *b, const char *path, unsigned int index)
++{
++	struct device_node *node __free(device_node) = of_find_node_by_path(path);
++	struct clk *clk;
++	void __iomem *base;
++	int ret;
++
++	if (!node || of_address_to_resource(node, index, &b->resource))
++		return -ENODEV;
++	clk = of_clk_get(node, index);
++	if (IS_ERR(clk))
++		return PTR_ERR(clk);
++	ret = clk_prepare_enable(clk);
++	if (ret)
++		goto put;
++	base = of_io_request_and_map(node, index, "Turner dual scanout");
++	if (IS_ERR(base)) {
++		ret = PTR_ERR(base);
++		clk_disable_unprepare(clk);
++		goto put;
++	}
++	b->base = base;
++	b->clk = clk;
++	return 0;
++put:
++	clk_put(clk);
++	return ret;
++}
++
++static void close_scan_path(struct scan_path *p)
++{
++	int i;
++
++	/* Stop all four mutexes before altering any of their member blocks. */
++	for (i = BLOCKS - 1; i >= 0; i--) {
++		struct scan_block *b = &p->block[i];
++
++		while (b->count) {
++			--b->count;
++			writel(b->saved[b->count].value, b->base + b->saved[b->count].reg);
++		}
++	}
++	while (p->route_count) {
++		unsigned int j = --p->route_count;
++		regmap_write(p->map[route[j].bank], route[j].reg, p->old_route[j]);
++	}
++	while (p->clock_count) {
++		struct clk *clk = p->clocks[--p->clock_count];
++		clk_disable_unprepare(clk);
++		clk_put(clk);
++	}
++	for (i = BLOCKS - 1; i >= 0; i--) {
++		struct scan_block *b = &p->block[i];
++		if (!b->base)
++			continue;
++		iounmap(b->base);
++		release_mem_region(b->resource.start, resource_size(&b->resource));
++		clk_disable_unprepare(b->clk);
++		clk_put(b->clk);
++	}
++}
++
++static int start_scan_path(struct scan_path *p, struct device *dev)
++{
++	static const char * const nodes[] = {
++		"/soc/disp-ovl0-exdma3@32860000", "/soc/disp-ovl1-exdma3@32c60000",
++		"/soc/disp1-dsc-wrap0@32450000", "/soc/disp1-dsc-wrap1@32460000",
++		"/soc/disp-ovl0-blender1@328e0000", "/soc/disp-ovl1-blender1@32ce0000",
++		"/soc/disp-ovl0-outproc0@32970000", "/soc/disp-ovl1-outproc0@32d70000",
++	};
++
++	const u32 shape = (3008 << 16) | 940;
++	u32 pps[20] = {};
++	int i, j, ret;
++
++	for (i = 0; i < BLOCKS; i++) {
++		if (i < MUT_DIS0)
++			ret = open_scan_block(&p->block[i], nodes[i], 0);
++		else
++			ret = open_scan_block(&p->block[i], "/soc/disp1-mutex0@32020000",
++					      i - MUT_DIS0);
++		if (ret) {
++			dev_notice(dev, "scan block %d open error=%d\n", i, ret);
++			return ret;
++		}
++		if (readl(p->block[i].base + (i == DSC_L || i == DSC_R ? 0 : 0x20)) & 1)
++			return -EBUSY;
++	}
++	for (i = 0; i < BANKS; i++) {
++		struct device_node *np __free(device_node) = of_find_node_by_path(route_node[i]);
++		p->map[i] = syscon_node_to_regmap(np);
++		if (IS_ERR(p->map[i]))
++			return PTR_ERR(p->map[i]);
++	}
++	for (i = 0; i < ARRAY_SIZE(relay_gates); i++) {
++		struct device_node *np __free(device_node) =
++			of_find_node_by_path(route_node[relay_gates[i].bank]);
++		struct of_phandle_args spec = { .np = np, .args_count = 1,
++						.args = { relay_gates[i].id } };
++		struct clk *clk = of_clk_get_from_provider(&spec);
++		if (IS_ERR(clk))
++			return dev_err_probe(dev, PTR_ERR(clk), "relay clock %d\n", i);
++		ret = clk_prepare_enable(clk);
++		if (ret) {
++			clk_put(clk);
++			return ret;
++		}
++		p->clocks[p->clock_count++] = clk;
++	}
++	for (i = 0; i < ARRAY_SIZE(route); i++) {
++		struct regmap *m = p->map[route[i].bank];
++		ret = regmap_read(m, route[i].reg, &p->old_route[i]);
++		if (ret)
++			return ret;
++		p->route_count++;
++		ret = regmap_write(m, route[i].reg, route[i].val | (i < 6 ? p->old_route[i] : 0));
++		if (ret)
++			return ret;
++	}
++	turner_dsc_pack_pps(&turner_dsc, pps);
++	for (i = 0; i < 2; i++) {
++		struct scan_block *d = &p->block[DSC_L+i];
++
++		for (j = 0; j < ARRAY_SIZE(turner_dsc_config); j++) {
++			const struct turner_dsc_write *w = &turner_dsc_config[j];
++			scan_write(d, w->offset, w->mask, w->value);
++		}
++		for (j = 0; j < ARRAY_SIZE(pps); j++)
++			scan_write(d, 0x80 + j*4, U32_MAX, pps[j]);
++		scan_write(d, 0x228, 3, 3);
++		scan_write(d, 0, BIT(0), BIT(0));
++		writel(readl(d->base) | BIT(8), d->base);
++		writel(readl(d->base) & ~BIT(8), d->base);
++
++		struct scan_block *blend = &p->block[BLEND_L+i], *out = &p->block[OUT_L+i];
++
++		scan_write(blend, 0x28, BIT(2), BIT(2));
++		scan_write(blend, 0x30, U32_MAX, shape);
++		scan_write(blend, 0x104, U32_MAX, i ? 0xff00ff00 : 0xffff0000);
++		scan_write(blend, 0x10, BIT(0)|BIT(4)|BIT(5), BIT(4));
++		scan_write(blend, 0x40, BIT(0), 0);
++		scan_write(blend, 0x20, 0x31, 1);
++		scan_write(out, 0x28, BIT(2), BIT(2));
++		scan_write(out, 0x30, U32_MAX, shape);
++		scan_write(out, 0x20, 0x21, 1);
++	}
++	for (i = MUT_DIS0; i < BLOCKS; i++) {
++		struct scan_block *m = &p->block[i];
++		scan_write(m, 0x34, U32_MAX, i == MUT_DIS1 ? BIT(1)|BIT(2)|BIT(15)|BIT(17)|BIT(23)|BIT(25) :
++			   i == MUT_DIS0 ? BIT(16)|BIT(24) : BIT(11)|BIT(20));
++		scan_write(m, 0x38, U32_MAX, i == MUT_DIS0 ? BIT(1)|BIT(2) :
++			   i >= MUT_OVL0 ? BIT(16) : 0);
++		/* The active OEM path uses DSI1 SOF/EOF in the two right banks. */
++		scan_write(m, 0x30, U32_MAX, i == MUT_DIS1 || i == MUT_OVL1 ? 0x102 : 0x81);
++	}
++	return 0;
++}
++
++static void report_scan_path(struct scan_path *p, struct device *dev)
++{
++	int i;
++
++	for (i = 0; i < BANKS; i++) {
++		u32 start = i >= OVL0 ? 0xc50 : (i == DISP0 ? 0xc00 : 0xcc8);
++		u32 valid[6] = {}, ready[6] = {};
++		unsigned int n;
++		for (n = 0; n < 6; n++) {
++			regmap_read(p->map[i], start + n * 4, &valid[n]);
++			regmap_read(p->map[i], start + 24 + n * 4, &ready[n]);
++		}
++		dev_notice(dev, "scan bank=%d valid=%*phN ready=%*phN\n", i,
++			   (int)sizeof(valid), valid, (int)sizeof(ready), ready);
++	}
++	for (i = 0; i < 2; i++) {
++		void __iomem *f = p->block[FETCH_L+i].base, *d = p->block[DSC_L+i].base;
++
++		u32 count, size;
++		regmap_read(p->map[OVL0+i], 0x3ac, &count);
++		regmap_read(p->map[OVL0+i], 0x29c, &size);
++		dev_notice(dev, "OVL%d DLO5 size=%#x count=%#x\n", i, size, count);
++		dev_notice(dev, "blend side=%d color=%#x irq=%#x out_irq=%#x flow=%#x crc=%#x\n",
++			   i, readl(p->block[BLEND_L+i].base+0x104), readl(p->block[BLEND_L+i].base+8),
++			   readl(p->block[OUT_L+i].base+8), readl(p->block[OUT_L+i].base+0x108),
++			   readl(p->block[OUT_L+i].base+0x100));
++		dev_notice(dev, "scan side=%d fetch src=%#x color=%#x rdma=%#x flow=%#x pos=%#x irq=%#x DSC ctrl=%#x irq=%#x mutex=%#x\n",
++			   i, readl(f + 0x40), readl(f + 0x25c), readl(f + 0x100),
++			   readl(f + 0x240), readl(f + 0x244), readl(f + 8),
++			   readl(d), readl(d + 8), readl(p->block[MUT_DIS1].base + 4));
++	}
++}
+--- /dev/null
++++ b/drivers/gpu/drm/mediatek/turner/service.h
+@@ -0,0 +1,140 @@
++// SPDX-License-Identifier: GPL-2.0-only
++module_param(kms_stop, bool, 0600);
++
++
++static int turner_before_reboot(struct notifier_block *nb, unsigned long action, void *arg)
++{
++	WRITE_ONCE(kms_stop, true);
++
++	return NOTIFY_DONE;
++}
++static struct notifier_block turner_reboot_nb = { .notifier_call = turner_before_reboot };
++
++
++static int turner_check_buffer(struct device *left, struct device *right, struct turner_host *ctx)
++{
++	struct device *ports[] = { left, right };
++	struct turner_kms *kms;
++	struct platform_device *display;
++	unsigned int i;
++	int ret;
++
++	for (i = 0; i < ARRAY_SIZE(ports); i++) {
++		struct iommu_domain *domain = iommu_get_domain_for_dev(ports[i]);
++
++		if (!domain || !iommu_is_dma_domain(domain))
++			return -EPROBE_DEFER;
++		ret = dma_set_mask_and_coherent(ports[i], DMA_BIT_MASK(34));
++		if (ret)
++			return ret;
++	}
++	display = platform_device_register_data(ctx->host.dev, "turner-kms",
++						PLATFORM_DEVID_AUTO, NULL, 0);
++	if (IS_ERR(display))
++		return PTR_ERR(display);
++	kms = devm_drm_dev_alloc(&display->dev, &turner_driver, struct turner_kms, drm);
++	if (IS_ERR(kms)) {
++		ret = PTR_ERR(kms);
++		goto remove;
++	}
++	kms->right = right;
++	kms->pending = kms->retiring = -1;
++	mutex_init(&kms->flip_lock);
++	init_waitqueue_head(&kms->flip_wait);
++	for (i = 0; i < ARRAY_SIZE(kms->slot); i++) {
++		struct turner_slot *slot = &kms->slot[i];
++		struct scatterlist *sg;
++		dma_addr_t end;
++		unsigned int n, off;
++		slot->cpu = dma_alloc_wc(left, TURNER_BYTES, &slot->addr[0], GFP_KERNEL);
++		if (!slot->cpu) {
++			ret = -ENOMEM;
++			goto release;
++		}
++		ret = dma_get_sgtable_attrs(left, &slot->table, slot->cpu, slot->addr[0],
++					    TURNER_BYTES, DMA_ATTR_WRITE_COMBINE);
++		if (ret)
++			goto release;
++		ret = dma_map_sgtable(right, &slot->table, DMA_TO_DEVICE, 0);
++		if (ret)
++			goto release;
++		slot->mapped = true;
++		end = slot->addr[1] = sg_dma_address(slot->table.sgl);
++		ret = -ERANGE;
++		for_each_sgtable_dma_sg(&slot->table, sg, n) {
++			if (sg_dma_address(sg) != end)
++				goto release;
++			end += sg_dma_len(sg);
++		}
++		if (end - slot->addr[1] < TURNER_BYTES)
++			goto release;
++		for (off = 0; off < TURNER_BYTES; off += PAGE_SIZE) {
++			phys_addr_t l = iommu_iova_to_phys(iommu_get_domain_for_dev(left), slot->addr[0] + off);
++			phys_addr_t r = iommu_iova_to_phys(iommu_get_domain_for_dev(right), slot->addr[1] + off);
++			if (!l || l != r)
++				goto release;
++		}
++	}
++	for (i = 0; i < 2; i++)
++		if (upper_32_bits(kms->slot[0].addr[i]) != upper_32_bits(kms->slot[1].addr[i]) ||
++		    upper_32_bits(kms->slot[1].addr[i]+TURNER_BYTES-1) != upper_32_bits(kms->slot[1].addr[i]) ||
++		    upper_32_bits(kms->slot[0].addr[i]+TURNER_BYTES-1) != upper_32_bits(kms->slot[0].addr[i])) {
++			ret = -ERANGE;
++			goto release;
++		}
++	INIT_WORK(&kms->shutdown, turner_shutdown_work);
++	ctx->kms = kms;
++	ret = turner_register_kms(kms);
++	if (ret)
++		goto release;
++	ret = register_reboot_notifier(&turner_reboot_nb);
++	if (ret) {
++		drm_dev_unplug(&kms->drm);
++		goto release;
++	}
++	dev_notice(ctx->host.dev, "KMS registered dual DSI\n");
++	while (!READ_ONCE(kms->finished) && !ctx->fetch_unsettled) {
++		unsigned int hz = READ_ONCE(kms->hz);
++
++		if (READ_ONCE(kms_stop))
++			schedule_work(&kms->shutdown);
++		for (i = 0; i < ARRAY_SIZE(turner_modes); i++)
++			if (drm_mode_vrefresh(&turner_modes[i]) == hz) {
++				int front;
++				mutex_lock(&kms->flip_lock);
++				front = kms->front;
++				kms->running = true;
++				mutex_unlock(&kms->flip_lock);
++				sample_video(ctx, &turner_modes[i], 0, kms->slot[front].addr);
++				mutex_lock(&kms->flip_lock);
++				kms->running = false;
++				if (kms->pending >= 0)
++					kms->front = kms->pending;
++				kms->pending = kms->retiring = -1;
++				mutex_unlock(&kms->flip_lock);
++				wake_up_all(&kms->flip_wait);
++				break;
++			}
++		msleep(2);
++	}
++	if (!READ_ONCE(kms->finished))
++		schedule_work(&kms->shutdown);
++	flush_work(&kms->shutdown);
++	if (ctx->fetch_unsettled)
++		ret = -ETIMEDOUT;
++	unregister_reboot_notifier(&turner_reboot_nb);
++release:
++	ctx->kms = NULL;
++	for (i = 0; !ctx->fetch_unsettled && i < ARRAY_SIZE(kms->slot); i++) {
++		struct turner_slot *slot = &kms->slot[i];
++		if (slot->mapped)
++			dma_unmap_sgtable(right, &slot->table, DMA_TO_DEVICE, 0);
++		if (slot->table.sgl)
++			sg_free_table(&slot->table);
++		if (slot->cpu)
++			dma_free_wc(left, TURNER_BYTES, slot->cpu, slot->addr[0]);
++	}
++remove:
++	platform_device_unregister(display);
++	return ret;
++}
+--- /dev/null
++++ b/drivers/gpu/drm/mediatek/turner/turner-dsc.h
+@@ -0,0 +1,52 @@
++static const struct drm_dsc_config turner_dsc = {
++	.dsc_version_major = 1,
++	.dsc_version_minor = 2,
++	.convert_rgb = 1,
++	.bits_per_component = 10,
++	.line_buf_depth = 11,
++	.block_pred_enable = 1,
++	.bits_per_pixel = 128,
++	.pic_height = 3008,
++	.pic_width = 1880,
++	.slice_height = 8,
++	.slice_width = 470,
++	.slice_chunk_size = 470,
++	.initial_xmit_delay = 512,
++	.initial_dec_delay = 512,
++	.initial_scale_value = 32,
++	.scale_increment_interval = 168,
++	.scale_decrement_interval = 6,
++	.first_line_bpg_offset = 13,
++	.nfl_bpg_offset = 3804,
++	.slice_bpg_offset = 3705,
++	.initial_offset = 6144,
++	.final_offset = 4320,
++	.flatness_min_qp = 7,
++	.flatness_max_qp = 16,
++	.rc_model_size = 8192,
++	.rc_edge_factor = 6,
++	.rc_quant_incr_limit0 = 15,
++	.rc_quant_incr_limit1 = 15,
++	.rc_tgt_offset_high = 3,
++	.rc_tgt_offset_low = 3,
++	.slice_count = 4,
++	.mux_word_size = 48,
++	.rc_buf_thresh = { 14, 28, 42, 56, 70, 84, 98, 105, 112, 119, 121, 123, 125, 126 },
++	.rc_range_params = {
++		{ .range_min_qp = 0, .range_max_qp = 8, .range_bpg_offset = 2 },
++		{ .range_min_qp = 4, .range_max_qp = 8, .range_bpg_offset = 0 },
++		{ .range_min_qp = 5, .range_max_qp = 9, .range_bpg_offset = 0 },
++		{ .range_min_qp = 5, .range_max_qp = 10, .range_bpg_offset = 62 },
++		{ .range_min_qp = 7, .range_max_qp = 11, .range_bpg_offset = 60 },
++		{ .range_min_qp = 7, .range_max_qp = 11, .range_bpg_offset = 58 },
++		{ .range_min_qp = 7, .range_max_qp = 11, .range_bpg_offset = 56 },
++		{ .range_min_qp = 7, .range_max_qp = 12, .range_bpg_offset = 56 },
++		{ .range_min_qp = 7, .range_max_qp = 13, .range_bpg_offset = 56 },
++		{ .range_min_qp = 7, .range_max_qp = 14, .range_bpg_offset = 54 },
++		{ .range_min_qp = 9, .range_max_qp = 14, .range_bpg_offset = 54 },
++		{ .range_min_qp = 9, .range_max_qp = 15, .range_bpg_offset = 52 },
++		{ .range_min_qp = 9, .range_max_qp = 15, .range_bpg_offset = 52 },
++		{ .range_min_qp = 13, .range_max_qp = 16, .range_bpg_offset = 52 },
++		{ .range_min_qp = 16, .range_max_qp = 17, .range_bpg_offset = 52 },
++	},
++};
+--- /dev/null
++++ b/drivers/gpu/drm/mediatek/turner/turner-modes.h
+@@ -0,0 +1,86 @@
++static const struct drm_display_mode turner_modes[] = {
++	{
++		.clock = 816749,
++		.hdisplay = 1880,
++		.hsync_start = 1966,
++		.hsync_end = 1974,
++		.htotal = 2060,
++		.vdisplay = 3008,
++		.vsync_start = 6430,
++		.vsync_end = 6432,
++		.vtotal = 6608,
++		.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
++	},
++	{
++		.clock = 634210,
++		.hdisplay = 1880,
++		.hsync_start = 2068,
++		.hsync_end = 2076,
++		.htotal = 2264,
++		.vdisplay = 3008,
++		.vsync_start = 5812,
++		.vsync_end = 5814,
++		.vtotal = 5836,
++		.type = DRM_MODE_TYPE_DRIVER,
++	},
++	{
++		.clock = 634147,
++		.hdisplay = 1880,
++		.hsync_start = 2068,
++		.hsync_end = 2076,
++		.htotal = 2264,
++		.vdisplay = 3008,
++		.vsync_start = 5578,
++		.vsync_end = 5580,
++		.vtotal = 5602,
++		.type = DRM_MODE_TYPE_DRIVER,
++	},
++	{
++		.clock = 634102,
++		.hdisplay = 1880,
++		.hsync_start = 2068,
++		.hsync_end = 2076,
++		.htotal = 2264,
++		.vdisplay = 3008,
++		.vsync_start = 3088,
++		.vsync_end = 3090,
++		.vtotal = 3112,
++		.type = DRM_MODE_TYPE_DRIVER,
++	},
++	{
++		.clock = 1010648,
++		.hdisplay = 1880,
++		.hsync_start = 1912,
++		.hsync_end = 1920,
++		.htotal = 1942,
++		.vdisplay = 3008,
++		.vsync_start = 3578,
++		.vsync_end = 3580,
++		.vtotal = 3614,
++		.type = DRM_MODE_TYPE_DRIVER,
++	},
++	{
++		.clock = 1010637,
++		.hdisplay = 1880,
++		.hsync_start = 1912,
++		.hsync_end = 1920,
++		.htotal = 1942,
++		.vdisplay = 3008,
++		.vsync_start = 3118,
++		.vsync_end = 3120,
++		.vtotal = 3154,
++		.type = DRM_MODE_TYPE_DRIVER,
++	},
++	{
++		.clock = 816749,
++		.hdisplay = 1880,
++		.hsync_start = 1966,
++		.hsync_end = 1974,
++		.htotal = 2060,
++		.vdisplay = 3008,
++		.vsync_start = 3126,
++		.vsync_end = 3128,
++		.vtotal = 3304,
++		.type = DRM_MODE_TYPE_DRIVER,
++	},
++};

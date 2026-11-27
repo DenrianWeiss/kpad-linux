@@ -1,0 +1,113 @@
+Subject: [RFC PATCH 2/2] wifi: mt76: add MT6653 PCIe ROM MCU transport
+
+MT6653 expects Connac3 ROM command descriptors on the WM queue and raw
+patch payload on the FWDL queue. Acknowledge both PATCH_START and
+PATCH_FINISH using the status after the eight-byte init event header.
+Use the mt76 MCU response queue to match event ID and sequence before
+consuming the status. Expose these ops for the pre-firmware PCIe phase.
+
+diff --git a/drivers/net/wireless/mediatek/mt76/Makefile b/drivers/net/wireless/mediatek/mt76/Makefile
+index cacdd2b..90ec147 100644
+--- a/drivers/net/wireless/mediatek/mt76/Makefile
++++ b/drivers/net/wireless/mediatek/mt76/Makefile
+@@ -36,6 +36,7 @@ mt76x02-lib-y := mt76x02_util.o mt76x02_mac.o mt76x02_mcu.o \
+ mt76x02-usb-y := mt76x02_usb_mcu.o mt76x02_usb_core.o
+ 
+ mt76-connac-lib-y := mt76_connac_mcu.o mt76_connac_mac.o mt76_connac3_mac.o
++mt76-connac-lib-$(CONFIG_PCI) += mt6653_rom.o
+ 
+ mt792x-lib-y := mt792x_core.o mt792x_mac.o mt792x_trace.o \
+ 		mt792x_debugfs.o mt792x_dma.o
+diff --git a/drivers/net/wireless/mediatek/mt76/mt6653_rom.c b/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
+new file mode 100644
+index 0000000..45ce905
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
+@@ -0,0 +1,75 @@
++// SPDX-License-Identifier: BSD-3-Clause-Clear
++#include "mt76_connac_mcu.h"
++#include "mt76_connac3_mac.h"
++
++/* The probe path supplies the WM and FWDL queues before entering ROM mode. */
++static int mt6653_rom_send(struct mt76_dev *dev, struct sk_buff *skb,
++			   int cmd, int *seq)
++{
++	struct mt76_connac2_mcu_txd *txd;
++	enum mt76_mcuq_id q = MT_MCUQ_WM;
++
++	if (cmd == MCU_CMD(FW_SCATTER)) {
++		q = MT_MCUQ_FWDL;
++	} else if (cmd == MCU_CMD(PATCH_START_REQ) ||
++		   cmd == MCU_CMD(PATCH_FINISH_REQ)) {
++		u8 id = ++dev->mcu.msg_seq;
++
++		if (!id)
++			id = ++dev->mcu.msg_seq;
++		if (seq)
++			*seq = id;
++		txd = skb_push(skb, sizeof(*txd));
++		memset(txd, 0, sizeof(*txd));
++		txd->txd[0] = cpu_to_le32(FIELD_PREP(MT_TXD0_PKT_FMT, MT_TX_TYPE_CMD) |
++					  FIELD_PREP(MT_TXD0_TX_BYTES, skb->len));
++		txd->txd[1] = cpu_to_le32(FIELD_PREP(MT_TXD1_HDR_FORMAT, MT_HDR_FORMAT_CMD));
++		txd->len = cpu_to_le16(skb->len - sizeof(txd->txd));
++		txd->cid = FIELD_GET(__MCU_CMD_FIELD_ID, cmd);
++		txd->pkt_type = MCU_PKT_ID;
++		txd->seq = id;
++	} else {
++		dev_kfree_skb(skb);
++		return -EOPNOTSUPP;
++	}
++
++	dev->mcu.timeout = 3 * HZ;
++	return dev->queue_ops->tx_queue_skb_raw(dev, dev->q_mcu[q], skb, 0);
++}
++
++static int mt6653_rom_response(struct mt76_dev *dev, int cmd,
++			       struct sk_buff *skb, int seq)
++{
++	struct {
++		__le32 rxd[8];
++		__le16 len;
++		__le16 pkt_type;
++		u8 eid;
++		u8 seq;
++		u8 reserved[2];
++	} __packed event;
++	u8 status;
++	int len;
++
++	if (!skb)
++		return -ETIMEDOUT;
++	if (skb_copy_bits(skb, 0, &event, sizeof(event)))
++		return -EPROTO;
++	if (event.eid != 1 || event.seq != seq)
++		return -EAGAIN;
++	len = le16_to_cpu(event.len);
++	if (len <= sizeof(event) - sizeof(event.rxd) ||
++	    len > sizeof(event) - sizeof(event.rxd) + sizeof(__le32) ||
++	    len > skb->len - sizeof(event.rxd) ||
++	    skb_copy_bits(skb, sizeof(event), &status, sizeof(status)))
++		return -EPROTO;
++
++	return status ? -EREMOTEIO : 0;
++}
++
++const struct mt76_mcu_ops mt6653_rom_ops = {
++	.headroom = sizeof(struct mt76_connac2_mcu_txd),
++	.mcu_skb_send_msg = mt6653_rom_send,
++	.mcu_parse_response = mt6653_rom_response,
++};
++EXPORT_SYMBOL_GPL(mt6653_rom_ops);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
+index 4f55544..e06c440 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
++++ b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
+@@ -2150,6 +2150,7 @@ int mt76_connac_mcu_sta_wed_update(struct mt76_dev *dev, struct sk_buff *skb);
+ int mt76_connac2_load_ram(struct mt76_dev *dev, const char *fw_wm,
+ 			  const char *fw_wa);
+ int mt76_connac3_load_phy_ram(struct mt76_dev *dev, const char *fw_name);
++extern const struct mt76_mcu_ops mt6653_rom_ops;
+ int mt76_connac_mcu_send_mt6653_patch(struct mt76_dev *dev,
+ 				      const struct firmware *fw);
+ int mt76_connac2_load_patch(struct mt76_dev *dev, const char *fw_name);

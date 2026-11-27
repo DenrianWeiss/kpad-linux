@@ -1,0 +1,28 @@
+From 6f4c044ff6c22f2f83083e79c9e90671f994b817 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:02:37 +0800
+Subject: [PATCH] dt-bindings: nvmem: describe Turner boot PCIe calibration
+ page
+
+The stock MT6991 boot firmware supplies per-device trim words in its fixed-up FDT. The Turner Linux handoff can copy the eight PCIe0 calibration bytes into a dedicated reserved page for the rmem provider.
+---
+ Documentation/devicetree/bindings/nvmem/rmem.yaml | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/nvmem/rmem.yaml b/Documentation/devicetree/bindings/nvmem/rmem.yaml
+index 85f9f5d..3e80a4b 100644
+--- a/Documentation/devicetree/bindings/nvmem/rmem.yaml
++++ b/Documentation/devicetree/bindings/nvmem/rmem.yaml
+@@ -19,6 +19,9 @@ properties:
+           - mobileye,eyeq5-bootloader-config
+           - raspberrypi,bootloader-config
+           - raspberrypi,bootloader-public-key
++          # Single 4 KiB page supplied by the Turner Linux boot handoff.
++          # Bytes 0x31c..0x323 hold two little-endian PCIe0 PHY trim words.
++          - xiaomi,turner-pcie-calibration
+       - const: nvmem-rmem
+ 
+   reg:
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,27 @@
+From f618cb5dac16c15b7e7befe22c0081e2e47600e3 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 10:04:16 +0800
+Subject: [PATCH 90/92] dt-bindings: power: mediatek: define MT6991 overlay and
+ DISP0 domains
+
+---
+ include/dt-bindings/power/mediatek,mt6991-power.h | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/include/dt-bindings/power/mediatek,mt6991-power.h b/include/dt-bindings/power/mediatek,mt6991-power.h
+index b7d863d43..cb01e8e70 100644
+--- a/include/dt-bindings/power/mediatek,mt6991-power.h
++++ b/include/dt-bindings/power/mediatek,mt6991-power.h
+@@ -16,6 +16,9 @@
+ #define MT6991_POWER_DOMAIN_DSI_PHY0		0
+ #define MT6991_POWER_DOMAIN_DISP_VCORE		1
+ #define MT6991_POWER_DOMAIN_DIS1_DORMANT	2
++#define MT6991_POWER_DOMAIN_OVL0_DORMANT	3
++#define MT6991_POWER_DOMAIN_OVL1_DORMANT	4
++#define MT6991_POWER_DOMAIN_DIS0_DORMANT	5
+ 
+ /* Multimedia direct control */
+ #define MT6991_POWER_DOMAIN_DSI_PHY1		0
+-- 
+2.50.1 (Apple Git-155)
+

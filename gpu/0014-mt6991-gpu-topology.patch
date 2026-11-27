@@ -1,0 +1,93 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] arm64: dts: mediatek: describe MT6991 GPU and MFG topology
+
+Describe the GPU interrupts, clocks, power controller and shader mask in
+the SoC tree. Turner uses ACE-Lite and a bootloader-assigned GPUFreq
+window. Leave the reservation and devices disabled until handoff.
+
+---
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -604,6 +604,42 @@
+ 			status = "disabled";
+ 		};
+ 
++		gpu: gpu@48000000 {
++			compatible = "mediatek,mt6991-mali", "arm,mali-valhall-csf";
++			reg = <0 0x48000000 0 0x480000>;
++			interrupts = <GIC_SPI 606 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 605 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 604 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "job", "mmu", "gpu";
++			clocks = <&mfg 0>, <&mfg 1>;
++			clock-names = "core", "stacks";
++			power-domains = <&mfg>;
++			nvmem-cells = <&shader_present>;
++			nvmem-cell-names = "shader-present";
++			status = "disabled";
++		};
++
++		mfg: power-controller@4b09fd00 {
++			compatible = "mediatek,mt6991-gpufreq";
++			reg = <0 0x4b09fd00 0 0x80>, <0 0x4b800000 0 0x1000>,
++			      <0 0x4b860128 0 4>, <0 0x1c000070 0 12>;
++			reg-names = "gpr", "rpc", "hw-revision", "eb-gate";
++			clocks = <&topckgen MT6991_CLK_TOP_MFG_EB>, <&mfgpll 0>,
++				 <&mfgpll_sc0 0>, <&mfgpll_sc1 0>;
++			clock-names = "eb", "core", "stack0", "stack1";
++			mboxes = <&gpueb_mbox 0>, <&gpueb_mbox 1>, <&gpueb_mbox 2>,
++				 <&gpueb_mbox 3>, <&gpueb_mbox 4>, <&gpueb_mbox 5>,
++				 <&gpueb_mbox 7>;
++			mbox-names = "fast-dvfs-event", "gpufreq", "sleep", "timer",
++				     "fhctl", "ccf", "fast-dvfs";
++			#clock-cells = <1>;
++			#power-domain-cells = <0>;
++			#nvmem-cell-cells = <0>;
++			status = "disabled";
++
++			shader_present: shader-present {};
++		};
++
+ 		gpueb_mbox: mailbox@4b09fd80 {
+ 			compatible = "mediatek,mt6991-gpueb-mbox",
+ 				     "mediatek,mt8196-gpueb-mbox";
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+--- a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
++++ b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+@@ -10,6 +10,19 @@
+ 	model = "Xiaomi Redmi K Pad";
+ 	compatible = "xiaomi,turner", "mediatek,mt6991";
+ 	chassis-type = "tablet";
++
++	reserved-memory {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		/* The bootloader supplies the physical address before enabling MFG. */
++		gpufreq_mem: gpufreq {
++			size = <0 0x4000>;
++			no-map;
++			status = "disabled";
++		};
++	};
+ 
+ 	aliases {
+ 		serial0 = &uart0;
+@@ -46,6 +59,15 @@
+ 	};
+ };
+ 
++&gpu {
++	/* Firmware handoff requires DMA cache maintenance on this board. */
++	dma-noncoherent;
++};
++
++&mfg {
++	memory-region = <&gpufreq_mem>;
++};
++
+ &pcie0 {
+ 	max-link-speed = <4>;
+ 	pinctrl-names = "init", "default", "sleep", "idle";

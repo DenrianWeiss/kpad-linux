@@ -1,0 +1,169 @@
+Subject: [PATCH] spmi: mtk-pmif: route MT6991 firmware slave IDs to M/P banks
+
+Initialize SWINF offsets before registering children, whose probes may issue
+transactions immediately. Support register and bus commands through the
+firmware topology. PMIC interrupt routing is separate.
+
+--- a/drivers/spmi/spmi-mtk-pmif.c
++++ b/drivers/spmi/spmi-mtk-pmif.c
+@@ -51,6 +51,7 @@
+ 	const u32	*spmimst_regs;
+ 	u32	soc_chan;
+ 	u8	spmi_ver;
++	bool	sid_routing;
+ 	u32	num_spmi_buses;
+ };
+ 
+@@ -69,6 +70,7 @@
+ };
+ 
+ struct pmif {
++	u32 secondary_sids;
+ 	struct pmif_bus bus[PMIF_MAX_BUSES];
+ 	struct ch_reg	chan;
+ 	const struct pmif_data *data;
+@@ -288,6 +290,17 @@
+ 	return dev_get_drvdata(ctrl->dev.parent);
+ }
+ 
++/* MT6991 firmware describes both physical banks on one logical SPMI bus. */
++static struct pmif_bus *pmif_sid_bus(struct spmi_controller *ctrl, u8 sid)
++{
++	struct pmif *arb = to_mtk_pmif(ctrl);
++
++	if (arb->data->sid_routing)
++		return &arb->bus[!!(arb->secondary_sids & BIT(sid & 0xf))];
++
++	return spmi_controller_get_drvdata(ctrl);
++}
++
+ static u32 pmif_readl(struct pmif *arb, struct pmif_bus *pbus, enum pmif_regs reg)
+ {
+ 	return readl(pbus->base + arb->data->regs[reg]);
+@@ -321,7 +334,7 @@
+ 
+ static int pmif_arb_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid)
+ {
+-	struct pmif_bus *pbus = spmi_controller_get_drvdata(ctrl);
++	struct pmif_bus *pbus = pmif_sid_bus(ctrl, sid);
+ 	struct pmif *arb = to_mtk_pmif(ctrl);
+ 	u32 rdata, cmd;
+ 	int ret;
+@@ -345,7 +358,7 @@
+ static int pmif_spmi_read_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid,
+ 			      u16 addr, u8 *buf, size_t len)
+ {
+-	struct pmif_bus *pbus = spmi_controller_get_drvdata(ctrl);
++	struct pmif_bus *pbus = pmif_sid_bus(ctrl, sid);
+ 	struct pmif *arb = to_mtk_pmif(ctrl);
+ 	struct ch_reg *inf_reg;
+ 	int ret;
+@@ -414,7 +427,7 @@
+ static int pmif_spmi_write_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid,
+ 			       u16 addr, const u8 *buf, size_t len)
+ {
+-	struct pmif_bus *pbus = spmi_controller_get_drvdata(ctrl);
++	struct pmif_bus *pbus = pmif_sid_bus(ctrl, sid);
+ 	struct pmif *arb = to_mtk_pmif(ctrl);
+ 	struct ch_reg *inf_reg;
+ 	int ret;
+@@ -636,6 +649,13 @@
+ 	.soc_chan = 2,
+ };
+ 
++static const struct pmif_data mt6991_pmif_arb = {
++	.regs = mt8195_regs,
++	.spmimst_regs = mt8195_spmi_regs,
++	.soc_chan = 2,
++	.sid_routing = true,
++};
++
+ static const struct pmif_data mt8196_pmif_arb = {
+ 	.regs = mt8195_regs,
+ 	.spmimst_regs = mt8195_spmi_regs,
+@@ -769,6 +789,44 @@
+ 	return err;
+ }
+ 
++static int mt6991_pmif_register(struct platform_device *pdev, struct pmif *arb)
++{
++	static const char * const pmif_names[] = { "pmif", "pmif-p" };
++	static const char * const master_names[] = { "spmimst", "spmimst-p" };
++	struct device *dev = &pdev->dev;
++	struct spmi_controller *ctrl;
++	int i, ret;
++
++	if (device_property_present(dev, "spmi-dev-mask")) {
++		ret = device_property_read_u32(dev, "spmi-dev-mask", &arb->secondary_sids);
++		if (ret)
++			return ret;
++		if (arb->secondary_sids > U16_MAX)
++			return -EINVAL;
++	}
++
++	/* The stock binding supplies four windows and firmware-managed clocks. */
++	for (i = 0; i < ARRAY_SIZE(pmif_names); i++) {
++		struct pmif_bus *bus = &arb->bus[i];
++
++		bus->base = devm_platform_ioremap_resource_byname(pdev, pmif_names[i]);
++		if (IS_ERR(bus->base))
++			return PTR_ERR(bus->base);
++		bus->spmimst_base = devm_platform_ioremap_resource_byname(pdev, master_names[i]);
++		if (IS_ERR(bus->spmimst_base))
++			return PTR_ERR(bus->spmimst_base);
++		raw_spin_lock_init(&bus->lock);
++	}
++
++	ctrl = devm_spmi_controller_alloc(dev, 0);
++	if (IS_ERR(ctrl))
++		return PTR_ERR(ctrl);
++	ctrl->cmd = pmif_arb_cmd;
++	ctrl->read_cmd = pmif_spmi_read_cmd;
++	ctrl->write_cmd = pmif_spmi_write_cmd;
++	return devm_spmi_controller_add(dev, ctrl);
++}
++
+ static int mtk_spmi_probe(struct platform_device *pdev)
+ {
+ 	struct device_node *node = pdev->dev.of_node;
+@@ -788,6 +846,16 @@
+ 	}
+ 
+ 	platform_set_drvdata(pdev, arb);
++
++	chan_offset = PMIF_CHAN_OFFSET * arb->data->soc_chan;
++	arb->chan.ch_sta = PMIF_SWINF_0_STA + chan_offset;
++	arb->chan.wdata = PMIF_SWINF_0_WDATA_31_0 + chan_offset;
++	arb->chan.rdata = PMIF_SWINF_0_RDATA_31_0 + chan_offset;
++	arb->chan.ch_send = PMIF_SWINF_0_ACC + chan_offset;
++	arb->chan.ch_rdy = PMIF_SWINF_0_VLD_CLR + chan_offset;
++
++	if (arb->data->sid_routing)
++		return mt6991_pmif_register(pdev, arb);
+ 
+ 	if (!arb->data->num_spmi_buses) {
+ 		ret = mtk_spmi_bus_probe(pdev, node, arb->data, &arb->bus[cur_bus]);
+@@ -806,13 +874,6 @@
+ 		}
+ 	}
+ 
+-	chan_offset = PMIF_CHAN_OFFSET * arb->data->soc_chan;
+-	arb->chan.ch_sta = PMIF_SWINF_0_STA + chan_offset;
+-	arb->chan.wdata = PMIF_SWINF_0_WDATA_31_0 + chan_offset;
+-	arb->chan.rdata = PMIF_SWINF_0_RDATA_31_0 + chan_offset;
+-	arb->chan.ch_send = PMIF_SWINF_0_ACC + chan_offset;
+-	arb->chan.ch_rdy = PMIF_SWINF_0_VLD_CLR + chan_offset;
+-
+ 	return 0;
+ }
+ 
+@@ -838,6 +899,9 @@
+ 	{
+ 		.compatible = "mediatek,mt6873-spmi",
+ 		.data = &mt6873_pmif_arb,
++	}, {
++		.compatible = "mediatek,mt6991-spmi",
++		.data = &mt6991_pmif_arb,
+ 	}, {
+ 		.compatible = "mediatek,mt8195-spmi",
+ 		.data = &mt8195_pmif_arb,

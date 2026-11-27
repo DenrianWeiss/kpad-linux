@@ -1,0 +1,46 @@
+From 039ce38f60bee9164e5180bd4e4ab90a9c20d93a Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:04:02 +0800
+Subject: [PATCH] clk: mediatek: provide the three MT6991 PCIe0 upstream muxes
+
+---
+ drivers/clk/mediatek/clk-mt8196-topckgen.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-topckgen.c b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+index e37130c..fe54904 100644
+--- a/drivers/clk/mediatek/clk-mt8196-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+@@ -958,6 +958,13 @@ static const struct mtk_composite top_aud_divs[] = {
+ };
+ 
+ static const struct mtk_fixed_factor mt6991_divs[] = {
++	FACTOR(MT6991_CLK_TOP_OSC_D4, "osc_d4", "ulposc", 1, 4),
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D5_D2, "mainpll_d5_d2", "mainpll", 1, 10),
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D4_D2, "mainpll_d4_d2", "mainpll", 1, 8),
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D6, "mainpll_d6", "mainpll", 1, 6),
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D5, "mainpll_d5", "mainpll", 1, 5),
++	FACTOR(MT6991_CLK_TOP_UNIVPLL_D5, "univpll_d5", "univpll", 1, 5),
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D4, "mainpll_d4", "mainpll", 1, 4),
+ 	FACTOR(MT6991_CLK_TOP_MAINPLL_D7_D8, "mainpll_d7_d8", "mainpll", 1, 56),
+ 	FACTOR(MT6991_CLK_TOP_MAINPLL_D5_D8, "mainpll_d5_d8", "mainpll", 1, 40),
+ 	FACTOR(MT6991_CLK_TOP_OSC_D8, "osc_d8", "ulposc", 1, 8),
+@@ -977,6 +984,15 @@ static const struct mtk_fixed_factor mt6991_divs[] = {
+ };
+ 
+ static const struct mtk_mux mt6991_muxes[] = {
++	MUX_CLR_SET_UPD(MT6991_CLK_TOP_PEXTP0_AXI, "ufs_pextp0_axi",
++		shared_axi_parents, CLK_CFG_1, CLK_CFG_1_SET,
++		CLK_CFG_1_CLR, 0, 3, CLK_CFG_UPDATE, TOP_MUX_UFS_PEXTP0_AXI_SHIFT),
++	MUX_CLR_SET_UPD(MT6991_CLK_TOP_PEXTP0_MEM_SUB, "ufs_pexpt0_mem_sub",
++		shared_sub_parents, CLK_CFG_1, CLK_CFG_1_SET,
++		CLK_CFG_1_CLR, 24, 4, CLK_CFG_UPDATE, TOP_MUX_UFS_PEXPT0_MEM_SUB_SHIFT),
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_TL, "tl", tl_parents,
++		CLK_CFG_15, CLK_CFG_15_SET, CLK_CFG_15_CLR,
++		16, 2, 23, CLK_CFG_UPDATE2, TOP_MUX_TL_SHIFT, CLK_FENC_STATUS_MON_1, 1),
+ 	MUX_CLR_SET_UPD(MT6991_CLK_TOP_P_AXI, "p_axi", shared_axi_parents,
+ 		CLK_CFG_0, CLK_CFG_0_SET, CLK_CFG_0_CLR,
+ 		24, 3, CLK_CFG_UPDATE, TOP_MUX_PERI_AXI_SHIFT),
+-- 
+2.50.1 (Apple Git-155)
+

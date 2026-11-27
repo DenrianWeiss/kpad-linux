@@ -1,0 +1,31 @@
+From 492a419cd7e9033210c21d30dd77812743fdf748 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 10:22:38 +0800
+Subject: [PATCH 097/100] clk: mediatek: register VDISP AO clocks on the
+ matched OF node
+
+VDISP AO binds directly via its OF match table. Use the node of the clock controller for its register map, voter lookup and clock provider. The pdev helpers instead operate on the parent node of an MFD child.
+
+Signed-off-by: Turner Linux Port <turner@localhost>
+---
+ drivers/clk/mediatek/clk-mt8196-vdisp_ao.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-vdisp_ao.c b/drivers/clk/mediatek/clk-mt8196-vdisp_ao.c
+index fddb69d1c..070c60f40 100644
+--- a/drivers/clk/mediatek/clk-mt8196-vdisp_ao.c
++++ b/drivers/clk/mediatek/clk-mt8196-vdisp_ao.c
+@@ -67,8 +67,8 @@ static const struct of_device_id of_match_clk_mt8196_vdisp_ao[] = {
+ MODULE_DEVICE_TABLE(of, of_match_clk_mt8196_vdisp_ao);
+ 
+ static struct platform_driver clk_mt8196_vdisp_ao_drv = {
+-	.probe = mtk_clk_pdev_probe,
+-	.remove = mtk_clk_pdev_remove,
++	.probe = mtk_clk_simple_probe,
++	.remove = mtk_clk_simple_remove,
+ 	.driver = {
+ 		.name = "clk-mt8196-vdisp-ao",
+ 		.of_match_table = of_match_clk_mt8196_vdisp_ao,
+-- 
+2.50.1 (Apple Git-155)
+

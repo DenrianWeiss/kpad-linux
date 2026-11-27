@@ -1,0 +1,146 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -1,6 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* MT6991 ADSP core firmware notifications */
++#include <linux/io.h>
+ #include <linux/mailbox_client.h>
++#include <linux/overflow.h>
++#include <linux/sizes.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
+@@ -12,6 +15,7 @@
+ struct mt6991_adsp_core {
+ 	struct mbox_client client;
+ 	struct mbox_chan *rx;
++	void __iomem *l2_end;
+ 	u32 id;
+ 	atomic_t ready_count;
+ };
+@@ -34,7 +38,92 @@
+ }
+ static DEVICE_ATTR_RO(ready_count);
+ 
++struct mt6991_adsp_record {
++	u32 address;
++	u32 size;
++};
++
++static int mt6991_adsp_records(struct device_node *sys, struct mt6991_adsp_record *pool,
++			       struct mt6991_adsp_record *c2c)
++{
++	static const char * const properties[] = {
++		"adsp-rsv-logger-a", "adsp-rsv-dbg-dump-a", "adsp-rsv-ipidma-a",
++		"adsp-rsv-core-dump-a", "adsp-rsv-logger-b", "adsp-rsv-dbg-dump-b",
++		"adsp-rsv-ipidma-b", "adsp-rsv-core-dump-b", "adsp-rsv-c2c",
++		"adsp-rsv-pcie", "adsp-rsv-l2sram", "adsp-rsv-xhci", "adsp-rsv-audio",
++	};
++	u64 range[2], offset = 0, last;
++	u32 l2, cores, size;
++	int i;
++
++	if (of_property_read_u32(sys, "system-l2sram", &l2) || l2 != 1 ||
++	    of_property_read_u32(sys, "core-num", &cores) || cores != 2)
++		return -EOPNOTSUPP;
++	if (of_property_count_u64_elems(sys, "shared_memory") != 2 ||
++	    of_property_read_u64_array(sys, "shared_memory", range, 2))
++		return -ENODATA;
++	if (!range[0] || !range[1] || range[1] > U32_MAX ||
++	    check_add_overflow(range[0], range[1] - 1, &last) ||
++	    upper_32_bits(range[0]) != upper_32_bits(last))
++		return -ERANGE;
++
++	pool->address = lower_32_bits(range[0]);
++	pool->size = range[1];
++	for (i = 0; i < ARRAY_SIZE(properties); i++) {
++		size = 0;
++		if (of_property_present(sys, properties[i]) &&
++		    of_property_read_u32(sys, properties[i], &size))
++			return -EINVAL;
++		if (i == 8) {
++			if (!size)
++				return -ENODATA;
++			c2c->address = lower_32_bits(range[0] + offset);
++			c2c->size = size;
++		}
++		offset += ALIGN((u64)size, SZ_4K);
++		if (offset > range[1])
++			return -ERANGE;
++	}
++	return 0;
++}
++
++static bool mt6991_adsp_record_matches(void __iomem *slot,
++				       const struct mt6991_adsp_record *record)
++{
++	return readl(slot) == record->address && readl(slot + 4) == record->size;
++}
++
++static ssize_t boot_records_match_show(struct device *dev, struct device_attribute *attr,
++				       char *buf)
++{
++	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
++	struct mt6991_adsp_record pool, c2c;
++	struct of_phandle_args rx;
++	bool match;
++	int ret;
++
++	ret = of_parse_phandle_with_args(dev->of_node, "mboxes", "#mbox-cells", 1, &rx);
++	if (ret)
++		return ret;
++	ret = mt6991_adsp_records(rx.np, &pool, &c2c);
++	of_node_put(rx.np);
++	if (ret)
++		return ret;
++
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return ret;
++	match = mt6991_adsp_record_matches(core->l2_end - 0x28, &pool);
++	if (!core->id)
++		match &= mt6991_adsp_record_matches(core->l2_end - 0x2510, &c2c);
++	pm_runtime_put_sync(dev);
++
++	return sysfs_emit(buf, "%u\n", match);
++}
++static DEVICE_ATTR_RO(boot_records_match);
++
+ static struct attribute *mt6991_adsp_attrs[] = {
++	&dev_attr_boot_records_match.attr,
+ 	&dev_attr_ready_count.attr,
+ 	NULL,
+ };
+@@ -66,11 +155,21 @@
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct mt6991_adsp_core *core;
++	struct resource *res;
++	void __iomem *l2;
+ 
+ 	core = devm_kzalloc(dev, sizeof(*core), GFP_KERNEL);
+ 	if (!core)
+ 		return -ENOMEM;
+ 	core->id = of_device_is_compatible(dev->of_node, "mediatek,mt6991-adsp_core_1") ? 1 : 0;
++	/* Turner firmware describes ITCM, DTCM and then L2 SRAM. */
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
++	if (!res || resource_size(res) < (core->id ? 0x28 : 0x2510))
++		return dev_err_probe(dev, -EINVAL, "invalid ADSP L2 window\n");
++	l2 = devm_ioremap_resource(dev, res);
++	if (IS_ERR(l2))
++		return PTR_ERR(l2);
++	core->l2_end = l2 + resource_size(res);
+ 	core->client.dev = dev;
+ 	core->client.rx_callback = mt6991_adsp_receive;
+ 	platform_set_drvdata(pdev, core);
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -465,6 +465,8 @@
+ 				 <&apmixed MT6991_CLK_APMIXED_ADSPPLL>;
+ 			clock-names = "clk_top_adsp_sel", "clk_top_clk26m", "clk_top_adsppll";
+ 			power-domains = <&spm MT6991_POWER_DOMAIN_ADSP_TOP_DORMANT>;
++			core-num = <2>;
++			system-l2sram = <1>;
+ 			#mbox-cells = <1>;
+ 		};
+ 

@@ -1,0 +1,78 @@
+Subject: [PATCH] clk: mediatek: supply MT6991 VLP audio bus and crystal clocks
+
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -55,6 +55,9 @@
+ 
+ #define MT6991_CLK_VLP_USB_TOP                0
+ #define MT6991_CLK_VLP_USB_XHCI               1
++#define MT6991_CLK_VLP_CLKSQ                  2
++#define MT6991_CLK_VLP_AUD_INTBUS             3
++#define MT6991_CLK_VLP_AUD_CLKSQ              4
+ 
+ #define MT6991_CLK_PERI_UART0_BCLK         0
+ #define MT6991_CLK_PERI_SPI6_BCLK          1
+--- a/drivers/clk/mediatek/clk-mt8196-vlpckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-vlpckgen.c
+@@ -632,6 +632,16 @@
+ 	.max_register = 0x1000,
+ };
+ 
++static const struct mtk_fixed_factor mt6991_vlp_divs[] = {
++	FACTOR(MT6991_CLK_VLP_CLKSQ, "vlp_clksq", "clk26m", 1, 1),
++	FACTOR(MT6991_CLK_VLP_AUD_CLKSQ, "vlp_aud_clksq", "vlp_clksq", 1, 1),
++};
++
++/* All four selector values are valid on MT6991. */
++static const char * const mt6991_aud_intbus_parents[] = {
++	"clk26m", "vlp_clksq", "mainpll_d7_d4", "mainpll_d4_d4",
++};
++
+ static const struct mtk_mux mt6991_vlp_muxes[] = {
+ 	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_VLP_USB_TOP, "vlp_usb", vlp_usb_parents,
+ 		VLP_CLK_CFG_8, VLP_CLK_CFG_8_SET, VLP_CLK_CFG_8_CLR,
+@@ -641,15 +651,21 @@
+ 		VLP_CLK_CFG_8, VLP_CLK_CFG_8_SET, VLP_CLK_CFG_8_CLR,
+ 		16, 1, 23, VLP_CLK_CFG_UPDATE1, TOP_MUX_SSUSB_XHCI_SHIFT,
+ 		VLP_OCIC_FENC_STATUS_MON_1, 29),
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_VLP_AUD_INTBUS, "vlp_aud_intbus",
++		mt6991_aud_intbus_parents, VLP_CLK_CFG_9, VLP_CLK_CFG_9_SET,
++		VLP_CLK_CFG_9_CLR, 24, 2, 31, VLP_CLK_CFG_UPDATE1,
++		TOP_MUX_AUD_INTBUS_SHIFT, VLP_OCIC_FENC_STATUS_MON_1, 24),
+ };
+ 
+ static const struct mtk_clk_desc mt6991_vlp_desc = {
++	.factor_clks = mt6991_vlp_divs,
++	.num_factor_clks = ARRAY_SIZE(mt6991_vlp_divs),
+ 	.mux_clks = mt6991_vlp_muxes,
+ 	.num_mux_clks = ARRAY_SIZE(mt6991_vlp_muxes),
+ };
+ 
+ /* Firmware uses the full MT6991 VLP clock table. */
+-static struct clk_hw *mt6991_fw_usb_clk(struct of_phandle_args *spec, void *data)
++static struct clk_hw *mt6991_fw_vlp_clk(struct of_phandle_args *spec, void *data)
+ {
+ 	struct clk_hw_onecell_data *clks = data;
+ 
+@@ -660,6 +676,12 @@
+ 		return clks->hws[MT6991_CLK_VLP_USB_TOP];
+ 	case 35:
+ 		return clks->hws[MT6991_CLK_VLP_USB_XHCI];
++	case 40:
++		return clks->hws[MT6991_CLK_VLP_AUD_INTBUS];
++	case 45:
++		return clks->hws[MT6991_CLK_VLP_CLKSQ];
++	case 50:
++		return clks->hws[MT6991_CLK_VLP_AUD_CLKSQ];
+ 	default:
+ 		return ERR_PTR(-ENOENT);
+ 	}
+@@ -675,7 +697,7 @@
+ 	struct regmap *regmap;
+ 
+ 	if (of_device_is_compatible(node, "mediatek,mt6991-vlp_cksys"))
+-		return mtk_clk_simple_probe_with_get(pdev, mt6991_fw_usb_clk);
++		return mtk_clk_simple_probe_with_get(pdev, mt6991_fw_vlp_clk);
+ 	if (device_get_match_data(dev))
+ 		return mtk_clk_simple_probe(pdev);
+ 

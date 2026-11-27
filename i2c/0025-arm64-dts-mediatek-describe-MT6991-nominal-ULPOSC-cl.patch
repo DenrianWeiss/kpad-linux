@@ -1,0 +1,31 @@
+From 35625b4799b41d19a3982e863e699f6573aec0a6 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:33:33 +0800
+Subject: [PATCH 25/25] arm64: dts: mediatek: describe MT6991 nominal ULPOSC
+ clock
+
+---
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index 6d560ba..1a301c4 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -14,6 +14,13 @@ clk26m: clock-26m {
+ 		clock-output-names = "clk26m";
+ 	};
+ 
++	clock-520m {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <520000000>;
++		clock-output-names = "ulposc";
++	};
++
+ 	cpus {
+ 		#address-cells = <1>;
+ 		#size-cells = <0>;
+-- 
+2.50.1 (Apple Git-155)
+

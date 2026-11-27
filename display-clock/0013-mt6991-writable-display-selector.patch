@@ -1,0 +1,158 @@
+Subject: [RFC PATCH] clk: mediatek: make the MT6991 display selector writable
+
+Register the CKSYS2 display selector as a real clock instead of a
+read-only mux plus a fixed factor. Consumers now request a rate on the
+display clock and the framework reparents it with the OEM
+set/clear/update sequence, so the clock tree reports the rate the
+hardware actually uses.
+
+---
+--- a/drivers/clk/mediatek/clk-mt6991-disp.c
++++ b/drivers/clk/mediatek/clk-mt6991-disp.c
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* Firmware-owned display clock selection on MT6991. */
+ #include <linux/clk-provider.h>
++#include <linux/io.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+@@ -23,16 +24,107 @@ static const struct {
+ 	{ "disp_mainpll2_d3", "mainpll2", 3 },
+ };
+ 
++/* The display selector lives in CKSYS2 and commits through the OEM
++ * set/clear/update sequence, so a plain register write does not reparent it.
++ */
++#define MT6991_CKSYS2_CLK_CFG_4		0x50
++#define MT6991_CKSYS2_CLK_CFG_4_SET	0x54
++#define MT6991_CKSYS2_CLK_CFG_4_CLR	0x58
++#define MT6991_CKSYS2_CLK_CFG_UPDATE	0x04
++#define MT6991_CKSYS2_DISP_SHIFT	24
++#define MT6991_CKSYS2_DISP_UPDATE	19
++
++struct mt6991_disp_sel {
++	struct clk_hw hw;
++	void __iomem *base;
++};
++
++static u8 mt6991_disp_sel_get_parent(struct clk_hw *hw)
++{
++	struct mt6991_disp_sel *sel = container_of(hw, struct mt6991_disp_sel, hw);
++
++	return (readl(sel->base + MT6991_CKSYS2_CLK_CFG_4) >>
++		MT6991_CKSYS2_DISP_SHIFT) & 0xf;
++}
++
++static int mt6991_disp_sel_set_parent(struct clk_hw *hw, u8 index)
++{
++	struct mt6991_disp_sel *sel = container_of(hw, struct mt6991_disp_sel, hw);
++
++	writel(0xf << MT6991_CKSYS2_DISP_SHIFT,
++	       sel->base + MT6991_CKSYS2_CLK_CFG_4_CLR);
++	writel(index << MT6991_CKSYS2_DISP_SHIFT,
++	       sel->base + MT6991_CKSYS2_CLK_CFG_4_SET);
++	writel(BIT(MT6991_CKSYS2_DISP_UPDATE),
++	       sel->base + MT6991_CKSYS2_CLK_CFG_UPDATE);
++
++	return 0;
++}
++
++/* Pick the slowest parent that still covers the request. A closest-rate match
++ * may round below the request, and the display pipeline underruns there.
++ */
++static int mt6991_disp_sel_determine_rate(struct clk_hw *hw,
++					  struct clk_rate_request *req)
++{
++	struct clk_hw *best = NULL;
++	unsigned long best_rate = 0, rate;
++	int i, num = clk_hw_get_num_parents(hw);
++
++	for (i = 0; i < num; i++) {
++		struct clk_hw *parent = clk_hw_get_parent_by_index(hw, i);
++
++		if (!parent)
++			continue;
++		rate = clk_hw_get_rate(parent);
++		if (!rate)
++			continue;
++		if (rate >= req->rate && (!best || rate < best_rate)) {
++			best = parent;
++			best_rate = rate;
++		}
++	}
++	if (!best) {
++		for (i = 0; i < num; i++) {
++			struct clk_hw *parent = clk_hw_get_parent_by_index(hw, i);
++
++			if (!parent)
++				continue;
++			rate = clk_hw_get_rate(parent);
++			if (rate > best_rate) {
++				best = parent;
++				best_rate = rate;
++			}
++		}
++	}
++	if (!best)
++		return -EINVAL;
++
++	req->best_parent_hw = best;
++	req->best_parent_rate = best_rate;
++	req->rate = best_rate;
++
++	return 0;
++}
++
++static const struct clk_ops mt6991_disp_sel_ops = {
++	.get_parent = mt6991_disp_sel_get_parent,
++	.set_parent = mt6991_disp_sel_set_parent,
++	.determine_rate = mt6991_disp_sel_determine_rate,
++};
++
+ static int mt6991_disp_clk_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	const char *names[ARRAY_SIZE(parents)];
+ 	struct clk_hw_onecell_data *data;
++	struct mt6991_disp_sel *sel;
++	struct clk_init_data init = {};
+ 	struct clk_hw *hw;
+ 	void __iomem *base;
+ 	const u8 *chipid;
+ 	u32 revision;
+-	int len, i;
++	int len, i, ret;
+ 
+ 	chipid = of_get_property(of_chosen, "atag,chipid", &len);
+ 	if (!chipid || len < 20)
+@@ -68,16 +160,20 @@ static int mt6991_disp_clk_probe(struct platform_device *pdev)
+ 			return PTR_ERR(hw);
+ 	}
+ 
+-	hw = devm_clk_hw_register_mux(dev, "disp_sel", names, ARRAY_SIZE(names),
+-				     CLK_GET_RATE_NOCACHE, base + 0x50, 24, 4,
+-				     CLK_MUX_READ_ONLY, NULL);
+-	if (IS_ERR(hw))
+-		return PTR_ERR(hw);
++	sel = devm_kzalloc(dev, sizeof(*sel), GFP_KERNEL);
++	if (!sel)
++		return -ENOMEM;
++	sel->base = base;
++	init.name = "disp";
++	init.ops = &mt6991_disp_sel_ops;
++	init.parent_names = names;
++	init.num_parents = ARRAY_SIZE(names);
++	sel->hw.init = &init;
++	ret = devm_clk_hw_register(dev, &sel->hw);
++	if (ret)
++		return ret;
++	hw = &sel->hw;
+ 	data->hws[MT6991_CLK_CK2_DISP_SEL] = hw;
+-	hw = devm_clk_hw_register_fixed_factor_parent_hw(dev, "disp", hw,
+-							CLK_GET_RATE_NOCACHE, 1, 1);
+-	if (IS_ERR(hw))
+-		return PTR_ERR(hw);
+ 	data->hws[MT6991_CLK_CK2_DISP] = hw;
+ 	return devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get, data);
+ }

@@ -1,0 +1,142 @@
+Subject: [RFC PATCH] drm: mediatek: turner: select the display clock per mode
+
+Both DSI links share one display engine clock. Select its target on a
+mode change, before scanout. These are the tested Turner settings:
+
+    panel refresh (Hz)    engine clock (MHz)
+    48, 50                218.4
+    60, 120               273
+    90, 165               546
+    144                   364
+
+In a short dual-link sweep, the 48/50/60/120/144/165 Hz settings above
+completed 154/161/195/384/464/534 frames per link without an underrun.
+The 90 Hz desktop used 546 MHz for 19120 frames per link with zero
+underruns. On a 60 Hz desktop, 80 launcher toggles produced 5/4
+underruns at 273 MHz and 2/0 at 546 MHz. Keep the 273 MHz default:
+that higher rate still had an underrun and the test did not measure
+power or establish a generally better operating point.
+
+A KDE modeset sweep on kernel #156 (two CPUs online) gave the following
+results. Both links counted the same number of frames in each interval.
+Observed Hz is (frames - 1) / time between first and last frame.
+
+    mode Hz   observed Hz   frames/link   underruns (DSI0/DSI1)
+         48         48.06           686   1/1
+         50         50.07           610   1/0
+         60         60.00           731   0/0
+         90         90.13          1100   0/0
+        120        120.00          1465   0/0
+        144        144.16          1758   0/0
+        165        165.21          2014   0/0
+
+The clock framework reported the requested engine rate at every switch.
+Repeating 48 and 50 Hz in the same boot yielded 587 and 610 frames per
+link with zero underruns. A 30 fps external camera showed brief dimming
+during modesets and no sustained corruption on the visible wallpaper.
+The recording cannot resolve individual pixels or every panel refresh.
+
+Inspect the driver's "mmclk" line for the requested and CCF-reported
+rates, and "scan rate=" lines for each link's frame and underrun counts.
+Reading the global debugfs clk_summary also queries unrelated providers.
+
+---
+--- a/drivers/gpu/drm/mediatek/turner/command-host.c
++++ b/drivers/gpu/drm/mediatek/turner/command-host.c
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* Dual-host command-mode bring-up on the Turner firmware tree. */
+ #include <linux/i2c.h>
++#include <linux/delay.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/iommu.h>
+ #include <linux/regmap.h>
+@@ -37,6 +38,26 @@ MODULE_PARM_DESC(stock_shape, "Use the OEM 952-pixel relay width around the 940-
+ static bool oem_relay_1tnp = true;
+ module_param(oem_relay_1tnp, bool, 0644);
+ MODULE_PARM_DESC(oem_relay_1tnp, "Program the OEM two-pixel relay tick");
++/* Both DSI links share this engine clock. The 90 Hz compositor load
++ * needs extra headroom. At 60 Hz the launcher test still underruns at
++ * 546 MHz, so use the validated 273 MHz setting. Read back the selected
++ * rate from this clock and check each link's scan counters separately.
++ */
++static const struct {
++	u8 hz;
++	u32 rate;
++} turner_mmclk_modes[] = {
++	{ 48, 218400000 },	/* disp_mainpll_d10 */
++	{ 50, 218400000 },
++	{ 60, 273000000 },	/* disp_mainpll_d8 */
++	{ 90, 546000000 },
++	{ 120, 273000000 },
++	{ 144, 364000000 },	/* disp_mainpll_d6 */
++	{ 165, 546000000 },	/* disp_mainpll2_d4 */
++};
++static bool disp_clock_scale = true;
++module_param(disp_clock_scale, bool, 0644);
++MODULE_PARM_DESC(disp_clock_scale, "Select the display clock for the active mode");
+ struct turner_host {
+ 	struct turner_kms *kms;
+ 	bool fetch_unsettled;
+@@ -52,6 +73,33 @@ struct turner_host {
+ 	unsigned int transfers;
+ };
+ 
++static unsigned long turner_mmclk_rate(const struct drm_display_mode *profile)
++{
++	unsigned int hz = drm_mode_vrefresh(profile);
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(turner_mmclk_modes); i++)
++		if (turner_mmclk_modes[i].hz == hz)
++			return turner_mmclk_modes[i].rate;
++
++	return 0;
++}
++
++static void turner_program_disp_clock(struct turner_host *ctx,
++				      const struct drm_display_mode *profile)
++{
++	unsigned long target = turner_mmclk_rate(profile), before, after;
++	int ret;
++
++	if (!target)
++		return;
++	before = clk_get_rate(ctx->clocks[0].clk);
++	ret = clk_set_rate(ctx->clocks[0].clk, target);
++	after = clk_get_rate(ctx->clocks[0].clk);
++	dev_notice(ctx->host.dev, "mmclk %u Hz target=%lu ret=%d engine=%lu->%lu\n",
++		   drm_mode_vrefresh(profile), target, ret, before, after);
++}
++
+ static int attach(struct mipi_dsi_host *host, struct mipi_dsi_device *dsi)
+ {
+ 	struct turner_host *ctx = container_of(host, struct turner_host, host);
+@@ -375,6 +423,7 @@ put:
+ #include "scan-path.h"
+ #include "fetch.h"
+ 
++
+ /* Exercise sync-pulse video between a verified prepare and unprepare. */
+ static void sample_video(struct turner_host *ctx, const struct drm_display_mode *profile,
+ 			 unsigned int duration_ms, const dma_addr_t addr[2])
+@@ -397,6 +446,8 @@ static void sample_video(struct turner_host *ctx, const struct drm_display_mode
+ 
+ 	if (!path)
+ 		return;
++	if (disp_clock_scale)
++		turner_program_disp_clock(ctx, profile);
+ 	ret = start_scan_path(path, ctx->host.dev);
+ 	dev_notice(ctx->host.dev, "dual color scan setup=%d\n", ret);
+ 	if (ret) {
+@@ -581,8 +632,9 @@ static void sample_video(struct turner_host *ctx, const struct drm_display_mode
+ 
+ 		dev_notice(ctx->host.dev, "video result port=%u frames=%u irq=%#x vstate=%#x lines=%#x\n",
+ 			   i, frame[i], readl(base + 0xc), readl(base + 0x278), readl(base + 0x280));
+-		dev_notice(ctx->host.dev, "scan rate=%d port=%u frames=%u elapsed_us=%lld dsc_irq=%#x underruns=%u last_underrun_frame=%u max_y=%u\n",
++		dev_notice(ctx->host.dev, "scan rate=%d port=%u frames=%u elapsed_us=%lld engine=%lu dsc_irq=%#x underruns=%u last_underrun_frame=%u max_y=%u\n",
+ 			   drm_mode_vrefresh(profile), i, frame[i], last_us[i] - first_us[i],
++			   clk_get_rate(ctx->clocks[0].clk),
+ 			   readl(path->block[DSC_L+i].base + 8), underruns[i], last_underrun[i], max_y[i]);
+ 		writel(mode[i], base + 0x34);
+ 	}

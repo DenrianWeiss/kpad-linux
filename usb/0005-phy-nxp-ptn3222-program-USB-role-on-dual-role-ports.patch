@@ -1,0 +1,169 @@
+From ba615bbe2b8f157d0644a705fbc0170eeb313d66 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 01:33:01 +0800
+Subject: [PATCH] phy: nxp: ptn3222: program USB role on dual-role ports
+
+Set LINK_CONTROL1 bits 5:4 on host/device role changes. Cache the requested role across a reset and preserve unrelated register fields. Turner uses this device on its second USB controller.
+---
+ drivers/phy/Kconfig           |  1 +
+ drivers/phy/phy-nxp-ptn3222.c | 82 ++++++++++++++++++++++++++++++++++-
+ 2 files changed, 81 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/phy/Kconfig b/drivers/phy/Kconfig
+index 19f3b7d..dbd9b4b 100644
+--- a/drivers/phy/Kconfig
++++ b/drivers/phy/Kconfig
+@@ -130,6 +130,7 @@ config PHY_NXP_PTN3222
+ 	depends on I2C
+ 	depends on OF
+ 	select GENERIC_PHY
++	select REGMAP_I2C
+ 	help
+ 	  Enable this to support NXP PTN3222 1-port eUSB2 to USB2 Redriver.
+ 	  This redriver performs translation between eUSB2 and USB2 signalling
+diff --git a/drivers/phy/phy-nxp-ptn3222.c b/drivers/phy/phy-nxp-ptn3222.c
+index 6cb79b5..af602a0 100644
+--- a/drivers/phy/phy-nxp-ptn3222.c
++++ b/drivers/phy/phy-nxp-ptn3222.c
+@@ -3,6 +3,8 @@
+  * Copyright (c) 2024, Linaro Limited
+  */
+ 
++#include <linux/bitfield.h>
++#include <linux/delay.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/i2c.h>
+ #include <linux/module.h>
+@@ -11,15 +13,70 @@
+ #include <linux/regmap.h>
+ #include <linux/regulator/consumer.h>
+ 
++#define PTN3222_LINK_CONTROL1	0x02
++#define PTN3222_ROLE		GENMASK(5, 4)
++#define PTN3222_ROLE_DUAL	0
++#define PTN3222_ROLE_HOST	1
++#define PTN3222_ROLE_DEVICE	2
++
+ #define NUM_SUPPLIES 2
+ 
+ struct ptn3222 {
+-	struct i2c_client *client;
++	struct regmap *regmap;
++	unsigned int role;
++	bool role_valid;
++	bool ready;
+ 	struct phy *phy;
+ 	struct gpio_desc *reset_gpio;
+ 	struct regulator_bulk_data *supplies;
+ };
+ 
++static int ptn3222_write_role(struct ptn3222 *ptn3222, unsigned int role)
++{
++	return regmap_update_bits(ptn3222->regmap, PTN3222_LINK_CONTROL1,
++				  PTN3222_ROLE, FIELD_PREP(PTN3222_ROLE, role));
++}
++
++static int ptn3222_set_mode(struct phy *phy, enum phy_mode mode, int submode)
++{
++	struct ptn3222 *ptn3222 = phy_get_drvdata(phy);
++	unsigned int role;
++	int ret;
++
++	switch (mode) {
++	case PHY_MODE_USB_HOST:
++	case PHY_MODE_USB_HOST_LS:
++	case PHY_MODE_USB_HOST_FS:
++	case PHY_MODE_USB_HOST_HS:
++	case PHY_MODE_USB_HOST_SS:
++		role = PTN3222_ROLE_HOST;
++		break;
++	case PHY_MODE_USB_DEVICE:
++	case PHY_MODE_USB_DEVICE_LS:
++	case PHY_MODE_USB_DEVICE_FS:
++	case PHY_MODE_USB_DEVICE_HS:
++	case PHY_MODE_USB_DEVICE_SS:
++		role = PTN3222_ROLE_DEVICE;
++		break;
++	case PHY_MODE_USB_OTG:
++	case PHY_MODE_INVALID:
++		role = PTN3222_ROLE_DUAL;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	if (ptn3222->ready) {
++		ret = ptn3222_write_role(ptn3222, role);
++		if (ret)
++			return ret;
++	}
++
++	ptn3222->role = role;
++	ptn3222->role_valid = true;
++	return 0;
++}
++
+ static int ptn3222_init(struct phy *phy)
+ {
+ 	struct ptn3222 *ptn3222 = phy_get_drvdata(phy);
+@@ -30,6 +87,17 @@ static int ptn3222_init(struct phy *phy)
+ 		return ret;
+ 
+ 	gpiod_set_value_cansleep(ptn3222->reset_gpio, 0);
++	usleep_range(4000, 5000);
++
++	if (ptn3222->role_valid) {
++		ret = ptn3222_write_role(ptn3222, ptn3222->role);
++		if (ret) {
++			gpiod_set_value_cansleep(ptn3222->reset_gpio, 1);
++			regulator_bulk_disable(NUM_SUPPLIES, ptn3222->supplies);
++			return ret;
++		}
++	}
++	ptn3222->ready = true;
+ 
+ 	return 0;
+ }
+@@ -38,6 +106,7 @@ static int ptn3222_exit(struct phy *phy)
+ {
+ 	struct ptn3222 *ptn3222 = phy_get_drvdata(phy);
+ 
++	ptn3222->ready = false;
+ 	gpiod_set_value_cansleep(ptn3222->reset_gpio, 1);
+ 
+ 	return regulator_bulk_disable(NUM_SUPPLIES, ptn3222->supplies);
+@@ -46,6 +115,7 @@ static int ptn3222_exit(struct phy *phy)
+ static const struct phy_ops ptn3222_ops = {
+ 	.init		= ptn3222_init,
+ 	.exit		= ptn3222_exit,
++	.set_mode	= ptn3222_set_mode,
+ 	.owner		= THIS_MODULE,
+ };
+ 
+@@ -59,6 +129,11 @@ static const struct regulator_bulk_data ptn3222_supplies[NUM_SUPPLIES] = {
+ 	}
+ };
+ 
++static const struct regmap_config ptn3222_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++};
++
+ static int ptn3222_probe(struct i2c_client *client)
+ {
+ 	struct device *dev = &client->dev;
+@@ -70,7 +145,10 @@ static int ptn3222_probe(struct i2c_client *client)
+ 	if (!ptn3222)
+ 		return -ENOMEM;
+ 
+-	ptn3222->client = client;
++	ptn3222->regmap = devm_regmap_init_i2c(client, &ptn3222_regmap_config);
++	if (IS_ERR(ptn3222->regmap))
++		return dev_err_probe(dev, PTR_ERR(ptn3222->regmap),
++				     "unable to initialise regmap\n");
+ 
+ 	ptn3222->reset_gpio = devm_gpiod_get_optional(dev, "reset",
+ 						      GPIOD_OUT_HIGH);
+-- 
+2.50.1 (Apple Git-155)
+

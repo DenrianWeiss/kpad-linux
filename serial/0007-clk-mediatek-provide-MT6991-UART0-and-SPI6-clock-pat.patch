@@ -1,0 +1,195 @@
+From f2ec9a27fedb04fd81ece12d978a105d88d55e72 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 01:40:04 +0800
+Subject: [PATCH 7/8] clk: mediatek: provide MT6991 UART0 and SPI6 clock paths
+
+Read MAINPLL and UNIVPLL rates from the firmware-programmed PCW and post-divider. Supply the UART and SPI6 HWV muxes and peripheral gates. Limit the provider to verified MT6991 registers.
+---
+ drivers/clk/mediatek/clk-mt8196-apmixedsys.c | 31 ++++++++++++++++++
+ drivers/clk/mediatek/clk-mt8196-peri_ao.c    | 12 +++++++
+ drivers/clk/mediatek/clk-mt8196-topckgen.c   | 33 ++++++++++++++++++++
+ drivers/clk/mediatek/clk-pll.c               |  5 +++
+ drivers/clk/mediatek/clk-pll.h               |  1 +
+ 5 files changed, 82 insertions(+)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-apmixedsys.c b/drivers/clk/mediatek/clk-mt8196-apmixedsys.c
+index c4ebb01..ab0f051 100644
+--- a/drivers/clk/mediatek/clk-mt8196-apmixedsys.c
++++ b/drivers/clk/mediatek/clk-mt8196-apmixedsys.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2025 Collabora Ltd.
+  *                    Laura Nao <laura.nao@collabora.com>
+  */
++#include <dt-bindings/clock/mediatek,mt6991-clock.h>
+ #include <dt-bindings/clock/mediatek,mt8196-clock.h>
+ 
+ #include <linux/clk.h>
+@@ -91,6 +92,35 @@ struct mtk_pll_desc {
+ 	size_t num_clks;
+ };
+ 
++/* These shared PLLs are managed by platform firmware on MT6991. */
++static const struct mtk_pll_data mt6991_plls[] = {
++	{
++		.id = MT6991_CLK_APMIXED_MAINPLL,
++		.name = "mainpll",
++		.pd_reg = MAINPLL_CON1,
++		.pd_shift = 24,
++		.pcw_reg = MAINPLL_CON1,
++		.pcwbits = 22,
++		.pcwibits = 8,
++		.ops = &mtk_pll_read_only_ops,
++	},
++	{
++		.id = MT6991_CLK_APMIXED_UNIVPLL,
++		.name = "univpll",
++		.pd_reg = UNIVPLL_CON1,
++		.pd_shift = 24,
++		.pcw_reg = UNIVPLL_CON1,
++		.pcwbits = 22,
++		.pcwibits = 8,
++		.ops = &mtk_pll_read_only_ops,
++	},
++};
++
++static const struct mtk_pll_desc mt6991_apmixed_desc = {
++	.clks = mt6991_plls,
++	.num_clks = ARRAY_SIZE(mt6991_plls),
++};
++
+ static const struct mtk_pll_data apmixed_plls[] = {
+ 	PLL_FENC(CLK_APMIXED_MAINPLL, "mainpll", MAINPLL_CON0, FENC_STATUS_CON0,
+ 		 7, PLL_AO, MAINPLL_CON1, 24, MAINPLL_CON1, 0, 22, 0),
+@@ -184,6 +214,7 @@ static void clk_mt8196_apmixed_remove(struct platform_device *pdev)
+ }
+ 
+ static const struct of_device_id of_match_clk_mt8196_apmixed[] = {
++	{ .compatible = "mediatek,mt6991-apmixedsys", .data = &mt6991_apmixed_desc },
+ 	{ .compatible = "mediatek,mt8196-apmixedsys", .data = &apmixed_desc },
+ 	{ .compatible = "mediatek,mt8196-apmixedsys-gp2",
+ 	  .data = &apmixed2_desc },
+diff --git a/drivers/clk/mediatek/clk-mt8196-peri_ao.c b/drivers/clk/mediatek/clk-mt8196-peri_ao.c
+index f227a86..f97a77d 100644
+--- a/drivers/clk/mediatek/clk-mt8196-peri_ao.c
++++ b/drivers/clk/mediatek/clk-mt8196-peri_ao.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2025 Collabora Ltd.
+  *                    Laura Nao <laura.nao@collabora.com>
+  */
++#include <dt-bindings/clock/mediatek,mt6991-clock.h>
+ #include <dt-bindings/clock/mediatek,mt8196-clock.h>
+ 
+ #include <linux/clk-provider.h>
+@@ -117,12 +118,23 @@ static const struct mtk_gate peri_ao_clks[] = {
+ 	GATE_PERI_AO2(CLK_PERI_AO_MSDC2_HCLK_WRAP, "peri_ao_msdc2_h_wrap", "peri_ao_msdc2", 13),
+ };
+ 
++static const struct mtk_gate mt6991_peri_clks[] = {
++	GATE_PERI_AO0(MT6991_CLK_PERI_UART0_BCLK, "peri_ao_uart0_bclk", "uart", 0),
++	GATE_HWV_PERI_AO1(MT6991_CLK_PERI_SPI6_BCLK, "peri_ao_spi6_bclk", "spi6_b", 7),
++};
++
++static const struct mtk_clk_desc mt6991_peri_desc = {
++	.clks = mt6991_peri_clks,
++	.num_clks = ARRAY_SIZE(mt6991_peri_clks),
++};
++
+ static const struct mtk_clk_desc peri_ao_mcd = {
+ 	.clks = peri_ao_clks,
+ 	.num_clks = ARRAY_SIZE(peri_ao_clks),
+ };
+ 
+ static const struct of_device_id of_match_clk_mt8196_peri_ao[] = {
++	{ .compatible = "mediatek,mt6991-pericfg-ao", .data = &mt6991_peri_desc },
+ 	{ .compatible = "mediatek,mt8196-pericfg-ao", .data = &peri_ao_mcd },
+ 	{ /* sentinel */ }
+ };
+diff --git a/drivers/clk/mediatek/clk-mt8196-topckgen.c b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+index 6ace11e..3e9a198 100644
+--- a/drivers/clk/mediatek/clk-mt8196-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2025 Collabora Ltd.
+  *                    Laura Nao <laura.nao@collabora.com>
+  */
++#include <dt-bindings/clock/mediatek,mt6991-clock.h>
+ #include <dt-bindings/clock/mediatek,mt8196-clock.h>
+ 
+ #include <linux/clk.h>
+@@ -956,6 +957,37 @@ static const struct mtk_composite top_aud_divs[] = {
+ 		14, CLK_AUDDIV_5, 8, 16),
+ };
+ 
++static const struct mtk_fixed_factor mt6991_divs[] = {
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D4_D4, "mainpll_d4_d4", "mainpll", 1, 16),
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D6_D2, "mainpll_d6_d2", "mainpll", 1, 12),
++	FACTOR(MT6991_CLK_TOP_UNIVPLL_D4_D4, "univpll_d4_d4", "univpll", 1, 16),
++	FACTOR(MT6991_CLK_TOP_UNIVPLL_D5_D4, "univpll_d5_d4", "univpll", 1, 20),
++	FACTOR(MT6991_CLK_TOP_UNIVPLL_D6_D2, "univpll_d6_d2", "univpll", 1, 12),
++	FACTOR(MT6991_CLK_TOP_UNIVPLL_D6_D4, "univpll_d6_d4", "univpll", 1, 24),
++	FACTOR(MT6991_CLK_TOP_UNIVPLL_D6_D8, "univpll_d6_d8", "univpll", 1, 48),
++	FACTOR(MT6991_CLK_TOP_UNIVPLL_192M, "univpll_192m", "univpll", 1, 13),
++};
++
++static const struct mtk_mux mt6991_muxes[] = {
++	MUX_GATE_HWV_FENC_CLR_SET_UPD(MT6991_CLK_TOP_UART, "uart", uart_parents,
++		CLK_CFG_6, CLK_CFG_6_SET, CLK_CFG_6_CLR,
++		HWV_CG_3_DONE, HWV_CG_3_SET, HWV_CG_3_CLR,
++		24, 2, 31, CLK_CFG_UPDATE, TOP_MUX_UART_SHIFT,
++		CLK_FENC_STATUS_MON_0, 4),
++	MUX_GATE_HWV_FENC_CLR_SET_UPD(MT6991_CLK_TOP_SPI6_BCLK, "spi6_b", spi_b_parents,
++		CLK_CFG_8, CLK_CFG_8_SET, CLK_CFG_8_CLR,
++		HWV_CG_5_DONE, HWV_CG_5_SET, HWV_CG_5_CLR,
++		16, 3, 23, CLK_CFG_UPDATE1, TOP_MUX_SPI6_BCLK_SHIFT,
++		CLK_FENC_STATUS_MON_1, 29),
++};
++
++static const struct mtk_clk_desc mt6991_topck_desc = {
++	.factor_clks = mt6991_divs,
++	.num_factor_clks = ARRAY_SIZE(mt6991_divs),
++	.mux_clks = mt6991_muxes,
++	.num_mux_clks = ARRAY_SIZE(mt6991_muxes),
++};
++
+ static const struct mtk_clk_desc topck_desc = {
+ 	.factor_clks = top_divs,
+ 	.num_factor_clks = ARRAY_SIZE(top_divs),
+@@ -966,6 +998,7 @@ static const struct mtk_clk_desc topck_desc = {
+ };
+ 
+ static const struct of_device_id of_match_clk_mt8196_ck[] = {
++	{ .compatible = "mediatek,mt6991-topckgen", .data = &mt6991_topck_desc },
+ 	{ .compatible = "mediatek,mt8196-topckgen", .data = &topck_desc },
+ 	{ /* sentinel */ }
+ };
+diff --git a/drivers/clk/mediatek/clk-pll.c b/drivers/clk/mediatek/clk-pll.c
+index e970648..f19d048 100644
+--- a/drivers/clk/mediatek/clk-pll.c
++++ b/drivers/clk/mediatek/clk-pll.c
+@@ -313,6 +313,11 @@ const struct clk_ops mtk_pll_ops = {
+ 	.set_rate	= mtk_pll_set_rate,
+ };
+ 
++const struct clk_ops mtk_pll_read_only_ops = {
++	.recalc_rate = mtk_pll_recalc_rate,
++};
++EXPORT_SYMBOL_GPL(mtk_pll_read_only_ops);
++
+ const struct clk_ops mtk_pll_fenc_clr_set_ops = {
+ 	.is_prepared	= mtk_pll_fenc_is_prepared,
+ 	.prepare	= mtk_pll_prepare_setclr,
+diff --git a/drivers/clk/mediatek/clk-pll.h b/drivers/clk/mediatek/clk-pll.h
+index f49dc27..d7efe63 100644
+--- a/drivers/clk/mediatek/clk-pll.h
++++ b/drivers/clk/mediatek/clk-pll.h
+@@ -85,6 +85,7 @@ void mtk_clk_unregister_plls(const struct mtk_pll_data *plls, int num_plls,
+ 			     struct clk_hw_onecell_data *clk_data);
+ 
+ extern const struct clk_ops mtk_pll_ops;
++extern const struct clk_ops mtk_pll_read_only_ops;
+ extern const struct clk_ops mtk_pll_fenc_clr_set_ops;
+ 
+ static inline struct mtk_clk_pll *to_mtk_clk_pll(struct clk_hw *hw)
+-- 
+2.50.1 (Apple Git-155)
+

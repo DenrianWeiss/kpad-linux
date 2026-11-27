@@ -1,0 +1,115 @@
+Subject: [RFC PATCH] pmdomain: mediatek: wait for MT6991 GHPM transition completion
+
+Wait for the GHPM idle state, power status and RPC acknowledgment
+before using the MT6991 GPUEB or gating its clock. When inheriting a
+powered domain, check the firmware resume flag without starting another
+power sequence.
+
+diff --git a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+index d1d7741..4304724 100644
+--- a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
++++ b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+@@ -347,6 +347,30 @@ static const struct clk_init_data mtk_mfg_clk_stack_init = {
+ 	.flags = CLK_GET_RATE_NOCACHE,
+ };
+ 
++static bool mt6991_mfg_transition_done(struct mtk_mfg *mfg, bool on)
++{
++	u32 state = readl(mfg->rpc + RPC_GHPM_RO0_CON);
++	u32 ack = readl(mfg->rpc + RPC_PWR_CON);
++
++	return (state & (GHPM_PWR_STATE_M | GHPM_STATE_M)) ==
++			(on ? GHPM_PWR_STATE_M : 0) &&
++	       (ack & PWR_ACK_M) == (on ? PWR_ACK_M : 0);
++}
++
++static int mt6991_mfg_wait_transition(struct mtk_mfg *mfg, bool on)
++{
++	bool done;
++	int ret;
++
++	ret = read_poll_timeout(mt6991_mfg_transition_done, done, done,
++				GPUEB_POLL_US, GPUEB_TIMEOUT_US, false, mfg, on);
++	if (ret)
++		dev_err(&mfg->pdev->dev,
++			"EB power %s timeout: GHPM=%#x ACK=%#x\n", on ? "on" : "off",
++			readl(mfg->rpc + RPC_GHPM_RO0_CON), readl(mfg->rpc + RPC_PWR_CON));
++	return ret;
++}
++
+ static int mtk_mfg_eb_on(struct mtk_mfg *mfg)
+ {
+ 	struct device *dev = &mfg->pdev->dev;
+@@ -360,8 +384,11 @@ static int mtk_mfg_eb_on(struct mtk_mfg *mfg)
+ 	 * If MFG is already on from e.g. the bootloader, skip doing the
+ 	 * power-on sequence, as it wouldn't work without powering it off first.
+ 	 */
+-	if (mtk_mfg_is_powered_on(mfg))
++	if (mtk_mfg_is_powered_on(mfg)) {
++		if (mfg->eb_gate)
++			goto wait_for_power;
+ 		return 0;
++	}
+ 
+ 	ret = readl_poll_timeout(mfg->rpc + RPC_GHPM_RO0_CON, val,
+ 				 !(val & (GHPM_PWR_STATE_M | GHPM_STATE_M)),
+@@ -380,14 +407,20 @@ static int mtk_mfg_eb_on(struct mtk_mfg *mfg)
+ 
+ 	mtk_mfg_update_reg_bits(mfg->rpc + mfg->ghpm_en_reg, GHPM_ENABLE_M, 0);
+ 
+-
+-	ret = readl_poll_timeout(mfg->rpc + RPC_PWR_CON, val,
+-				 (val & PWR_ACK_M) == PWR_ACK_M,
+-				 GPUEB_POLL_US, GPUEB_TIMEOUT_US);
+-	if (ret) {
+-		dev_err(dev, "timed out waiting for EB power ack, val = 0x%X\n",
+-			val);
+-		return ret;
++wait_for_power:
++	if (mfg->eb_gate) {
++		ret = mt6991_mfg_wait_transition(mfg, true);
++		if (ret)
++			return ret;
++	} else {
++		ret = readl_poll_timeout(mfg->rpc + RPC_PWR_CON, val,
++					 (val & PWR_ACK_M) == PWR_ACK_M,
++					 GPUEB_POLL_US, GPUEB_TIMEOUT_US);
++		if (ret) {
++			dev_err(dev, "timed out waiting for EB power ack, val = 0x%X\n",
++				val);
++			return ret;
++		}
+ 	}
+ 
+ 	ret = readl_poll_timeout(mfg->gpr + GPR_LP_STATE, val,
+@@ -418,17 +451,20 @@ static int mtk_mfg_eb_off(struct mtk_mfg *mfg)
+ 		return ret;
+ 	}
+ 
+-	ret = readl_poll_timeout(mfg->rpc + RPC_PWR_CON, val,
+-				 !(val & PWR_ACK_M), GPUEB_POLL_US,
+-				 GPUEB_TIMEOUT_US);
+-
+-	if (ret) {
+-		dev_err(dev, "Timed out waiting for EB to power off, val=0x%08X\n", val);
+-		return ret;
+-	}
+-
+-	if (mfg->eb_gate)
++	if (mfg->eb_gate) {
++		ret = mt6991_mfg_wait_transition(mfg, false);
++		if (ret)
++			return ret;
+ 		writel(MT6991_EB_GATE, mfg->eb_gate + MT6991_EB_GATE_SET);
++	} else {
++		ret = readl_poll_timeout(mfg->rpc + RPC_PWR_CON, val,
++					 !(val & PWR_ACK_M), GPUEB_POLL_US,
++					 GPUEB_TIMEOUT_US);
++		if (ret) {
++			dev_err(dev, "Timed out waiting for EB to power off, val=0x%08X\n", val);
++			return ret;
++		}
++	}
+ 
+ 	return 0;
+ }

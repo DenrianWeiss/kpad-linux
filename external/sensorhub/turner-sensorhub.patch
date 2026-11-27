@@ -1,0 +1,280 @@
+--- a/drivers/soc/mediatek/mtk-mbox.c
++++ b/drivers/soc/mediatek/mtk-mbox.c
+@@ -875,7 +875,7 @@
+ void mtk_mbox_print_recv(struct mtk_mbox_device *mbdev,
+ 	struct mtk_mbox_pin_recv *pin_recv)
+ {
+-	printk_deferred(KERN_NOTICE "[MBOX]dev=%s recv mbox=%u off=%u cv_opt=%u ctx_opt=%u mg_sz=%u p_idx=%u id=%u\n"
++	printk_ratelimited(KERN_NOTICE "[MBOX]dev=%s recv mbox=%u off=%u cv_opt=%u ctx_opt=%u mg_sz=%u p_idx=%u id=%u\n"
+ 		, mbdev->name
+ 		, pin_recv->mbox
+ 		, pin_recv->offset
+@@ -885,7 +885,7 @@
+ 		, pin_recv->pin_index
+ 		, pin_recv->chan_id);
+ 
+-	printk_deferred(KERN_NOTICE "[MBOX]dev=%s recv id=%u poll=%u cv_irq=%u noti=%u cb=%u pre=%lld po=%lld\n"
++	printk_ratelimited(KERN_NOTICE "[MBOX]dev=%s recv id=%u poll=%u cv_irq=%u noti=%u cb=%u pre=%lld po=%lld\n"
+ 		, mbdev->name
+ 		, pin_recv->chan_id
+ 		, pin_recv->recv_record.poll_count
+@@ -999,7 +999,7 @@
+ 
+ 	if (mbdev && pin_recv) {
+ 		irq_reg = mtk_mbox_read_recv_irq(mbdev, pin_recv->mbox);
+-		printk_deferred(KERN_ERR "[MBOX]dev=%s mbox=%u recv irq status=%x\n",
++		printk_ratelimited(KERN_ERR "[MBOX]dev=%s mbox=%u recv irq status=%x\n",
+ 			mbdev->name, pin_recv->mbox, irq_reg);
+ 		mtk_mbox_print_recv(mbdev, pin_recv);
+ 	}
+--- a/drivers/clk/mediatek/clk-fmeter-mt6991-core.c
++++ b/drivers/clk/mediatek/clk-fmeter-mt6991-core.c
+@@ -126,3 +126,7 @@
+ 	return mt6991_get_fmeter_id(fid);
+ }
+ EXPORT_SYMBOL(mt_get_fmeter_id);
++
++#include <linux/module.h>
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("MT6991 frequency meter core");
+diff --git a/drivers/misc/mediatek/sensorhub_probe/sensorhub_probe.c b/drivers/misc/mediatek/sensorhub_probe/sensorhub_probe.c
+index ae2c368..4a0f23b 100644
+--- a/drivers/misc/mediatek/sensorhub_probe/sensorhub_probe.c
++++ b/drivers/misc/mediatek/sensorhub_probe/sensorhub_probe.c
+@@ -609,7 +609,6 @@ static void sensorhub_probe_dump_fwlog(const char *why, bool force)
+ 
+ static void sensorhub_probe_fwlog_dump_work_fn(struct work_struct *work)
+ {
+-	sensorhub_probe_dump_fwlog("post-enable", false);
+ }
+ 
+ static int sensorhub_probe_logger_handler(unsigned int id, void *prdata,
+@@ -1281,52 +1280,6 @@ static void sensorhub_probe_phase2_fn(struct work_struct *work)
+ 	else
+ 		pr_warn("accel enable not acked (%d)\n", ret);
+ 
+-	batch.delay = 10000000;
+-	batch.latency = 0;
+-	ret = sensorhub_probe_ctrl_xfer(SENSOR_TYPE_GYROSCOPE,
+-					SENS_COMM_CTRL_ENABLE_CMD,
+-					&batch, sizeof(batch));
+-	if (ret == 1)
+-		pr_info("gyro enabled (ret=%d), streaming\n", last_ack_ret);
+-	else
+-		pr_warn("gyro enable not acked (%d)\n", ret);
+-
+-	batch.delay = 20000000;
+-	batch.latency = 20000000;
+-	ret = sensorhub_probe_ctrl_xfer(SENSOR_TYPE_MAGNETIC_FIELD,
+-					SENS_COMM_CTRL_ENABLE_CMD,
+-					&batch, sizeof(batch));
+-	if (ret == 1)
+-		pr_info("mag enabled (ret=%d), streaming\n", last_ack_ret);
+-	else
+-		pr_warn("mag enable not acked (%d)\n", ret);
+-
+-	batch.delay = 200000000;
+-	batch.latency = 200000000;
+-	ret = sensorhub_probe_ctrl_xfer(SENSOR_TYPE_PROXIMITY,
+-					SENS_COMM_CTRL_ENABLE_CMD,
+-					&batch, sizeof(batch));
+-	if (ret == 1)
+-		pr_info("prox enabled (ret=%d), streaming\n", last_ack_ret);
+-	else
+-		pr_warn("prox enable not acked (%d)\n", ret);
+-
+-	ret = sensorhub_probe_ctrl_xfer(SENSOR_TYPE_CCT,
+-					SENS_COMM_CTRL_ENABLE_CMD,
+-					&batch, sizeof(batch));
+-	if (ret == 1)
+-		pr_info("cct enabled (ret=%d), streaming\n", last_ack_ret);
+-	else
+-		pr_warn("cct enable not acked (%d)\n", ret);
+-
+-	ret = sensorhub_probe_ctrl_xfer(SENSOR_TYPE_LUX_AOD,
+-					SENS_COMM_CTRL_ENABLE_CMD,
+-					&batch, sizeof(batch));
+-	if (ret == 1)
+-		pr_info("lux_aod enabled (ret=%d), streaming\n", last_ack_ret);
+-	else
+-		pr_warn("lux_aod enable not acked (%d)\n", ret);
+-
+ 	if (test_window_s)
+ 		queue_delayed_work(probe_wq, &disable_accel_work,
+ 				   msecs_to_jiffies(test_window_s * 1000));
+@@ -1339,7 +1292,6 @@ static void sensorhub_probe_work_fn(struct work_struct *work)
+ 	pr_info("share-mem handshake (platform_ready=%u sensor_ready=%u)\n",
+ 		platform_ready, sensor_ready);
+ 
+-	sensorhub_probe_dump_fwlog("pre-config", false);
+ 	sensorhub_probe_read_fw_table();
+ 
+ 	if (sensorhub_probe_shm_setup() < 0)
+@@ -1347,7 +1299,6 @@ static void sensorhub_probe_work_fn(struct work_struct *work)
+ 	ret = sensorhub_probe_send_share_mem();
+ 	if (ret < 0) {
+ 		pr_warn("share-mem config failed %d\n", ret);
+-		sensorhub_probe_dump_fwlog("share-mem-failed", false);
+ 		return;
+ 	}
+ 	sensorhub_probe_request_sensor_list();
+@@ -1514,7 +1465,7 @@ static int sensorhub_probe_iio_read_raw(struct iio_dev *indio_dev,
+ 		return IIO_VAL_INT;
+ 	case IIO_CHAN_INFO_SCALE:
+ 		*val = 0;
+-		*val2 = 9806;
++		*val2 = 1000; /* lsm6dsoq_acc reports millimetres per second squared. */
+ 		return IIO_VAL_INT_PLUS_MICRO;
+ 	}
+ 	return -EINVAL;
+@@ -1663,7 +1614,7 @@ static int sensorhub_probe_iio_probe(struct platform_device *pdev)
+ 	indio = devm_iio_device_alloc(&pdev->dev, 0);
+ 	if (!indio)
+ 		return -ENOMEM;
+-	indio->name = "bmi2xy";
++	indio->name = "turner-scp-accel";
+ 	indio->info = &sensorhub_probe_iio_info;
+ 	indio->modes = INDIO_DIRECT_MODE;
+ 	indio->channels = sensorhub_probe_iio_channels;
+@@ -1677,79 +1628,8 @@ static int sensorhub_probe_iio_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 	sensorhub_iio = indio;
+-	dev_info(&pdev->dev, "bmi2xy accelerometer registered\n");
+-
+-	indio = devm_iio_device_alloc(&pdev->dev, 0);
+-	if (!indio)
+-		return -ENOMEM;
+-	indio->name = "bmi2xy_gyro";
+-	indio->info = &sensorhub_probe_gyro_info;
+-	indio->modes = INDIO_DIRECT_MODE;
+-	indio->channels = sensorhub_probe_gyro_channels;
+-	indio->num_channels = ARRAY_SIZE(sensorhub_probe_gyro_channels);
+-	ret = devm_iio_kfifo_buffer_setup(&pdev->dev, indio,
+-					  &sensorhub_probe_buffer_ops);
+-	if (ret)
+-		return ret;
+-	ret = devm_iio_device_register(&pdev->dev, indio);
+-	if (ret)
+-		return ret;
+-	sensorhub_gyro_iio = indio;
+-	dev_info(&pdev->dev, "bmi2xy gyroscope registered\n");
++	dev_info(&pdev->dev, "Turner SCP accelerometer registered\n");
+ 
+-	indio = devm_iio_device_alloc(&pdev->dev, 0);
+-	if (!indio)
+-		return -ENOMEM;
+-	indio->name = "akm09919_mag";
+-	indio->info = &sensorhub_probe_mag_info;
+-	indio->modes = INDIO_DIRECT_MODE;
+-	indio->channels = sensorhub_probe_mag_channels;
+-	indio->num_channels = ARRAY_SIZE(sensorhub_probe_mag_channels);
+-	ret = devm_iio_kfifo_buffer_setup(&pdev->dev, indio,
+-					  &sensorhub_probe_buffer_ops);
+-	if (ret)
+-		return ret;
+-	ret = devm_iio_device_register(&pdev->dev, indio);
+-	if (ret)
+-		return ret;
+-	sensorhub_mag_iio = indio;
+-	dev_info(&pdev->dev, "akm09919 magnetometer registered\n");
+-
+-	indio = devm_iio_device_alloc(&pdev->dev, 0);
+-	if (!indio)
+-		return -ENOMEM;
+-	indio->name = "tcs3720_light";
+-	indio->info = &sensorhub_probe_light_info;
+-	indio->modes = INDIO_DIRECT_MODE;
+-	indio->channels = sensorhub_probe_light_channels;
+-	indio->num_channels = ARRAY_SIZE(sensorhub_probe_light_channels);
+-	ret = devm_iio_kfifo_buffer_setup(&pdev->dev, indio,
+-					  &sensorhub_probe_buffer_ops);
+-	if (ret)
+-		return ret;
+-	ret = devm_iio_device_register(&pdev->dev, indio);
+-	if (ret)
+-		return ret;
+-	sensorhub_light_iio = indio;
+-	dev_info(&pdev->dev, "tcs3720 light registered (cct lux)\n");
+-
+-	indio = devm_iio_device_alloc(&pdev->dev, 0);
+-	if (!indio)
+-		return -ENOMEM;
+-	indio->name = "tcs3720_ps";
+-	indio->info = &sensorhub_probe_prox_info;
+-	indio->modes = INDIO_DIRECT_MODE;
+-	indio->channels = sensorhub_probe_prox_channels;
+-	indio->num_channels = ARRAY_SIZE(sensorhub_probe_prox_channels);
+-	ret = devm_iio_kfifo_buffer_setup(&pdev->dev, indio,
+-					  &sensorhub_probe_buffer_ops);
+-	if (ret)
+-		return ret;
+-	ret = devm_iio_device_register(&pdev->dev, indio);
+-	if (ret)
+-		return ret;
+-	sensorhub_prox_iio = indio;
+-	dev_info(&pdev->dev, "tcs3720 proximity registered\n");
+ 	return 0;
+ }
+ 
+@@ -1767,7 +1647,6 @@ static int sensorhub_probe_scp_notifier(struct notifier_block *nb,
+ 		pr_info("SCP platform ready (is_scp_ready=%u), handshaking\n",
+ 			is_scp_ready(SCP_A_ID));
+ 		sensorhub_probe_send_ready();
+-		queue_work(probe_wq, &logger_notify_work);
+ 		queue_delayed_work(probe_wq, &probe_work,
+ 				   msecs_to_jiffies(15000));
+ 	} else if (event == SCP_EVENT_STOP) {
+@@ -1777,7 +1656,6 @@ static int sensorhub_probe_scp_notifier(struct notifier_block *nb,
+ 		iio_ts_offset_valid = false;
+ 		cancel_delayed_work(&phase2_work);
+ 		cancel_delayed_work(&disable_accel_work);
+-		sensorhub_probe_dump_fwlog("scp-stop", true);
+ 		logger_info_valid = false;
+ 		pr_info("SCP stopped\n");
+ 	}
+@@ -1801,8 +1679,6 @@ static int __init sensorhub_probe_init(void)
+ 	INIT_DELAYED_WORK(&fwlog_dump_work, sensorhub_probe_fwlog_dump_work_fn);
+ 	INIT_DELAYED_WORK(&phase2_work, sensorhub_probe_phase2_fn);
+ 
+-	sensorhub_probe_map_tcm();
+-	sensorhub_probe_logger_prepare();
+ 
+ 	ret = mtk_ipi_register(&scp_ipidev, IPI_IN_SENSOR_CTRL,
+ 			       sensorhub_probe_ctrl_handler, NULL, ctrl_rx);
+@@ -1817,17 +1693,10 @@ static int __init sensorhub_probe_init(void)
+ 		       ret);
+ 		goto err_ctrl;
+ 	}
+-	ret = mtk_ipi_register(&scp_ipidev, IPI_IN_LOGGER_CTRL,
+-			       sensorhub_probe_logger_handler, NULL, logger_rx);
+-	if (ret < 0) {
+-		pr_err("register ipi %d failed %d\n", IPI_IN_LOGGER_CTRL, ret);
+-		goto err_notify;
+-	}
+-
+ 	ret = platform_driver_register(&sensorhub_probe_iio_driver);
+ 	if (ret) {
+ 		pr_err("iio driver register failed %d\n", ret);
+-		goto err_logger;
++		goto err_notify;
+ 	}
+ 	sensorhub_probe_iio_pdev = platform_device_register_simple(
+ 		"sensorhub_probe", -1, NULL, 0);
+@@ -1846,8 +1715,6 @@ static int __init sensorhub_probe_init(void)
+ 
+ err_driver:
+ 	platform_driver_unregister(&sensorhub_probe_iio_driver);
+-err_logger:
+-	mtk_ipi_unregister(&scp_ipidev, IPI_IN_LOGGER_CTRL);
+ err_notify:
+ 	mtk_ipi_unregister(&scp_ipidev, IPI_IN_SENSOR_NOTIFY);
+ err_ctrl:
+@@ -1869,7 +1736,6 @@ static void __exit sensorhub_probe_exit(void)
+ 	platform_driver_unregister(&sensorhub_probe_iio_driver);
+ 	mtk_ipi_unregister(&scp_ipidev, IPI_IN_SENSOR_CTRL);
+ 	mtk_ipi_unregister(&scp_ipidev, IPI_IN_SENSOR_NOTIFY);
+-	mtk_ipi_unregister(&scp_ipidev, IPI_IN_LOGGER_CTRL);
+ 	if (tcm_map)
+ 		iounmap(tcm_map);
+ 	destroy_workqueue(probe_wq);

@@ -1,0 +1,55 @@
+From 7f184b36f04a134726042689d3b92f3dc80183c0 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 10:05:44 +0800
+Subject: [PATCH 94/94] clk: mediatek: add the MT6991 overlay DMA gates
+
+---
+ drivers/clk/mediatek/clk-mt8196-ovl0.c | 10 ++++++++++
+ drivers/clk/mediatek/clk-mt8196-ovl1.c | 10 ++++++++++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-ovl0.c b/drivers/clk/mediatek/clk-mt8196-ovl0.c
+index e452cad08..5351e4ff8 100644
+--- a/drivers/clk/mediatek/clk-mt8196-ovl0.c
++++ b/drivers/clk/mediatek/clk-mt8196-ovl0.c
+@@ -137,6 +137,16 @@ static const struct mtk_clk_desc ovl_mcd = {
+ 
+ static const struct mtk_gate mt6991_ovl0_clks[] = {
+ 	GATE_HWV_OVL0(MT6991_CLK_OVL0_MUTEX, "ovl_mutex0", "disp", 3),
++	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA0, "ovl_exdma0", "disp", 4),
++	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA1, "ovl_exdma1", "disp", 5),
++	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA2, "ovl_exdma2", "disp", 6),
++	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA3, "ovl_exdma3", "disp", 7),
++	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA4, "ovl_exdma4", "disp", 8),
++	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA5, "ovl_exdma5", "disp", 9),
++	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA6, "ovl_exdma6", "disp", 10),
++	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA7, "ovl_exdma7", "disp", 11),
++	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA8, "ovl_exdma8", "disp", 12),
++	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA9, "ovl_exdma9", "disp", 13),
+ };
+ 
+ static const struct mtk_clk_desc mt6991_ovl0_desc = {
+diff --git a/drivers/clk/mediatek/clk-mt8196-ovl1.c b/drivers/clk/mediatek/clk-mt8196-ovl1.c
+index 1bcf153dc..980fbfc5e 100644
+--- a/drivers/clk/mediatek/clk-mt8196-ovl1.c
++++ b/drivers/clk/mediatek/clk-mt8196-ovl1.c
+@@ -137,6 +137,16 @@ static const struct mtk_clk_desc ovl1_mcd = {
+ 
+ static const struct mtk_gate mt6991_ovl1_clks[] = {
+ 	GATE_HWV_OVL10(MT6991_CLK_OVL1_MUTEX, "ovl1_ovl_mutex0", "disp", 3),
++	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA0, "ovl1_ovl_exdma0", "disp", 4),
++	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA1, "ovl1_ovl_exdma1", "disp", 5),
++	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA2, "ovl1_ovl_exdma2", "disp", 6),
++	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA3, "ovl1_ovl_exdma3", "disp", 7),
++	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA4, "ovl1_ovl_exdma4", "disp", 8),
++	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA5, "ovl1_ovl_exdma5", "disp", 9),
++	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA6, "ovl1_ovl_exdma6", "disp", 10),
++	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA7, "ovl1_ovl_exdma7", "disp", 11),
++	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA8, "ovl1_ovl_exdma8", "disp", 12),
++	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA9, "ovl1_ovl_exdma9", "disp", 13),
+ };
+ 
+ static const struct mtk_clk_desc mt6991_ovl1_desc = {
+-- 
+2.50.1 (Apple Git-155)
+

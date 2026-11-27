@@ -1,0 +1,73 @@
+Subject: [RFC PATCH 4/4] wifi: mt76: set up MT6653 ROM event RX ring
+
+Receive boot ROM events on hardware RX ring 7. Keep the Connac RX
+descriptor in the skb for the init event parser and use the mt76 page
+pool, DMA and NAPI receive path for buffer ownership and replenishment.
+
+diff --git a/drivers/net/wireless/mediatek/mt76/mt6653_rom.c b/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
+index c2f0e6d..66196cc 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
+@@ -5,6 +5,9 @@
+ /* BAR-relative offsets in the fixed WFDMA0 mapping. */
+ #define MT6653_TX_RING_BASE	0xd4300
+ #define MT6653_TX_RING_EXT	0xd4600
++#define MT6653_RX_RING_BASE	0xd4500
++#define MT6653_RX_RING_EXT	0xd4680
++#define MT6653_ROM_EVENT_RING	7
+ 
+ /* Caller holds WFDMA stopped. Use the ROM MMIO producer-index path. */
+ int mt6653_rom_alloc_tx_queue(struct mt76_dev *dev, enum mt76_mcuq_id qid)
+@@ -35,6 +38,38 @@ int mt6653_rom_alloc_tx_queue(struct mt76_dev *dev, enum mt76_mcuq_id qid)
+ }
+ EXPORT_SYMBOL_GPL(mt6653_rom_alloc_tx_queue);
+ 
++/* Set up the event ring before enabling DMA and registering RX NAPI. */
++int mt6653_rom_alloc_rx_queue(struct mt76_dev *dev)
++{
++	struct mt76_queue *q = &dev->q_rx[MT_RXQ_MCU];
++	int ret;
++
++	if (q->ndesc)
++		return -EBUSY;
++	q->flags = MT_QFLAG_RING_BASE_36BIT;
++	ret = dev->queue_ops->alloc(dev, q, MT6653_ROM_EVENT_RING, 128,
++				    SZ_4K, MT6653_RX_RING_BASE);
++	if (ret)
++		return ret;
++
++	writel(4, dev->mmio.regs + MT6653_RX_RING_EXT +
++	       MT6653_ROM_EVENT_RING * sizeof(u32));
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(mt6653_rom_alloc_rx_queue);
++
++/* The ROM event parser consumes the complete RX descriptor and init event. */
++void mt6653_rom_rx_skb(struct mt76_dev *dev, enum mt76_rxq_id qid,
++		       struct sk_buff *skb, u32 *info)
++{
++	if (qid == MT_RXQ_MCU)
++		mt76_mcu_rx_event(dev, skb);
++	else
++		dev_kfree_skb(skb);
++}
++EXPORT_SYMBOL_GPL(mt6653_rom_rx_skb);
++
+ /* The probe path supplies the WM and FWDL queues before entering ROM mode. */
+ static int mt6653_rom_send(struct mt76_dev *dev, struct sk_buff *skb,
+ 			   int cmd, int *seq)
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
+index c24e7d6..161e55a 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
++++ b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
+@@ -2151,6 +2151,9 @@ int mt76_connac2_load_ram(struct mt76_dev *dev, const char *fw_wm,
+ 			  const char *fw_wa);
+ int mt76_connac3_load_phy_ram(struct mt76_dev *dev, const char *fw_name);
+ int mt6653_rom_alloc_tx_queue(struct mt76_dev *dev, enum mt76_mcuq_id qid);
++int mt6653_rom_alloc_rx_queue(struct mt76_dev *dev);
++void mt6653_rom_rx_skb(struct mt76_dev *dev, enum mt76_rxq_id qid,
++		       struct sk_buff *skb, u32 *info);
+ extern const struct mt76_mcu_ops mt6653_rom_ops;
+ int mt76_connac_mcu_send_mt6653_patch(struct mt76_dev *dev,
+ 				      const struct firmware *fw);

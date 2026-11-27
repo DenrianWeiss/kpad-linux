@@ -1,0 +1,64 @@
+From 005b8391377565d4d03240b6149bfbc4b1515853 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:20:22 +0800
+Subject: [PATCH] dt-bindings: power: mediatek: describe MT6991 peripheral
+ domains
+
+Define the USB0, USB1 and PCIe0 domain IDs and the SPM bus protection regmap used by their controller.
+---
+ .../bindings/power/mediatek,power-controller.yaml   | 13 +++++++++++++
+ include/dt-bindings/power/mediatek,mt6991-power.h   | 11 +++++++++++
+ 2 files changed, 24 insertions(+)
+ create mode 100644 include/dt-bindings/power/mediatek,mt6991-power.h
+
+diff --git a/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml b/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
+index d03e4a9..6483c3f 100644
+--- a/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
++++ b/Documentation/devicetree/bindings/power/mediatek,power-controller.yaml
+@@ -27,6 +27,7 @@ properties:
+       - mediatek,mt6795-power-controller
+       - mediatek,mt6858-power-controller
+       - mediatek,mt6893-power-controller
++      - mediatek,mt6991-power-controller
+       - mediatek,mt8167-power-controller
+       - mediatek,mt8173-power-controller
+       - mediatek,mt8183-power-controller
+@@ -158,6 +159,18 @@ required:
+   - compatible
+ 
+ allOf:
++  - if:
++      properties:
++        compatible:
++          const: mediatek,mt6991-power-controller
++    then:
++      required:
++        - access-controllers
++      properties:
++        access-controllers:
++          items:
++            - description: SPM bus protection registers
++
+   - if:
+       properties:
+         compatible:
+diff --git a/include/dt-bindings/power/mediatek,mt6991-power.h b/include/dt-bindings/power/mediatek,mt6991-power.h
+new file mode 100644
+index 0000000..ce91a15
+--- /dev/null
++++ b/include/dt-bindings/power/mediatek,mt6991-power.h
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++#ifndef _DT_BINDINGS_POWER_MT6991_POWER_H
++#define _DT_BINDINGS_POWER_MT6991_POWER_H
++
++#define MT6991_POWER_DOMAIN_SSUSB_P0		2
++#define MT6991_POWER_DOMAIN_SSUSB_DP_PHY_P0	3
++#define MT6991_POWER_DOMAIN_SSUSB_P1		4
++#define MT6991_POWER_DOMAIN_PEXTP_MAC0		7
++#define MT6991_POWER_DOMAIN_PEXTP_PHY0		10
++
++#endif
+-- 
+2.50.1 (Apple Git-155)
+

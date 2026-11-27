@@ -1,0 +1,147 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -1,6 +1,5 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* MT6991 ADSP core firmware notifications */
+-#include <linux/ctype.h>
+ #include <linux/io.h>
+ #include <linux/mailbox_client.h>
+ #include <linux/of_address.h>
+@@ -96,53 +95,7 @@
+ 	return readl(slot) == record->address && readl(slot + 4) == record->size;
+ }
+ 
+-static bool mt6991_adsp_lk_pool(const char *name)
+-{
+-	size_t prefix = str_has_prefix(name, "mblock-");
+-	size_t suffix;
+-
+-	if (!prefix || !isdigit(name[prefix]))
+-		return false;
+-	name += prefix;
+-	while (isdigit(*name))
+-		name++;
+-	suffix = str_has_prefix(name, "-adsp_shared_reserved");
+-	return suffix && (!name[suffix] || name[suffix] == '@');
+-}
+-
+-static bool mt6991_adsp_pool_owned(struct device_node *sys)
+-{
+-	struct device_node *reserved __free(device_node) = of_find_node_by_path("/reserved-memory");
+-	u64 range[2], start, size;
+-	bool found = false;
+-
+-	if (!reserved || of_property_read_u64_array(sys, "shared_memory", range, 2))
+-		return false;
+-	for_each_available_child_of_node_scoped(reserved, node) {
+-		const char *name = kbasename(of_node_full_name(node));
+-
+-		if (!mt6991_adsp_lk_pool(name) &&
+-		    !of_device_is_compatible(node, "mediatek,reserve-memory-adsp_share"))
+-			continue;
+-		if (found || !of_property_present(node, "no-map") ||
+-		    of_property_present(node, "reusable") ||
+-		    of_property_count_u64_elems(node, "reg") != 2 ||
+-		    of_property_read_reg(node, 0, &start, &size) ||
+-		    start != range[0] || size != range[1])
+-			return false;
+-		found = true;
+-	}
+-	return found;
+-}
+-
+-static void mt6991_adsp_write_record(void __iomem *slot,
+-				     const struct mt6991_adsp_record *record)
+-{
+-	writel(record->address, slot);
+-	writel(record->size, slot + 4);
+-}
+-
+-static int mt6991_adsp_boot_records(struct device *dev, bool prepare)
++static int mt6991_adsp_boot_records(struct device *dev)
+ {
+ 	struct mt6991_adsp_core *core = dev_get_drvdata(dev);
+ 	void __iomem *mpu_slot = core->l2_end - 0x28;
+@@ -154,8 +107,6 @@
+ 	if (ret)
+ 		return ret;
+ 	ret = mt6991_adsp_records(rx.np, &pool, &c2c);
+-	if (!ret && prepare && !mt6991_adsp_pool_owned(rx.np))
+-		ret = -ENODATA;
+ 	of_node_put(rx.np);
+ 	if (ret)
+ 		return ret;
+@@ -164,18 +115,9 @@
+ 	ret = pm_runtime_resume_and_get(dev);
+ 	if (ret < 0)
+ 		return ret;
+-	if (prepare) {
+-		ret = mt6991_adsp_require_stall(core->rx, core->id);
+-		if (ret)
+-			goto out;
+-		mt6991_adsp_write_record(mpu_slot, &pool);
+-		if (!core->id)
+-			mt6991_adsp_write_record(core->l2_end - 0x2510, &c2c);
+-	}
+ 	ret = mt6991_adsp_record_matches(mpu_slot, &pool);
+ 	if (!core->id)
+ 		ret &= mt6991_adsp_record_matches(core->l2_end - 0x2510, &c2c);
+-out:
+ 	pm_runtime_put_sync(dev);
+ 	return ret;
+ }
+@@ -183,7 +125,7 @@
+ static ssize_t boot_records_match_show(struct device *dev, struct device_attribute *attr,
+ 				       char *buf)
+ {
+-	int ret = mt6991_adsp_boot_records(dev, false);
++	int ret = mt6991_adsp_boot_records(dev);
+ 
+ 	if (ret < 0)
+ 		return ret;
+@@ -194,16 +136,11 @@
+ static ssize_t prepare_boot_records_store(struct device *dev, struct device_attribute *attr,
+ 					  const char *buf, size_t count)
+ {
+-	int ret;
+-
+ 	if (!sysfs_streq(buf, "1"))
+ 		return -EINVAL;
+-	ret = mt6991_adsp_boot_records(dev, true);
+-	if (ret < 0)
+-		return ret;
+-	if (!ret)
+-		return -EIO;
+-	return count;
++
++	/* Turner's MT6991 firmware does not use host-written v1 records. */
++	return -EOPNOTSUPP;
+ }
+ static DEVICE_ATTR_WO(prepare_boot_records);
+ 
+--- a/Documentation/ABI/testing/sysfs-platform-mt6991-adsp
++++ b/Documentation/ABI/testing/sysfs-platform-mt6991-adsp
+@@ -1,13 +1,13 @@
+ What:		/sys/bus/platform/devices/.../prepare_boot_records
+ Date:		November 2026
+ Description:
+-		Writing 1 prepares the MT6991 audio DSP core's L2 boot records.
+-		The kernel uses the bootloader's verified shared memory range.
+-		It checks the core's stall bit with its RX channel powered, writes
+-		the MPU record and (on core A) the inter-core record, then reads
+-		the records back before releasing the runtime power reference.
+-		An active core returns EBUSY, a missing allocation returns ENODATA,
+-		an inaccessible control register returns ENXIO, and a failed L2
+-		readback returns EIO. Repeating a successful request
+-		while the core is stalled writes the same records. Retention across
+-		a later power transition is platform dependent.
++		On Turner, writing 1 returns EOPNOTSUPP. The MT6991 platform
++		descriptor in the stock firmware does not select the v1 MPU
++		and inter-core record initialization sequence.
++
++What:		/sys/bus/platform/devices/.../boot_records_match
++Date:		November 2026
++Description:
++		Read-only diagnostic comparison of the legacy v1 L2 record
++		locations with the current shared memory layout. A zero is
++		normal on Turner and is not a DSP boot failure indication.

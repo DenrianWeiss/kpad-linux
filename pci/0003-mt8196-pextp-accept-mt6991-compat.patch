@@ -1,0 +1,21 @@
+Subject: [RFC PATCH] clk: mediatek: accept the MT6991 pextp compatible on mt8196-pextp
+
+The boot device tree comes from the vendor image and spells the PCIe
+transmit PHY clock blocks as "mediatek,mt6991-pextp0cfg_ao" (underscore).
+The shared driver only matches the mt8196 hyphen form, so the provider
+never binds, the PCIe PHY keeps deferring on its ref/mcu clocks and
+PCIe0 never enumerates. The clock IDs are identical (PEXTP_REF=3,
+MCU_BUS=2), so accept both spellings.
+
+--- a/drivers/clk/mediatek/clk-mt8196-pextp.c
++++ b/drivers/clk/mediatek/clk-mt8196-pextp.c
+@@ -111,6 +111,9 @@
+ };
+ 
+ static const struct of_device_id of_match_clk_mt8196_pextp[] = {
++	/* The vendor device tree spells the same blocks with underscores. */
++	{ .compatible = "mediatek,mt6991-pextp0cfg_ao", .data = &pext_mcd },
++	{ .compatible = "mediatek,mt6991-pextp1cfg_ao", .data = &pext1_mcd },
+ 	{ .compatible = "mediatek,mt8196-pextp0cfg-ao", .data = &pext_mcd },
+ 	{ .compatible = "mediatek,mt8196-pextp1cfg-ao", .data = &pext1_mcd },
+ 	{ /* sentinel */ }

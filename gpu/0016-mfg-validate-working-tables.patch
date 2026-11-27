@@ -1,0 +1,47 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] pmdomain: mediatek: reject incomplete GPUFreq working tables
+
+MT6991 commits paired GPU and stack indices. Reject a missing stack
+table at probe instead of registering a domain that cannot commit a
+performance vote. A partially populated row can contain a voltage but
+no frequency; do not pass a zero rate to the OPP core. Keep a zero
+stack count valid on variants that support GPU-only tables.
+
+---
+diff --git a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+--- a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
++++ b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+@@ -596,8 +596,9 @@
+ 		return -EINVAL;
+ 	}
+ 
+-	if (mfg->num_stack_opps && mfg->num_stack_opps > MAX_OPP_NUM) {
+-		dev_err(dev, "Stack OPP count (%u) out of range %u >= count >= 0\n",
++	if (mfg->num_stack_opps > MAX_OPP_NUM ||
++	    (mfg->variant->use_dual_commit && !mfg->num_stack_opps)) {
++		dev_err(dev, "Invalid stack OPP count %u (maximum %u)\n",
+ 			mfg->num_stack_opps, MAX_OPP_NUM);
+ 		return -EINVAL;
+ 	}
+@@ -619,8 +620,8 @@
+ 	for (i = 0; i < mfg->num_gpu_opps; i++) {
+ 		memcpy_fromio(&e, mfg->shared_mem + GF_REG_OPP_TABLE_GPU + i * sizeof(e),
+ 			      sizeof(e));
+-		if (mem_is_zero(&e, sizeof(e))) {
+-			dev_err(dev, "ran into an empty GPU OPP at index %u\n",
++		if (!e.freq_khz) {
++			dev_err(dev, "Zero GPU OPP frequency at index %u\n",
+ 				i);
+ 			return -EINVAL;
+ 		}
+@@ -634,8 +635,8 @@
+ 	for (i = 0; i < mfg->num_stack_opps; i++) {
+ 		memcpy_fromio(&e, mfg->shared_mem + GF_REG_OPP_TABLE_STK + i * sizeof(e),
+ 			      sizeof(e));
+-		if (mem_is_zero(&e, sizeof(e))) {
+-			dev_err(dev, "ran into an empty Stack OPP at index %u\n",
++		if (!e.freq_khz) {
++			dev_err(dev, "Zero Stack OPP frequency at index %u\n",
+ 				i);
+ 			return -EINVAL;
+ 		}

@@ -1,0 +1,28 @@
+--- a/drivers/virt/geniezone/gzvm_main.c
++++ b/drivers/virt/geniezone/gzvm_main.c
+@@ -285,7 +285,7 @@
+ 		return -ENODEV;
+ 	}
+ 
+-	pr_debug("Found GenieZone hypervisor version %u.%u.%llu\n",
++	dev_info(&pdev->dev, "GenieZone hypervisor version %u.%u.%llu\n",
+ 		 gzvm_drv.hyp_version.major, gzvm_drv.hyp_version.minor,
+ 		 gzvm_drv.hyp_version.sub);
+ 
+@@ -295,13 +295,13 @@
+ 
+ 	ret = gzvm_query_hyp_batch_pages();
+ 	if (ret)
+-		return ret;
++		return dev_err_probe(&pdev->dev, ret, "failed to query demand-paging batch size\n");
+ 	ret = gzvm_query_destroy_batch_pages();
+ 	if (ret)
+-		return ret;
++		return dev_err_probe(&pdev->dev, ret, "failed to query VM destruction batch size\n");
+ 	ret = gzvm_drv_irqfd_init();
+ 	if (ret)
+-		return ret;
++		return dev_err_probe(&pdev->dev, ret, "failed to initialize irqfd\n");
+ 	ret = gzvm_drv_debug_init();
+ 	if (ret)
+ 		goto free_irqfd;

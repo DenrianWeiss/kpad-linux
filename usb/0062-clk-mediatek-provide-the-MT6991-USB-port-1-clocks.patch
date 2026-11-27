@@ -1,0 +1,60 @@
+From 9bf339199ac1a1d5542483f50212dfbbdf4e19ed Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 07:08:29 +0800
+Subject: [PATCH] clk: mediatek: provide the MT6991 USB port 1 clocks
+
+Register the system, host and frame counter muxes and the divided 192 MHz parent. Both MT6991 stock clock tables use the same selector, update and fence fields as MT8196 for these three muxes.
+---
+ drivers/clk/mediatek/clk-mt8196-topckgen.c        | 13 +++++++++++++
+ include/dt-bindings/clock/mediatek,mt6991-clock.h |  4 ++++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-topckgen.c b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+index fe54904..0de170c 100644
+--- a/drivers/clk/mediatek/clk-mt8196-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+@@ -981,6 +981,7 @@ static const struct mtk_fixed_factor mt6991_divs[] = {
+ 	FACTOR(MT6991_CLK_TOP_UNIVPLL_D6_D4, "univpll_d6_d4", "univpll", 1, 24),
+ 	FACTOR(MT6991_CLK_TOP_UNIVPLL_D6_D8, "univpll_d6_d8", "univpll", 1, 48),
+ 	FACTOR(MT6991_CLK_TOP_UNIVPLL_192M, "univpll_192m", "univpll", 1, 13),
++	FACTOR(MT6991_CLK_TOP_UNIVPLL_192M_D4, "univpll_192m_d4", "univpll_192m", 1, 4),
+ };
+ 
+ static const struct mtk_mux mt6991_muxes[] = {
+@@ -996,6 +997,18 @@ static const struct mtk_mux mt6991_muxes[] = {
+ 	MUX_CLR_SET_UPD(MT6991_CLK_TOP_P_AXI, "p_axi", shared_axi_parents,
+ 		CLK_CFG_0, CLK_CFG_0_SET, CLK_CFG_0_CLR,
+ 		24, 3, CLK_CFG_UPDATE, TOP_MUX_PERI_AXI_SHIFT),
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_USB_TOP_1P, "usb_1p", usb_1p_parents,
++		CLK_CFG_10, CLK_CFG_10_SET, CLK_CFG_10_CLR,
++		8, 1, 15, CLK_CFG_UPDATE1, TOP_MUX_USB_TOP_1P_SHIFT,
++		CLK_FENC_STATUS_MON_1, 22),
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_USB_XHCI_1P, "usb_xhci_1p", usb_1p_parents,
++		CLK_CFG_10, CLK_CFG_10_SET, CLK_CFG_10_CLR,
++		16, 1, 23, CLK_CFG_UPDATE1, TOP_MUX_SSUSB_XHCI_1P_SHIFT,
++		CLK_FENC_STATUS_MON_1, 21),
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_USB_FMCNT_P1, "usb_fmcnt_p1", usb_fmcnt_p1_parents,
++		CLK_CFG_10, CLK_CFG_10_SET, CLK_CFG_10_CLR,
++		24, 1, 31, CLK_CFG_UPDATE1, TOP_MUX_SSUSB_FMCNT_P1_SHIFT,
++		CLK_FENC_STATUS_MON_1, 20),
+ 	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_I2C_P, "i2c_p", i2c_parents,
+ 		CLK_CFG_11, CLK_CFG_11_SET, CLK_CFG_11_CLR,
+ 		0, 3, 7, CLK_CFG_UPDATE1, TOP_MUX_I2C_PERI_SHIFT,
+diff --git a/include/dt-bindings/clock/mediatek,mt6991-clock.h b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+index 6f4c6d2..1ae79c7 100644
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -37,6 +37,10 @@
+ #define MT6991_CLK_TOP_PEXTP0_AXI            27
+ #define MT6991_CLK_TOP_PEXTP0_MEM_SUB        28
+ #define MT6991_CLK_TOP_TL                    29
++#define MT6991_CLK_TOP_UNIVPLL_192M_D4        30
++#define MT6991_CLK_TOP_USB_TOP_1P             31
++#define MT6991_CLK_TOP_USB_XHCI_1P            32
++#define MT6991_CLK_TOP_USB_FMCNT_P1           33
+ 
+ #define MT6991_CLK_PERI_UART0_BCLK         0
+ #define MT6991_CLK_PERI_SPI6_BCLK          1
+-- 
+2.50.1 (Apple Git-155)
+

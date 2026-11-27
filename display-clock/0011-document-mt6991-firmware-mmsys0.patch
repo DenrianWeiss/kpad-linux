@@ -1,0 +1,12 @@
+Subject: [PATCH] dt-bindings: soc: mediatek: allow legacy firmware voter on MT6991 MMSYS0
+
+--- a/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
++++ b/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
+@@ -181,6 +181,7 @@
+           not:
+             contains:
+               enum:
++                - mediatek,mt6991-mmsys0
+                 - mediatek,mt6991-ovlsys_config
+                 - mediatek,mt6991-ovlsys1_config
+     then:

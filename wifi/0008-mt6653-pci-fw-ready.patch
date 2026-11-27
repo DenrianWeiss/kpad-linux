@@ -1,0 +1,61 @@
+Subject: [RFC PATCH] wifi: mt76: wait for MT6653 PCI firmware readiness after RAM boot
+
+The MT6653 startup path reads an extended PCI configuration register
+after downloading the PHY and WM images. Both ready bits must be set.
+Provide a PCI entry point which waits for them before returning. Propagate
+configuration access failures and reject a disconnected all-ones read.
+
+diff --git a/drivers/net/wireless/mediatek/mt76/mt6653_rom.c b/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
+@@ -1,6 +1,8 @@
+ // SPDX-License-Identifier: BSD-3-Clause-Clear
+ #include <linux/firmware.h>
++#include <linux/iopoll.h>
+ #include <linux/module.h>
++#include <linux/pci.h>
+ #include "mt76_connac_mcu.h"
+ #include "mt76_connac3_mac.h"
+ 
+@@ -177,3 +179,33 @@ EXPORT_SYMBOL_GPL(mt6653_rom_boot_ram);
+ 
+ MODULE_FIRMWARE(MT6653_PHY_FIRMWARE);
+ MODULE_FIRMWARE(MT6653_WM_FIRMWARE);
++
++#define MT6653_PCIE_FW_STATUS	0x48c
++#define MT6653_PCIE_FW_READY	GENMASK(29, 28)
++
++int mt6653_pci_boot_ram(struct mt76_dev *dev)
++{
++	struct pci_dev *pdev;
++	int err, ret;
++	u32 status;
++
++	if (!dev_is_pci(dev->dev))
++		return -ENODEV;
++	pdev = to_pci_dev(dev->dev);
++
++	ret = mt6653_rom_boot_ram(dev);
++	if (ret)
++		return ret;
++
++	ret = read_poll_timeout(pci_read_config_dword, err,
++				err || status == ~0U ||
++				(status & MT6653_PCIE_FW_READY) == MT6653_PCIE_FW_READY,
++				5000, 2500000, false,
++				pdev, MT6653_PCIE_FW_STATUS, &status);
++	if (err)
++		return pcibios_err_to_errno(err);
++	if (status == ~0U)
++		return -ENODEV;
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt6653_pci_boot_ram);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
+--- a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
++++ b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
+@@ -2157,3 +2157,4 @@
+ int mt6653_rom_load_wm(struct mt76_dev *dev, const struct firmware *fw);
+ int mt6653_rom_boot_ram(struct mt76_dev *dev);
++int mt6653_pci_boot_ram(struct mt76_dev *dev);
+ int mt6653_rom_load_phy(struct mt76_dev *dev, const struct firmware *fw);

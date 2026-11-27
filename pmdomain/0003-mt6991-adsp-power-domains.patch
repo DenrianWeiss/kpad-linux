@@ -1,0 +1,130 @@
+Subject: [PATCH] pmdomain: mediatek: add MT6991 audio DSP domain hierarchy
+
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -481,9 +481,28 @@
+ 					};
+ 				};
+ 
+-				power-domain@f {
+-					reg = <MT6991_POWER_DOMAIN_AUDIO>;
+-					#power-domain-cells = <0>;
++				power-domain@d {
++					reg = <MT6991_POWER_DOMAIN_ADSP_AO>;
++					#address-cells = <1>;
++					#size-cells = <0>;
++					#power-domain-cells = <1>;
++
++					power-domain@e {
++						reg = <MT6991_POWER_DOMAIN_ADSP_INFRA>;
++						#address-cells = <1>;
++						#size-cells = <0>;
++						#power-domain-cells = <1>;
++
++						power-domain@f {
++							reg = <MT6991_POWER_DOMAIN_AUDIO>;
++							#power-domain-cells = <0>;
++						};
++
++						power-domain@10 {
++							reg = <MT6991_POWER_DOMAIN_ADSP_TOP_DORMANT>;
++							#power-domain-cells = <0>;
++						};
++					};
+ 				};
+ 			};
+ 		};
+--- a/include/dt-bindings/power/mediatek,mt6991-power.h
++++ b/include/dt-bindings/power/mediatek,mt6991-power.h
+@@ -7,7 +7,10 @@
+ #define MT6991_POWER_DOMAIN_SSUSB_P1		4
+ #define MT6991_POWER_DOMAIN_PEXTP_MAC0		7
+ #define MT6991_POWER_DOMAIN_PEXTP_PHY0		10
++#define MT6991_POWER_DOMAIN_ADSP_AO		13
++#define MT6991_POWER_DOMAIN_ADSP_INFRA		14
+ #define MT6991_POWER_DOMAIN_AUDIO		15
++#define MT6991_POWER_DOMAIN_ADSP_TOP_DORMANT	16
+ 
+ /* Secure Power Manager hardware voter */
+ #define MT6991_POWER_DOMAIN_MM_PROC_DORMANT	0
+--- a/drivers/pmdomain/mediatek/mt6991-pm-domains.h
++++ b/drivers/pmdomain/mediatek/mt6991-pm-domains.h
+@@ -68,6 +68,28 @@
+ 		.bp_cfg = { MT6991_SPM_BUS_PROT(BIT(16)) },
+ 		.caps = MTK_SCPD_STAGED_PWR_ACK,
+ 	},
++	[MT6991_POWER_DOMAIN_ADSP_AO] = {
++		.name = "adsp-ao",
++		.ctl_offs = 0xe5c,
++		.pwr_sta_offs = 0xe5c,
++		.pwr_sta2nd_offs = 0xe5c,
++		.sta_mask = BIT(30),
++		.sta2nd_mask = BIT(31),
++		.bp_cfg = { MT6991_SPM_BUS_PROT(BIT(23)) },
++		.rtff_type = SCPSYS_RTFF_TYPE_GENERIC,
++		.caps = MTK_SCPD_STAGED_PWR_ACK,
++	},
++	[MT6991_POWER_DOMAIN_ADSP_INFRA] = {
++		.name = "adsp-infra",
++		.ctl_offs = 0xe58,
++		.pwr_sta_offs = 0xe58,
++		.pwr_sta2nd_offs = 0xe58,
++		.sta_mask = BIT(30),
++		.sta2nd_mask = BIT(31),
++		.bp_cfg = { MT6991_SPM_BUS_PROT(BIT(22)) },
++		.rtff_type = SCPSYS_RTFF_TYPE_GENERIC,
++		.caps = MTK_SCPD_STAGED_PWR_ACK,
++	},
+ 	[MT6991_POWER_DOMAIN_AUDIO] = {
+ 		.name = "audio",
+ 		.ctl_offs = 0xe4c,
+@@ -80,6 +102,20 @@
+ 		.bp_cfg = { MT6991_SPM_BUS_PROT(BIT(19)) },
+ 		.rtff_type = SCPSYS_RTFF_TYPE_GENERIC,
+ 		.caps = MTK_SCPD_STAGED_PWR_ACK,
++	},
++	[MT6991_POWER_DOMAIN_ADSP_TOP_DORMANT] = {
++		.name = "adsp-top-dormant",
++		.ctl_offs = 0xe54,
++		.pwr_sta_offs = 0xe54,
++		.pwr_sta2nd_offs = 0xe54,
++		.sta_mask = BIT(30),
++		.sta2nd_mask = BIT(31),
++		.sram_pdn_bits = BIT(9),
++		.sram_pdn_ack_bits = BIT(13),
++		.sram_iso_off_delay_us = 1,
++		.bp_cfg = { MT6991_SPM_BUS_PROT(BIT(21)) },
++		.caps = MTK_SCPD_STAGED_PWR_ACK | MTK_SCPD_SRAM_ISO |
++			MTK_SCPD_SRAM_PDN_INVERTED,
+ 	},
+ };
+ 
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.h
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.h
+@@ -159,6 +159,7 @@
+  * @sta_mask: The mask for power on/off status bit.
+  * @sta2nd_mask: The mask for second power on/off status bit.
+  * @ctl_offs: The offset for main power control register.
++ * @sram_iso_off_delay_us: Delay after asserting SRAM isolation before sleep.
+  * @sram_pdn_bits: The mask for sram power control bits.
+  * @sram_pdn_ack_bits: The mask for sram power control acked bits.
+  * @ext_buck_iso_offs: The offset for external buck isolation
+@@ -174,6 +175,7 @@
+ 	int ctl_offs;
+ 	u32 sram_pdn_bits;
+ 	u32 sram_pdn_ack_bits;
++	u8 sram_iso_off_delay_us;
+ 	int ext_buck_iso_offs;
+ 	u32 ext_buck_iso_mask;
+ 	u16 caps;
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.c
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+@@ -231,6 +231,8 @@
+ 		regmap_set_bits(scpsys->base, pd->data->ctl_offs, PWR_SRAM_CLKISO_BIT);
+ 		udelay(1);
+ 		regmap_clear_bits(scpsys->base, pd->data->ctl_offs, PWR_SRAM_ISOINT_B_BIT);
++		if (pd->data->sram_iso_off_delay_us)
++			udelay(pd->data->sram_iso_off_delay_us);
+ 	}
+ 
+ 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_SRAM_PDN_INVERTED)) {

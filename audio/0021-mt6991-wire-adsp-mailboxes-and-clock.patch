@@ -1,0 +1,161 @@
+--- a/drivers/mailbox/mt6991-adsp-mailbox.c
++++ b/drivers/mailbox/mt6991-adsp-mailbox.c
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* MediaTek MT6991 audio DSP direct receive mailboxes */
++#include <linux/clk.h>
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/mailbox_controller.h>
+@@ -17,6 +18,7 @@
+ 
+ struct mt6991_adsp_mailbox {
+ 	struct mbox_controller controller;
++	struct clk *clk;
+ 	struct mbox_chan chan[2];
+ 	struct mt6991_rx rx[2];
+ };
+@@ -43,22 +45,30 @@
+ 
+ static int mt6991_adsp_startup(struct mbox_chan *chan)
+ {
++	struct mt6991_adsp_mailbox *mb = dev_get_drvdata(chan->mbox->dev);
+ 	struct mt6991_rx *rx = chan->con_priv;
+ 	int ret;
+ 
++	ret = clk_prepare_enable(mb->clk);
++	if (ret)
++		return ret;
+ 	ret = pm_runtime_resume_and_get(chan->mbox->dev);
+-	if (ret < 0)
++	if (ret < 0) {
++		clk_disable_unprepare(mb->clk);
+ 		return ret;
++	}
+ 	enable_irq(rx->irq);
+ 	return 0;
+ }
+ 
+ static void mt6991_adsp_shutdown(struct mbox_chan *chan)
+ {
++	struct mt6991_adsp_mailbox *mb = dev_get_drvdata(chan->mbox->dev);
+ 	struct mt6991_rx *rx = chan->con_priv;
+ 
+ 	disable_irq(rx->irq);
+ 	pm_runtime_put_sync(chan->mbox->dev);
++	clk_disable_unprepare(mb->clk);
+ }
+ 
+ static int mt6991_adsp_rx_send(struct mbox_chan *chan, void *data)
+@@ -90,6 +100,11 @@
+ 	mb = devm_kzalloc(dev, sizeof(*mb), GFP_KERNEL);
+ 	if (!mb)
+ 		return -ENOMEM;
++
++	mb->clk = devm_clk_get(dev, "clk_top_adsp_sel");
++	if (IS_ERR(mb->clk))
++		return dev_err_probe(dev, PTR_ERR(mb->clk), "getting ADSP clock\n");
++	platform_set_drvdata(pdev, mb);
+ 
+ 	for (i = 0; i < ARRAY_SIZE(mb->rx); i++) {
+ 		struct mt6991_rx *rx = &mb->rx[i];
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -241,7 +241,7 @@
+ 			#clock-cells = <1>;
+ 		};
+ 
+-		clock-controller@10000800 {
++		apmixed: clock-controller@10000800 {
+ 			compatible = "mediatek,mt6991-apmixedsys", "syscon";
+ 			reg = <0 0x10000800 0 0x1000>;
+ 			#clock-cells = <1>;
+@@ -433,6 +433,63 @@
+ 			#clock-cells = <1>;
+ 			#reset-cells = <1>;
+ 		};
++		adspsys: adspsys@1a000000 {
++			compatible = "mediatek,mt6991-adspsys";
++			reg = <0 0x1a000000 0 0x5000>,
++			      <0 0x1a00b000 0 0x5000>,
++			      <0 0x1a013000 0 0x3000>,
++			      <0 0x1a350000 0 0x100>,
++			      <0 0x1a350100 0 0x4>,
++			      <0 0x1a35010c 0 0x4>,
++			      <0 0x1a360000 0 0x100>,
++			      <0 0x1a360100 0 0x4>,
++			      <0 0x1a36010c 0 0x4>,
++			      <0 0x1a370000 0 0x100>,
++			      <0 0x1a370100 0 0x4>,
++			      <0 0x1a37010c 0 0x4>,
++			      <0 0x1a380000 0 0x100>,
++			      <0 0x1a380100 0 0x4>,
++			      <0 0x1a38010c 0 0x4>;
++			reg-names = "cfg", "cfg2", "cfg3",
++				    "mbox0_base", "mbox0_set", "mbox0_clr",
++				    "mbox1_base", "mbox1_set", "mbox1_clr",
++				    "mbox2_base", "mbox2_set", "mbox2_clr",
++				    "mbox3_base", "mbox3_set", "mbox3_clr";
++			interrupts = <GIC_SPI 709 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 710 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 711 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 712 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 716 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "mbox0", "mbox1", "mbox2", "mbox3", "debug_ctrl";
++			clocks = <&topckgen MT6991_CLK_TOP_ADSP>, <&clk26m>,
++				 <&apmixed MT6991_CLK_APMIXED_ADSPPLL>;
++			clock-names = "clk_top_adsp_sel", "clk_top_clk26m", "clk_top_adsppll";
++			power-domains = <&spm MT6991_POWER_DOMAIN_ADSP_TOP_DORMANT>;
++			#mbox-cells = <1>;
++		};
++
++		adsp-core0@1a060000 {
++			compatible = "mediatek,mt6991-adsp_core_0";
++			reg = <0 0x1a060000 0 0x9000>, <0 0x1a030000 0 0x8000>,
++			      <0 0x1a210000 0 0x4000>;
++			reg-names = "itcm", "dtcm", "l2sram";
++			interrupts = <GIC_SPI 703 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 705 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 707 IRQ_TYPE_LEVEL_HIGH>;
++			mboxes = <&adspsys 0>, <&adspsys 1>;
++		};
++
++		adsp-core1@1a0d0000 {
++			compatible = "mediatek,mt6991-adsp_core_1";
++			reg = <0 0x1a0d0000 0 0x9000>, <0 0x1a0a0000 0 0x10000>,
++			      <0 0x1a214000 0 0x4000>;
++			reg-names = "itcm", "dtcm", "l2sram";
++			interrupts = <GIC_SPI 704 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 706 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 708 IRQ_TYPE_LEVEL_HIGH>;
++			mboxes = <&adspsys 2>, <&adspsys 3>;
++		};
++
+ 		afe_clk: clock-controller@1a110000 {
+ 			compatible = "mediatek,mt6991-audiosys", "syscon";
+ 			reg = <0 0x1a110000 0 0x1000>;
+--- a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
++++ b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+@@ -59,6 +59,22 @@
+ 	};
+ };
+ 
++&adspsys {
++	adsp-rsv-ipidma-a = <0x100000>;
++	adsp-rsv-ipidma-b = <0x100000>;
++	adsp-rsv-logger-a = <0x80000>;
++	adsp-rsv-logger-b = <0x80000>;
++	adsp-rsv-c2c = <0x40000>;
++	adsp-rsv-dbg-dump-a = <0x80000>;
++	adsp-rsv-dbg-dump-b = <0x80000>;
++	adsp-rsv-core-dump-a = <0x400>;
++	adsp-rsv-core-dump-b = <0x400>;
++	adsp-rsv-pcie = <0x00>;
++	adsp-rsv-l2sram = <0x80>;
++	adsp-rsv-xhci = <0x80000>;
++	adsp-rsv-audio = <0x5c0000>;
++};
++
+ &gpu {
+ 	/* Firmware handoff requires DMA cache maintenance on this board. */
+ 	dma-noncoherent;

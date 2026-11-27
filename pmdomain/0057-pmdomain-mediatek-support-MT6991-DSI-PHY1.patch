@@ -1,0 +1,57 @@
+From f6403d7349e33863196c54867a6385c33fcf2ec4 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 06:05:40 +0800
+Subject: [PATCH] pmdomain: mediatek: support the MT6991 DSI PHY1 direct power
+ domain
+
+---
+ drivers/pmdomain/mediatek/mt6991-pm-domains.h | 18 ++++++++++++++++++
+ drivers/pmdomain/mediatek/mtk-pm-domains.c    |  3 +++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/drivers/pmdomain/mediatek/mt6991-pm-domains.h b/drivers/pmdomain/mediatek/mt6991-pm-domains.h
+index baa3704..bb89481 100644
+--- a/drivers/pmdomain/mediatek/mt6991-pm-domains.h
++++ b/drivers/pmdomain/mediatek/mt6991-pm-domains.h
+@@ -122,6 +122,24 @@ static const struct scpsys_soc_data mt6991_mm_hwv_data = {
+ 	.type = SCPSYS_MTCMOS_TYPE_HW_VOTER,
+ };
+ 
++static const struct scpsys_domain_data mt6991_hfrp_domains[] = {
++	[MT6991_POWER_DOMAIN_DSI_PHY1] = {
++		.name = "dsi-phy1",
++		.ctl_offs = 0xf4,
++		.pwr_sta_offs = 0xf4,
++		.pwr_sta2nd_offs = 0xf4,
++		.sta_mask = BIT(30),
++		.sta2nd_mask = BIT(31),
++		.caps = MTK_SCPD_STAGED_PWR_ACK,
++	},
++};
++
++static const struct scpsys_soc_data mt6991_hfrp_data = {
++	.domains_data = mt6991_hfrp_domains,
++	.num_domains = ARRAY_SIZE(mt6991_hfrp_domains),
++	.type = SCPSYS_MTCMOS_TYPE_DIRECT_CTL,
++};
++
+ static const struct scpsys_soc_data mt6991_scpsys_data = {
+ 	.domains_data = mt6991_domains,
+ 	.num_domains = ARRAY_SIZE(mt6991_domains),
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.c b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+index d8c1bda..828bc04 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.c
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+@@ -1388,6 +1388,9 @@ static const struct of_device_id scpsys_of_match[] = {
+ 		.data = &mt6893_scpsys_data,
+ 	},
+ 	{
++		.compatible = "mediatek,mt6991-hfrp-power-controller",
++		.data = &mt6991_hfrp_data,
++	}, {
+ 		.compatible = "mediatek,mt6991-hwv-hfrp-power-controller",
+ 		.data = &mt6991_mm_hwv_data,
+ 	}, {
+-- 
+2.50.1 (Apple Git-155)
+

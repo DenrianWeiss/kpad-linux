@@ -1,0 +1,59 @@
+From fb689498c582b8754e148d1982bdf507ec1c7015 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 01:23:24 +0800
+Subject: [PATCH 4/4] arm64: dts: mediatek: wire up MT6991 GPIO and external
+ interrupts
+
+---
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi | 35 ++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index 70b3e15..93c9e44 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -76,6 +76,41 @@ gic: interrupt-controller@c400000 {
+ 		interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH>;
+ 	};
+ 
++	pio: pinctrl@1002d000 {
++		compatible = "mediatek,mt6991-pinctrl", "mediatek,mt8196-pinctrl";
++		reg = <0 0x1002d000 0 0x1000>,
++		      <0 0x12000000 0 0x1000>,
++		      <0 0x12020000 0 0x1000>,
++		      <0 0x12040000 0 0x1000>,
++		      <0 0x12060000 0 0x1000>,
++		      <0 0x12820000 0 0x1000>,
++		      <0 0x12840000 0 0x1000>,
++		      <0 0x12860000 0 0x1000>,
++		      <0 0x13000000 0 0x1000>,
++		      <0 0x13020000 0 0x1000>,
++		      <0 0x13040000 0 0x1000>,
++		      <0 0x130f0000 0 0x1000>,
++		      <0 0x13110000 0 0x1000>,
++		      <0 0x13800000 0 0x1000>,
++		      <0 0x13820000 0 0x1000>,
++		      <0 0x13860000 0 0x1000>,
++		      <0 0x12080000 0 0x1000>,
++		      <0 0x12880000 0 0x1000>,
++		      <0 0x13080000 0 0x1000>,
++		      <0 0x13880000 0 0x1000>,
++		      <0 0x1c54a000 0 0x1000>;
++		reg-names = "base", "rt", "rm1", "rm2", "rb", "bm1", "bm2",
++			    "bm3", "lt", "lm1", "lm2", "lb1", "lb2", "tm1",
++			    "tm2", "tm3", "eint0", "eint1", "eint2", "eint3",
++			    "eint4";
++		interrupts = <GIC_SPI 396 IRQ_TYPE_LEVEL_HIGH>;
++		gpio-controller;
++		#gpio-cells = <2>;
++		gpio-ranges = <&pio 0 0 271>;
++		interrupt-controller;
++		#interrupt-cells = <2>;
++	};
++
+ 	psci {
+ 		compatible = "arm,psci-1.0";
+ 		method = "smc";
+-- 
+2.50.1 (Apple Git-155)
+

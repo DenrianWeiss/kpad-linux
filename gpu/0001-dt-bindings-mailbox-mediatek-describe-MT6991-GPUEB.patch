@@ -1,0 +1,23 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] dt-bindings: mailbox: mediatek: describe MT6991 GPUEB
+
+MT6991 uses the same twelve GPUEB mailbox channel IDs, TX/RX layout,
+and send/status/acknowledge register offsets as MT8196. Describe the
+SoC-specific compatible with the existing controller as fallback.
+
+--- a/Documentation/devicetree/bindings/mailbox/mediatek,mt8196-gpueb-mbox.yaml
++++ b/Documentation/devicetree/bindings/mailbox/mediatek,mt8196-gpueb-mbox.yaml
+@@ -11,8 +11,11 @@
+ 
+ properties:
+   compatible:
+-    enum:
+-      - mediatek,mt8196-gpueb-mbox
++    oneOf:
++      - const: mediatek,mt8196-gpueb-mbox
++      - items:
++          - const: mediatek,mt6991-gpueb-mbox
++          - const: mediatek,mt8196-gpueb-mbox
+ 
+   reg:
+     items:

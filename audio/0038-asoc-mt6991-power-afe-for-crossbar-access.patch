@@ -1,0 +1,52 @@
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -571,9 +571,32 @@
+  * Turner wires DL0 stereo to eTDM output 4. DAPM updates just the
+  * selected crossbar bits while the corresponding channel path is powered.
+  */
++static int mt6991_output_event(struct snd_soc_dapm_widget *w,
++			       struct snd_kcontrol *control, int event)
++{
++	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
++	struct mt6991_afe *afe = snd_soc_component_get_drvdata(component);
++	unsigned int reg = w->shift ? AFE_CONN117_1 : AFE_CONN116_1;
++	unsigned int mask = BIT(w->shift);
++	int ret;
++
++	ret = pm_runtime_resume_and_get(component->dev);
++	if (ret < 0)
++		return ret;
++	ret = regmap_update_bits(afe->common.regmap, reg, mask,
++				 SND_SOC_DAPM_EVENT_ON(event) ? mask : 0);
++	pm_runtime_put(component->dev);
++	return ret;
++}
++
++/* Card binding may occur after the AFE's probe-time PM reference is gone.
++ * NOPM prevents DAPM from reading the crossbar while creating the widgets.
++ */
+ static const struct snd_soc_dapm_widget mt6991_output_widgets[] = {
+-	SND_SOC_DAPM_PGA("I2SOUT4_CH1", AFE_CONN116_1, 0, 0, NULL, 0),
+-	SND_SOC_DAPM_PGA("I2SOUT4_CH2", AFE_CONN117_1, 1, 0, NULL, 0),
++	SND_SOC_DAPM_PGA_E("I2SOUT4_CH1", SND_SOC_NOPM, 0, 0, NULL, 0,
++			   mt6991_output_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
++	SND_SOC_DAPM_PGA_E("I2SOUT4_CH2", SND_SOC_NOPM, 1, 0, NULL, 0,
++			   mt6991_output_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+ };
+ 
+ static const struct snd_soc_dapm_route mt6991_output_routes[] = {
+@@ -678,6 +701,14 @@
+ 	}
+ 	dl0 = readl(afe->base + AFE_DL0_CON0);
+ 	dev_dbg(dev, "DL0 control at probe %#x\n", dl0);
++	ret = regmap_clear_bits(afe->common.regmap, AFE_CONN116_1, BIT(0));
++	if (!ret)
++		ret = regmap_clear_bits(afe->common.regmap, AFE_CONN117_1, BIT(1));
++	if (ret) {
++		pm_runtime_put_sync_suspend(dev);
++		pm_runtime_disable(dev);
++		return dev_err_probe(dev, ret, "clearing initial I2S4 routes\n");
++	}
+ 	ret = pm_runtime_put_sync_suspend(dev);
+ 	if (ret < 0)
+ 		dev_warn(dev, "AFE remains active after probe: %d\n", ret);

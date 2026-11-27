@@ -1,0 +1,53 @@
+Subject: [PATCH] backlight: ktz8866: read the programmed brightness on Turner
+
+Report the hardware LED enable and brightness register state via
+actual_brightness, including through panel blank and unblank.
+
+--- a/drivers/video/backlight/ktz8866.c
++++ b/drivers/video/backlight/ktz8866.c
+@@ -194,6 +194,34 @@
+ 	.update_status = ktz8866_backlight_update_status,
+ };
+ 
++/* Turner sets the LED current in the two 11-bit brightness registers. */
++static int ktz8866_turner_get_brightness(struct backlight_device *bl)
++{
++	struct ktz8866 *ktz = bl_get_data(bl);
++	unsigned int enable, high, low;
++	int ret;
++
++	ret = regmap_read(ktz->regmap, BL_EN, &enable);
++	if (ret)
++		return ret;
++	if (!(enable & BL_EN_BIT))
++		return 0;
++	ret = regmap_read(ktz->regmap, BL_BRT_MSB, &high);
++	if (ret)
++		return ret;
++	ret = regmap_read(ktz->regmap, BL_BRT_LSB, &low);
++	if (ret)
++		return ret;
++
++	return (high << 3) | (low & 7);
++}
++
++static const struct backlight_ops ktz8866_turner_backlight_ops = {
++	.options = BL_CORE_SUSPENDRESUME,
++	.update_status = ktz8866_backlight_update_status,
++	.get_brightness = ktz8866_turner_get_brightness,
++};
++
+ static void ktz8866_init(struct ktz8866 *ktz)
+ {
+ 	unsigned int val = 0;
+@@ -267,7 +295,9 @@
+ 	props.scale = BACKLIGHT_SCALE_LINEAR;
+ 
+ 	backlight_dev = devm_backlight_device_register(&client->dev, "ktz8866-backlight",
+-					&client->dev, ktz, &ktz8866_backlight_ops, &props);
++					&client->dev, ktz, ktz->turner ?
++					&ktz8866_turner_backlight_ops : &ktz8866_backlight_ops,
++					&props);
+ 	if (IS_ERR(backlight_dev))
+ 		return dev_err_probe(&client->dev, PTR_ERR(backlight_dev),
+ 				"failed to register backlight device\n");

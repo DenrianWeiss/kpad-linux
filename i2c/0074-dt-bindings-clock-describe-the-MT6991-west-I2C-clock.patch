@@ -1,0 +1,40 @@
+From dc1308d23ba64fbcce69324bd1a6d9976b7dbdcc Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 07:30:20 +0800
+Subject: [PATCH 74/76] dt-bindings: clock: describe the MT6991 west I2C clocks
+
+---
+ .../devicetree/bindings/clock/mediatek,mt8196-clock.yaml      | 4 ++++
+ include/dt-bindings/clock/mediatek,mt6991-clock.h             | 1 +
+ 2 files changed, 5 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
+index 4be9b4f..ae17c6a 100644
+--- a/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
+@@ -47,6 +47,10 @@ properties:
+           - const: mediatek,mt6991-imp-iic-wrap-c
+           - const: mediatek,mt8196-imp-iic-wrap-c
+           - const: syscon
++      - items:
++          - const: mediatek,mt6991-imp-iic-wrap-w
++          - const: mediatek,mt8196-imp-iic-wrap-w
++          - const: syscon
+       - items:
+           - const: mediatek,mt6991-pextp0cfg-ao
+           - const: mediatek,mt8196-pextp0cfg-ao
+diff --git a/include/dt-bindings/clock/mediatek,mt6991-clock.h b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+index a511871..b824f9d 100644
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -43,6 +43,7 @@
+ #define MT6991_CLK_TOP_USB_FMCNT_P1           33
+ 
+ #define MT6991_CLK_TOP_MAINPLL_D9            34
++#define MT6991_CLK_TOP_I2C_WEST              35
+ 
+ #define MT6991_CLK_VLP_USB_TOP                0
+ #define MT6991_CLK_VLP_USB_XHCI               1
+-- 
+2.50.1 (Apple Git-155)
+

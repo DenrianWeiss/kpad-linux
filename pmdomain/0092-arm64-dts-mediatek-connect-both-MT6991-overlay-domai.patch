@@ -1,0 +1,39 @@
+From 0399eaee49f296f1c584de7c0c45b9d212972f9d Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 10:04:16 +0800
+Subject: [PATCH 92/92] arm64: dts: mediatek: connect both MT6991 overlay
+ domains and DISP0
+
+---
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index 0f83b194e..a32c7de73 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -510,6 +510,21 @@ power-domain@2 {
+ 						reg = <MT6991_POWER_DOMAIN_DIS1_DORMANT>;
+ 						#power-domain-cells = <0>;
+ 					};
++
++					power-domain@3 {
++						reg = <MT6991_POWER_DOMAIN_OVL0_DORMANT>;
++						#power-domain-cells = <0>;
++					};
++
++					power-domain@4 {
++						reg = <MT6991_POWER_DOMAIN_OVL1_DORMANT>;
++						#power-domain-cells = <0>;
++					};
++
++					power-domain@5 {
++						reg = <MT6991_POWER_DOMAIN_DIS0_DORMANT>;
++						#power-domain-cells = <0>;
++					};
+ 				};
+ 			};
+ 		};
+-- 
+2.50.1 (Apple Git-155)
+

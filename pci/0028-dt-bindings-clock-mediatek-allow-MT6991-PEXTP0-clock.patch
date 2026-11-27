@@ -1,0 +1,28 @@
+From d55188f7dc24f9cd8b4f15082b5010a0d9f6f666 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:01:24 +0800
+Subject: [PATCH] dt-bindings: clock: mediatek: allow MT6991 PEXTP0 clock
+ controller
+
+---
+ .../devicetree/bindings/clock/mediatek,mt8196-clock.yaml      | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
+index 2149d6d..4be9b4f 100644
+--- a/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
+@@ -47,6 +47,10 @@ properties:
+           - const: mediatek,mt6991-imp-iic-wrap-c
+           - const: mediatek,mt8196-imp-iic-wrap-c
+           - const: syscon
++      - items:
++          - const: mediatek,mt6991-pextp0cfg-ao
++          - const: mediatek,mt8196-pextp0cfg-ao
++          - const: syscon
+ 
+   reg:
+     maxItems: 1
+-- 
+2.50.1 (Apple Git-155)
+

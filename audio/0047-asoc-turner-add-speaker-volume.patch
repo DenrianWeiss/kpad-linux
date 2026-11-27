@@ -1,0 +1,125 @@
+--- a/sound/soc/mediatek/mt6991/turner.c
++++ b/sound/soc/mediatek/mt6991/turner.c
+@@ -8,11 +8,15 @@
+ #include <linux/soc/mediatek/mt6991-adsp-ipi.h>
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
++#include <sound/tlv.h>
++#include <linux/unaligned.h>
+ 
+ #include "mt6991-afe.h"
+ 
+ struct turner_audio {
+ 	struct snd_soc_card card;
++	unsigned int volume;
++	bool unmuted;
+ 	struct device *dsp;
+ 	struct pinctrl *pins;
+ 	struct pinctrl_state *active;
+@@ -23,6 +27,72 @@
+ 	struct snd_soc_codec_conf amps[2];
+ };
+ 
++/* Q16 linear amplitude, one dB per step from -60 dB to unity. */
++static const unsigned int speaker_gain[] = {
++	66, 74, 83, 93, 104, 117, 131, 147, 165,
++	185, 207, 233, 261, 293, 328, 369, 414, 464,
++	521, 584, 655, 735, 825, 926, 1039, 1165, 1308,
++	1467, 1646, 1847, 2072, 2325, 2609, 2927, 3285, 3685,
++	4135, 4640, 5206, 5841, 6554, 7353, 8250, 9257, 10387,
++	11654, 13076, 14672, 16462, 18471, 20724, 23253, 26090, 29274,
++	32846, 36854, 41350, 46396, 52057, 58409, 65536,
++};
++
++static const DECLARE_TLV_DB_SCALE(turner_volume_db, -6000, 100, 0);
++
++static int turner_volume_get(struct snd_kcontrol *k, struct snd_ctl_elem_value *v)
++{
++	struct turner_audio *audio = snd_soc_card_get_drvdata(snd_kcontrol_chip(k));
++
++	v->value.integer.value[0] = READ_ONCE(audio->volume);
++	return 0;
++}
++
++static int turner_volume_put(struct snd_kcontrol *k, struct snd_ctl_elem_value *v)
++{
++	struct turner_audio *audio = snd_soc_card_get_drvdata(snd_kcontrol_chip(k));
++	long volume = v->value.integer.value[0];
++
++	if (volume < 0 || volume >= ARRAY_SIZE(speaker_gain))
++		return -EINVAL;
++	if (READ_ONCE(audio->volume) == volume)
++		return 0;
++	WRITE_ONCE(audio->volume, volume);
++	return 1;
++}
++
++static int turner_switch_get(struct snd_kcontrol *k, struct snd_ctl_elem_value *v)
++{
++	struct turner_audio *audio = snd_soc_card_get_drvdata(snd_kcontrol_chip(k));
++
++	v->value.integer.value[0] = READ_ONCE(audio->unmuted);
++	return 0;
++}
++
++static int turner_switch_put(struct snd_kcontrol *k, struct snd_ctl_elem_value *v)
++{
++	struct turner_audio *audio = snd_soc_card_get_drvdata(snd_kcontrol_chip(k));
++	long on = v->value.integer.value[0];
++
++	if (on != 0 && on != 1)
++		return -EINVAL;
++	if (READ_ONCE(audio->unmuted) == on)
++		return 0;
++	WRITE_ONCE(audio->unmuted, on);
++	return 1;
++}
++
++static const struct snd_kcontrol_new turner_controls[] = {
++	SOC_SINGLE_EXT_TLV("Speaker Playback Volume", SND_SOC_NOPM, 0, 60, 0,
++			   turner_volume_get, turner_volume_put, turner_volume_db),
++	SOC_SINGLE_BOOL_EXT("Speaker Playback Switch", 0, turner_switch_get, turner_switch_put),
++};
++
++static unsigned int turner_gain(struct turner_audio *audio)
++{
++	return READ_ONCE(audio->unmuted) ? speaker_gain[READ_ONCE(audio->volume)] : 0;
++}
++
+ static int turner_copy(struct snd_soc_component *component, struct snd_pcm_substream *s,
+ 		       int channel, unsigned long pos, struct iov_iter *iter, unsigned long bytes)
+ {
+@@ -30,10 +100,21 @@
+ 	struct snd_pcm_runtime *rt = s->runtime;
+ 	unsigned long size = snd_pcm_lib_buffer_bytes(s);
+ 
+-	if (channel || !rt->dma_area || pos > size || bytes > size - pos)
++	unsigned int gain;
++
++	if (!IS_ALIGNED(bytes | pos, 8) || channel || !rt->dma_area || pos > size || bytes > size - pos)
+ 		return -EINVAL;
+ 	if (copy_from_iter(rt->dma_area + pos, bytes, iter) != bytes)
+ 		return -EFAULT;
++	gain = turner_gain(audio);
++	if (gain != 65536) {
++		for (unsigned long i = 0; i < bytes; i += sizeof(s32)) {
++			u8 *p = rt->dma_area + pos + i;
++			s32 sample = get_unaligned_le32(p);
++
++			put_unaligned_le32(((s64)sample * gain) / 65536, p);
++		}
++	}
+ 	return mt6991_adsp_pcm_prefill(audio->dsp, pos, rt->dma_area + pos, bytes);
+ }
+ 
+@@ -254,6 +335,10 @@
+ 	snd_soc_card_set_drvdata(&audio->card, audio);
+ 	audio->card.dev = dev;
+ 	audio->card.owner = THIS_MODULE;
++	audio->volume = ARRAY_SIZE(speaker_gain) - 1;
++	audio->unmuted = true;
++	audio->card.controls = turner_controls;
++	audio->card.num_controls = ARRAY_SIZE(turner_controls);
+ 	audio->card.name = "Turner Speakers";
+ 	audio->card.dai_link = audio->links;
+ 	audio->card.num_links = ARRAY_SIZE(audio->links);

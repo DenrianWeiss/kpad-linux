@@ -1,0 +1,50 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -27,7 +27,7 @@
+ 	struct completion logger_request;
+ 	struct completion timestamp_reply;
+ 	u64 timestamp;
+-	bool timestamp_failed;
++	int timestamp_error;
+ 	struct device *peer;
+ 	struct mutex boot_lock;
+ 	unsigned long started;
+@@ -385,7 +385,7 @@
+ 		goto stop;
+ 	for (i = 0; i < ARRAY_SIZE(cores); i++) {
+ 		reinit_completion(&cores[i]->logger_request);
+-		cores[i]->timestamp_failed = false;
++		cores[i]->timestamp_error = 0;
+ 		reinit_completion(&cores[i]->ready);
+ 		a->started |= BIT(i);
+ 		ret = mt6991_adsp_set_running(cores[i]->rx, i, true);
+@@ -459,8 +459,8 @@
+ 		return -EOPNOTSUPP;
+ 
+ 	/* Replies have no sequence field. Discard late replies until a fresh boot. */
+-	if (core->timestamp_failed)
+-		return -EPIPE;
++	if (core->timestamp_error)
++		return core->timestamp_error;
+ 	tx = mbox_request_channel(&client, 0);
+ 	if (IS_ERR(tx))
+ 		return PTR_ERR(tx);
+@@ -479,7 +479,7 @@
+ 		}
+ 	}
+ 	if (ret < 0)
+-		core->timestamp_failed = true;
++		core->timestamp_error = ret;
+ 	mbox_free_channel(tx);
+ 	return ret;
+ }
+--- a/Documentation/ABI/testing/sysfs-platform-mt6991-adsp
++++ b/Documentation/ABI/testing/sysfs-platform-mt6991-adsp
+@@ -32,3 +32,7 @@
+ 		as the firmware reply carries no sequence identifier.
++		The running firmware must implement the optional IPI 1 test handler.
++		The tested Turner production firmware receives the request but has
++		no such handler; the read times out. Further reads return the saved
++		transfer error for that core until the next DSP boot.
+ 
+ What:		/sys/bus/platform/devices/.../logger_{a,b}_enable

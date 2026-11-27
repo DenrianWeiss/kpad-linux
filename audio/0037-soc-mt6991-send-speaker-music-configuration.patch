@@ -1,0 +1,109 @@
+--- a/drivers/soc/mediatek/mt6991-adsp-core.c
++++ b/drivers/soc/mediatek/mt6991-adsp-core.c
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* MT6991 ADSP core firmware notifications */
+ #include <linux/completion.h>
++#include <linux/firmware.h>
+ #include <linux/io.h>
+ #include <linux/mailbox_client.h>
+ #include <linux/of_address.h>
+@@ -47,6 +48,14 @@
+ 
+ static bool mt6991_adsp_pcm_ack(const struct mt6991_adsp_ipi *msg, u16 command)
+ {
++	if (command == 0x15)
++		return msg->id == 9 && msg->len == 72 &&
++			get_unaligned_le16(msg->payload) == 0x8888 &&
++			msg->payload[2] == 32 && msg->payload[3] == 0x20 &&
++			msg->payload[4] == 2 && msg->payload[5] == 2 &&
++			get_unaligned_le16(msg->payload + 6) == command &&
++			get_unaligned_le32(msg->payload + 8) == 5452;
++
+ 	return command && msg->id == 9 && msg->len == 16 &&
+ 		get_unaligned_le16(msg->payload) == 0x8888 &&
+ 		msg->payload[2] == (command == 0xadd1 ? 38 : 32) && msg->payload[3] == 0x21 &&
+@@ -641,11 +650,83 @@
+ 	return ret;
+ }
+ 
++#define TURNER_MUSIC_FIRMWARE "mediatek/turner/smartpa-music.bin"
++MODULE_FIRMWARE(TURNER_MUSIC_FIRMWARE);
++
++/* boot_lock serializes the sole producer. The DSP owns the read cursor. */
++static int mt6991_adsp_send_music_config(struct device *dev)
++{
++	struct mt6991_adsp_core *a = dev_get_drvdata(dev);
++	void __iomem *desc = a->ipi_pool + ADSP_AUDIO_PLAYBACK * 0x300 + 0x80;
++	struct mbox_client client = { .dev = dev, .tx_block = true, .tx_tout = 200 };
++	struct mt6991_adsp_tx msg = { .id = ADSP_AUDIO_IPI, .len = 72 };
++	const struct firmware *fw;
++	struct mbox_chan *tx;
++	void __iomem *ring;
++	u32 write, tail, next;
++	int ret;
++
++	if (readl(desc) != ALIGN(0x8484, 128) || readl(desc + 4) != SZ_32K)
++		return -EIO;
++	write = readl(desc + 0x100);
++	if (write >= SZ_32K || !IS_ALIGNED(write, 128) || readl(desc + 0x80) != write)
++		return -EBUSY;
++	ret = request_firmware(&fw, TURNER_MUSIC_FIRMWARE, dev);
++	if (ret)
++		return ret;
++	if (fw->size != 5452 || get_unaligned_le32(fw->data) != 0x55667788 ||
++	    get_unaligned_le32(fw->data + fw->size - 4) != 0xaabbccdd) {
++		ret = -EINVAL;
++		goto release;
++	}
++	tx = mbox_request_channel(&client, 0);
++	if (IS_ERR(tx)) {
++		ret = PTR_ERR(tx);
++		goto release;
++	}
++
++	ring = a->ipi_pool + ALIGN(0x8484, 128);
++	tail = min_t(size_t, SZ_32K - write, fw->size);
++	memcpy_toio(ring + write, fw->data, tail);
++	if (tail < fw->size)
++		memcpy_toio(ring, fw->data + tail, fw->size - tail);
++	next = (write + ALIGN(fw->size, 128)) % SZ_32K;
++	wmb();
++	writel(next, desc + 0x100);
++	wmb();
++
++	put_unaligned_le16(0x8888, msg.payload);
++	msg.payload[2] = ADSP_AUDIO_PLAYBACK;
++	msg.payload[3] = 0x20;
++	msg.payload[4] = 2;
++	msg.payload[5] = 1;
++	put_unaligned_le16(0x15, msg.payload + 6);
++	put_unaligned_le32(fw->size, msg.payload + 8);
++	put_unaligned_le32(fw->size, msg.payload + 0x24);
++	put_unaligned_le32(write, msg.payload + 0x30);
++	put_unaligned_le32(fw->size, msg.payload + 0x34);
++	reinit_completion(&a->pcm_reply);
++	WRITE_ONCE(a->pending_command, 0x15);
++	ret = mbox_send_message(tx, &msg);
++	if (ret >= 0)
++		ret = wait_for_completion_timeout(&a->pcm_reply, msecs_to_jiffies(750)) ?
++			0 : -ETIMEDOUT;
++	WRITE_ONCE(a->pending_command, 0);
++	if (!ret && readl(desc + 0x80) != next)
++		ret = -EIO;
++	mbox_free_channel(tx);
++release:
++	release_firmware(fw);
++	return ret;
++}
++
+ static int mt6991_adsp_open_playback_task(struct device *dev)
+ {
+ 	int ret;
+ 
+ 	ret = mt6991_adsp_register_ipi_pool(dev);
++	if (!ret)
++		ret = mt6991_adsp_send_music_config(dev);
+ 	if (ret)
+ 		return ret;
+ 	return mt6991_adsp_pcm_command(dev, 1);

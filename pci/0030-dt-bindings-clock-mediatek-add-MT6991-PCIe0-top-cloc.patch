@@ -1,0 +1,34 @@
+From fcb60ddf9516a573a58744c71b496754f9d24cbb Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:04:02 +0800
+Subject: [PATCH] dt-bindings: clock: mediatek: add MT6991 PCIe0 top clock IDs
+
+---
+ include/dt-bindings/clock/mediatek,mt6991-clock.h | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/include/dt-bindings/clock/mediatek,mt6991-clock.h b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+index f49901c..1909ff9 100644
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -27,6 +27,17 @@
+ #define MT6991_CLK_TOP_MAINPLL_D7_D2         18
+ #define MT6991_CLK_TOP_P_AXI                 19
+ 
++#define MT6991_CLK_TOP_OSC_D4                20
++#define MT6991_CLK_TOP_MAINPLL_D5_D2         21
++#define MT6991_CLK_TOP_MAINPLL_D4_D2         22
++#define MT6991_CLK_TOP_MAINPLL_D6            23
++#define MT6991_CLK_TOP_MAINPLL_D5            24
++#define MT6991_CLK_TOP_UNIVPLL_D5            25
++#define MT6991_CLK_TOP_MAINPLL_D4            26
++#define MT6991_CLK_TOP_PEXTP0_AXI            27
++#define MT6991_CLK_TOP_PEXTP0_MEM_SUB        28
++#define MT6991_CLK_TOP_TL                    29
++
+ #define MT6991_CLK_PERI_UART0_BCLK         0
+ #define MT6991_CLK_PERI_SPI6_BCLK          1
+ 
+-- 
+2.50.1 (Apple Git-155)
+

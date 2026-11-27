@@ -1,0 +1,13 @@
+Subject: [PATCH] clk: mediatek: export the MT6991 SPI parent at firmware ID 119
+
+--- a/drivers/clk/mediatek/clk-mt8196-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+@@ -1078,6 +1078,8 @@
+ 	case 29:
+ 	case 168:
+ 		return clks->hws[MT6991_CLK_TOP_SPI6_BCLK];
++	case 119:
++		return clks->hws[MT6991_CLK_TOP_UNIVPLL_D6_D2];
+ 	case 34:
+ 		return clks->hws[MT6991_CLK_TOP_USB_TOP_1P];
+ 	case 35:

@@ -1,0 +1,58 @@
+Subject: [RFC PATCH] drm/panthor: report OPP frequencies to devfreq
+
+The MT6991 GPU clock is driven by the GPUEB firmware, which only
+approximates the frequencies of the OPP table it publishes. devfreq keeps
+its transition statistics by exact frequency lookup, so the raw clock rate
+reported by clk_get_rate() misses every level and every update warns with
+"Couldn't update frequency transition information". Snap the measured
+rate to the matching OPP when reporting it.
+
+---
+--- a/drivers/gpu/drm/panthor/panthor_devfreq.c
++++ b/drivers/gpu/drm/panthor/panthor_devfreq.c
+@@ -83,6 +83,26 @@
+ 	pdevfreq->time_last_update = ktime_get();
+ }
+ 
++/*
++ * The MT6991 GPU clock is driven by the GPUEB firmware, which only approximates
++ * the frequencies in the OPP table it publishes. devfreq keeps its transition
++ * statistics by exact frequency lookup, so report the OPP matching the measured
++ * clock instead of the raw rate.
++ */
++static unsigned long panthor_devfreq_table_freq(struct device *dev,
++						unsigned long freq)
++{
++	struct dev_pm_opp *opp;
++
++	opp = dev_pm_opp_find_freq_floor(dev, &freq);
++	if (opp == ERR_PTR(-ERANGE))
++		opp = dev_pm_opp_find_freq_ceil(dev, &freq);
++	if (!IS_ERR(opp))
++		dev_pm_opp_put(opp);
++
++	return freq;
++}
++
+ static int panthor_devfreq_get_dev_status(struct device *dev,
+ 					  struct devfreq_dev_status *status)
+ {
+@@ -90,7 +110,8 @@
+ 	struct panthor_devfreq *pdevfreq = ptdev->devfreq;
+ 	unsigned long irqflags;
+ 
+-	status->current_frequency = clk_get_rate(ptdev->clks.core);
++	status->current_frequency =
++		panthor_devfreq_table_freq(dev, clk_get_rate(ptdev->clks.core));
+ 
+ 	spin_lock_irqsave(&pdevfreq->lock, irqflags);
+ 
+@@ -117,7 +138,7 @@
+ {
+ 	struct panthor_device *ptdev = dev_get_drvdata(dev);
+ 
+-	*freq = clk_get_rate(ptdev->clks.core);
++	*freq = panthor_devfreq_table_freq(dev, clk_get_rate(ptdev->clks.core));
+ 
+ 	return 0;
+ }

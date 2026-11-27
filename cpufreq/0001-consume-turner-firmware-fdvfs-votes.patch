@@ -1,0 +1,68 @@
+--- a/drivers/cpufreq/mediatek-cpufreq-hw.c
++++ b/drivers/cpufreq/mediatek-cpufreq-hw.c
+@@ -12,6 +12,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/of_platform.h>
++#include <linux/of_address.h>
+ #include <linux/platform_device.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/slab.h>
+@@ -57,8 +58,57 @@
+ 	const u16 reg_offsets[REG_ARRAY_SIZE];
+ 	const bool is_hybrid_dvfs;
+ };
++
++/* The Turner bootloader passes the vendor DT with a separate FDVFS node.
++ * Restrict this adapter to users of that firmware ABI. Native DTs use the
++ * MT8196 binding and its normal domain register numbering.
++ */
++static bool turner_split_fdvfs;
++module_param(turner_split_fdvfs, bool, 0444);
++
++static int mtk_cpufreq_turner_init(struct mtk_cpufreq_priv *priv)
++{
++	struct device_node *np;
++	struct resource votes;
++	void __iomem *signature;
++	u32 magic;
++	int ret;
++
++	if (!turner_split_fdvfs)
++		return 0;
++	np = of_find_compatible_node(NULL, NULL, "mediatek,fdvfs");
++	if (!np)
++		return -ENODEV;
++	signature = of_iomap(np, 2);
++	if (!signature) {
++		ret = -ENXIO;
++		goto put_node;
++	}
++	magic = readl(signature);
++	iounmap(signature);
++	if (magic != 0xabcd0001) {
++		dev_info(priv->dev, "FDVFS unavailable (signature %#x)\n", magic);
++		ret = 0;
++		goto put_node;
++	}
++	ret = of_address_to_resource(np, 0, &votes);
++	if (ret)
++		goto put_node;
++	if (resource_size(&votes) < nr_cpu_ids * sizeof(u32)) {
++		ret = -EINVAL;
++		goto put_node;
++	}
++	priv->fdvfs = devm_ioremap_resource(priv->dev, &votes);
++	ret = PTR_ERR_OR_ZERO(priv->fdvfs);
++	if (!ret)
++		dev_info(priv->dev, "using firmware per-CPU FDVFS votes\n");
++put_node:
++	of_node_put(np);
++	return ret;
++}
+ 
+ static const struct mtk_cpufreq_variant cpufreq_mtk_base_variant = {
++	.init = mtk_cpufreq_turner_init,
+ 	.reg_offsets = {
+ 		[REG_FREQ_LUT_TABLE]	= 0x0,
+ 		[REG_FREQ_ENABLE]	= 0x84,

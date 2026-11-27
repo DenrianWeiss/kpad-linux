@@ -1,0 +1,62 @@
+From b50ce8c9fb694a70a1469f3a398f4b214e1a63e7 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 06:03:23 +0800
+Subject: [PATCH] arm64: dts: mediatek: connect the MT6991 DSI PHY0 and its
+ power voter
+
+---
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi | 31 ++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index ad7836a..f135668 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -190,6 +190,17 @@ clock-controller@10000800 {
+ 			#clock-cells = <1>;
+ 		};
+ 
++		dsi_phy0: dsi-phy@130b0000 {
++			compatible = "mediatek,mt6991-mipi-tx";
++			reg = <0 0x130b0000 0 0x1000>;
++			clocks = <&clk26m>;
++			clock-output-names = "mipi_tx0_pll";
++			power-domains = <&mm_hwv_pd MT6991_POWER_DOMAIN_DSI_PHY0>;
++			#clock-cells = <0>;
++			#phy-cells = <0>;
++			status = "disabled";
++		};
++
+ 		hwv: syscon@14500000 {
+ 			compatible = "mediatek,mt6991-hwv", "syscon", "simple-mfd";
+ 			reg = <0 0x14500000 0 0x3000>;
+@@ -350,6 +361,26 @@ spm_bus_prot: syscon@1c00d000 {
+ 			compatible = "mediatek,mt6991-spm-bus-protection", "syscon";
+ 			reg = <0 0x1c00d000 0 0x1000>;
+ 		};
++
++		syscon@31b00000 {
++			compatible = "mediatek,mt6991-mm-hwv", "syscon", "simple-mfd";
++			reg = <0 0x31b00000 0 0x6000>;
++
++			mm_hwv_pd: power-controller {
++				compatible = "mediatek,mt6991-hwv-hfrp-power-controller";
++				#address-cells = <1>;
++				#size-cells = <0>;
++				#power-domain-cells = <1>;
++				power-domains = <&spm_hwv MT6991_POWER_DOMAIN_MM_PROC_DORMANT>;
++				power-domains-child-ids = <MT6991_POWER_DOMAIN_DSI_PHY0>;
++				status = "disabled";
++
++				power-domain@0 {
++					reg = <MT6991_POWER_DOMAIN_DSI_PHY0>;
++					#power-domain-cells = <0>;
++				};
++			};
++		};
+ 	};
+ 
+ 	timer {
+-- 
+2.50.1 (Apple Git-155)
+

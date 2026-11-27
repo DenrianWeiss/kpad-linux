@@ -1,0 +1,11 @@
+--- a/drivers/misc/mediatek/connectivity/wlan/core/gen4m/include/config.h
++++ b/drivers/misc/mediatek/connectivity/wlan/core/gen4m/include/config.h
+@@ -2196,7 +2196,7 @@
+  *       COUNTRY_CHANNEL_TXPOWER_LIMIT_TYPE_COMP_11AC_V2
+  *------------------------------------------------------------------------------
+  */
+-#define CFG_SUPPORT_DYNA_TX_PWR_CTRL_11AC_V2_SETTING 0
++#define CFG_SUPPORT_DYNA_TX_PWR_CTRL_11AC_V2_SETTING 1
+ 
+ /*------------------------------------------------------------------------------
+  * Dynamic tx power control:

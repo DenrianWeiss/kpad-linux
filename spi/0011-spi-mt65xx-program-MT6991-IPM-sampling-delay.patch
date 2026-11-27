@@ -1,0 +1,111 @@
+From 6da90078fb7b4c80cad62bf80d88c2fa28693053 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 02:28:20 +0800
+Subject: [PATCH] spi: mt65xx: program the full MT6991 IPM sampling delay
+
+---
+ drivers/spi/spi-mt65xx.c | 39 ++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 36 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/spi/spi-mt65xx.c b/drivers/spi/spi-mt65xx.c
+index b845a59..c0e7318 100644
+--- a/drivers/spi/spi-mt65xx.c
++++ b/drivers/spi/spi-mt65xx.c
+@@ -81,6 +81,7 @@
+ #define SPI_CMD_IPM_GET_TICKDLY_OFFSET	22
+ 
+ #define SPI_CMD_IPM_GET_TICKDLY_MASK	GENMASK(24, 22)
++#define SPI_CMD_MT6991_GET_TICKDLY_MASK	GENMASK(28, 22)
+ 
+ #define PIN_MODE_CFG(x)	((x) / 2)
+ 
+@@ -119,6 +120,7 @@
+  * @enhance_timing:	Enable adjusting cfg register to enhance time accuracy
+  * @dma_ext:		DMA address extension supported
+  * @no_need_unprepare:	Don't unprepare the SPI clk during runtime
++ * @wide_tick_delay:	Seven-bit receive delay in the IPM command register
+  * @ipm_design:		Adjust/extend registers to support IPM design IP features
+  */
+ struct mtk_spi_compatible {
+@@ -128,12 +130,14 @@ struct mtk_spi_compatible {
+ 	bool dma_ext;
+ 	bool no_need_unprepare;
+ 	bool ipm_design;
++	bool wide_tick_delay;
+ };
+ 
+ /**
+  * struct mtk_spi - SPI driver instance
+  * @base:		Start address of the SPI controller registers
+  * @state:		SPI controller state
++ * @pad_tick_delay:	Optional receive delay indexed by physical pad group
+  * @pad_num:		Number of pad_sel entries
+  * @pad_sel:		Groups of pins to select
+  * @parent_clk:		Parent of sel_clk
+@@ -161,6 +165,7 @@ struct mtk_spi {
+ 	u32 state;
+ 	int pad_num;
+ 	u32 *pad_sel;
++	u32 *pad_tick_delay;
+ 	struct clk *parent_clk, *sel_clk, *spi_clk, *spi_hclk;
+ 	struct spi_transfer *cur_transfer;
+ 	u32 xfer_len;
+@@ -221,6 +226,7 @@ static const struct mtk_spi_compatible mt6893_compat = {
+ };
+ 
+ static const struct mtk_spi_compatible mt6991_compat = {
++	.wide_tick_delay = true,
+ 	.need_pad_sel = true,
+ 	.must_tx = true,
+ 	.enhance_timing = true,
+@@ -443,10 +449,16 @@ static int mtk_spi_hw_init(struct spi_controller *host,
+ 	/* tick delay */
+ 	if (mdata->dev_comp->enhance_timing) {
+ 		if (mdata->dev_comp->ipm_design) {
++			u32 delay = chip_config->tick_delay;
++			u32 mask = mdata->dev_comp->wide_tick_delay ?
++				   SPI_CMD_MT6991_GET_TICKDLY_MASK : SPI_CMD_IPM_GET_TICKDLY_MASK;
++
++			if (mdata->pad_tick_delay)
++				delay = mdata->pad_tick_delay[mdata->pad_sel[spi_get_chipselect(spi, 0)]];
++
+ 			reg_val = readl(mdata->base + SPI_CMD_REG);
+-			reg_val &= ~SPI_CMD_IPM_GET_TICKDLY_MASK;
+-			reg_val |= ((chip_config->tick_delay & 0x7)
+-				    << SPI_CMD_IPM_GET_TICKDLY_OFFSET);
++			reg_val &= ~mask;
++			reg_val |= (delay << SPI_CMD_IPM_GET_TICKDLY_OFFSET) & mask;
+ 			writel(reg_val, mdata->base + SPI_CMD_REG);
+ 		} else {
+ 			reg_val = readl(mdata->base + SPI_CFG1_REG);
+@@ -1237,6 +1249,27 @@ static int mtk_spi_probe(struct platform_device *pdev)
+ 		}
+ 	}
+ 
++	if (mdata->dev_comp->wide_tick_delay &&
++	    of_property_present(dev->of_node, "mediatek,tickdly")) {
++		int count = of_property_count_u32_elems(dev->of_node, "mediatek,tickdly");
++
++		if (count < 1 || count > MT8173_SPI_MAX_PAD_SEL + 1)
++			return dev_err_probe(dev, -EINVAL, "invalid pad delay count\n");
++		mdata->pad_tick_delay = devm_kcalloc(dev, count, sizeof(u32), GFP_KERNEL);
++		if (!mdata->pad_tick_delay)
++			return -ENOMEM;
++		ret = of_property_read_u32_array(dev->of_node, "mediatek,tickdly",
++						 mdata->pad_tick_delay, count);
++		if (ret)
++			return ret;
++		for (i = 0; i < count; i++)
++			if (mdata->pad_tick_delay[i] > 127)
++				return dev_err_probe(dev, -EINVAL, "invalid pad delay\n");
++		for (i = 0; i < mdata->pad_num; i++)
++			if (mdata->pad_sel[i] >= count)
++				return dev_err_probe(dev, -EINVAL, "missing delay for selected pad\n");
++	}
++
+ 	platform_set_drvdata(pdev, host);
+ 	mdata->base = devm_platform_ioremap_resource(pdev, 0);
+ 	if (IS_ERR(mdata->base))
+-- 
+2.50.1 (Apple Git-155)
+

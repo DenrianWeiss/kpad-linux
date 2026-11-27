@@ -1,0 +1,28 @@
+--- a/drivers/tty/serial/8250/8250_mtk.c
++++ b/drivers/tty/serial/8250/8250_mtk.c
+@@ -7,6 +7,7 @@
+  */
+ #include <linux/clk.h>
+ #include <linux/io.h>
++#include <linux/math64.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/of_irq.h>
+@@ -367,7 +368,7 @@
+ 		quot = uart_get_divisor(port, baud);
+ 	} else {
+ 		serial_port_out(port, MTK_UART_HIGHS, 0x3);
+-		quot = DIV_ROUND_UP(port->uartclk, 256 * baud);
++		quot = DIV64_U64_ROUND_UP(port->uartclk, 256ULL * baud);
+ 	}
+ 
+ 	/*
+@@ -397,7 +398,7 @@
+ 					(tmp >> 1) - 1);
+ 
+ 		/*count fraction to set fractoin register */
+-		fraction = ((port->uartclk  * 100) / baud / quot) % 100;
++		fraction = (div_u64((u64)port->uartclk * 100, baud) / quot) % 100;
+ 		fraction = DIV_ROUND_CLOSEST(fraction, 10);
+ 		serial_port_out(port, MTK_UART_FRACDIV_L,
+ 						fraction_L_mapping[fraction]);

@@ -1,0 +1,8 @@
+turner.patch
+turner-txpower-v2.patch
+station-mgmt-filter.patch
+uart-hub.patch
+uart-receiver.patch
+uart-command-write.patch
+mt6653-linux-hci-rx.patch
+managed-power.patch

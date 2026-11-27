@@ -1,0 +1,148 @@
+Subject: [PATCH] clk: mediatek: translate MT6991 firmware MMSYS1 clock specifiers
+
+--- a/drivers/clk/mediatek/clk-mtk.h
++++ b/drivers/clk/mediatek/clk-mtk.h
+@@ -263,6 +263,8 @@
+ };
+ 
+ int mtk_clk_pdev_probe(struct platform_device *pdev);
++int mtk_clk_pdev_probe_with_get(struct platform_device *pdev,
++				struct clk_hw *(*get)(struct of_phandle_args *, void *));
+ void mtk_clk_pdev_remove(struct platform_device *pdev);
+ int mtk_clk_simple_probe(struct platform_device *pdev);
+ void mtk_clk_simple_remove(struct platform_device *pdev);
+--- a/drivers/clk/mediatek/clk-mtk.c
++++ b/drivers/clk/mediatek/clk-mtk.c
+@@ -465,7 +465,8 @@
+ EXPORT_SYMBOL_GPL(mtk_clk_unregister_dividers);
+ 
+ static int __mtk_clk_simple_probe(struct platform_device *pdev,
+-				  struct device_node *node)
++				  struct device_node *node,
++				  struct clk_hw *(*get)(struct of_phandle_args *, void *))
+ {
+ 	const struct platform_device_id *id;
+ 	const struct mtk_clk_desc *mcd;
+@@ -576,7 +577,7 @@
+ 			goto unregister_clks;
+ 	}
+ 
+-	r = of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
++	r = of_clk_add_hw_provider(node, get, clk_data);
+ 	if (r)
+ 		goto unregister_clks;
+ 
+@@ -655,12 +656,19 @@
+ 	mtk_free_clk_data(clk_data);
+ }
+ 
++int mtk_clk_pdev_probe_with_get(struct platform_device *pdev,
++				struct clk_hw *(*get)(struct of_phandle_args *, void *))
++{
++	return __mtk_clk_simple_probe(pdev, pdev->dev.parent->of_node, get);
++}
++EXPORT_SYMBOL_GPL(mtk_clk_pdev_probe_with_get);
++
+ int mtk_clk_pdev_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct device_node *node = dev->parent->of_node;
+ 
+-	return __mtk_clk_simple_probe(pdev, node);
++	return __mtk_clk_simple_probe(pdev, node, of_clk_hw_onecell_get);
+ }
+ EXPORT_SYMBOL_GPL(mtk_clk_pdev_probe);
+ 
+@@ -668,7 +676,7 @@
+ {
+ 	struct device_node *node = pdev->dev.of_node;
+ 
+-	return __mtk_clk_simple_probe(pdev, node);
++	return __mtk_clk_simple_probe(pdev, node, of_clk_hw_onecell_get);
+ }
+ EXPORT_SYMBOL_GPL(mtk_clk_simple_probe);
+ 
+@@ -693,6 +701,8 @@
+ 	struct regmap *regmap_hwv;
+ 
+ 	hwv_node = of_parse_phandle(node, "mediatek,hardware-voter", 0);
++	if (!hwv_node && of_device_is_compatible(node, "mediatek,mt6991-mmsys1"))
++		hwv_node = of_parse_phandle(node, "mm-hw-ccf-regmap", 0);
+ 	if (!hwv_node)
+ 		return NULL;
+ 
+--- a/drivers/clk/mediatek/clk-mt8196-disp1.c
++++ b/drivers/clk/mediatek/clk-mt8196-disp1.c
+@@ -9,6 +9,7 @@
+ #include <dt-bindings/clock/mediatek,mt8196-clock.h>
+ 
+ #include <linux/clk-provider.h>
++#include <linux/of.h>
+ #include <linux/module.h>
+ #include <linux/of_device.h>
+ #include <linux/platform_device.h>
+@@ -158,7 +159,37 @@
+ 	GATE_HWV_MM11(MT6991_CLK_MM1_DSI1_DIGITAL, "mm1_dsi1_digital", "clk26m", 14),
+ };
+ 
++/* Firmware assigns adjacent IDs to each gate and its display-client alias. */
++static struct clk_hw *mt6991_mm1_get(struct of_phandle_args *spec, void *data)
++{
++	struct clk_hw_onecell_data *clks = data;
++	unsigned int id;
++
++	if (of_property_present(spec->np, "mediatek,hardware-voter"))
++		return of_clk_hw_onecell_get(spec, data);
++	if (spec->args_count != 1)
++		return ERR_PTR(-EINVAL);
++	switch (spec->args[0] & ~1U) {
++	case 4:
++		id = MT6991_CLK_MM1_MUTEX;
++		break;
++	case 36: case 38: case 40: case 42:
++		id = MT6991_CLK_MM1_DSC_WRAP0 + (spec->args[0] - 36) / 2;
++		break;
++	case 44: case 46:
++		id = MT6991_CLK_MM1_DSI0_ENGINE + (spec->args[0] - 44) / 2;
++		break;
++	case 90: case 92:
++		id = MT6991_CLK_MM1_DSI0_DIGITAL + (spec->args[0] - 90) / 2;
++		break;
++	default:
++		return ERR_PTR(-ENOENT);
++	}
++	return clks->hws[id];
++}
++
+ static const struct mtk_clk_desc mt6991_mm1_desc = {
++	.need_runtime_pm = true,
+ 	.clks = mt6991_mm1_clks,
+ 	.num_clks = ARRAY_SIZE(mt6991_mm1_clks),
+ };
+@@ -175,8 +206,25 @@
+ };
+ MODULE_DEVICE_TABLE(platform, clk_mt8196_disp1_id_table);
+ 
++static int clk_disp1_probe(struct platform_device *pdev)
++{
++	struct device *parent = pdev->dev.parent;
++
++	if (!of_device_is_compatible(parent->of_node, "mediatek,mt6991-mmsys1"))
++		return mtk_clk_pdev_probe(pdev);
++
++	/* Local gate status registers live in DIS1. Firmware DTs may
++	 * describe the voter alone, without attaching the power domain.
++	 */
++	if (of_property_present(parent->of_node, "mm-hw-ccf-regmap") &&
++	    !parent->pm_domain)
++		return dev_err_probe(&pdev->dev, -EPROBE_DEFER,
++				     "waiting for DIS1 power domain\n");
++	return mtk_clk_pdev_probe_with_get(pdev, mt6991_mm1_get);
++}
++
+ static struct platform_driver clk_mt8196_disp1_drv = {
+-	.probe = mtk_clk_pdev_probe,
++	.probe = clk_disp1_probe,
+ 	.remove = mtk_clk_pdev_remove,
+ 	.driver = {
+ 		.name = "clk-mt8196-disp1",

@@ -1,0 +1,13 @@
+Subject: [PATCH] drm/panel: report Turner native panel dimensions
+
+--- a/drivers/gpu/drm/panel/panel-turner-csot.c
++++ b/drivers/gpu/drm/panel/panel-turner-csot.c
+@@ -448,6 +448,8 @@
+ 	mode = drm_mode_duplicate(connector->dev, &turner_modes[0]);
+ 	if (!mode)
+ 		return -ENOMEM;
++	connector->display_info.width_mm = 118;
++	connector->display_info.height_mm = 189;
+ 	drm_mode_set_name(mode);
+ 	drm_mode_probed_add(connector, mode);
+ 	return 1;

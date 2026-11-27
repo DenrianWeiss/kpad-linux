@@ -1,0 +1,91 @@
+From b5ced99792154338d9289b10ed7800c33b679a0f Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 07:10:53 +0800
+Subject: [PATCH 64/65] clk: mediatek: register MT6991 VLP USB clocks and their
+ PLL divider
+
+---
+ drivers/clk/mediatek/clk-mt8196-topckgen.c |  1 +
+ drivers/clk/mediatek/clk-mt8196-vlpckgen.c | 26 ++++++++++++++++++++++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-topckgen.c b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+index 0de170c..ede17cf 100644
+--- a/drivers/clk/mediatek/clk-mt8196-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+@@ -958,6 +958,7 @@ static const struct mtk_composite top_aud_divs[] = {
+ };
+ 
+ static const struct mtk_fixed_factor mt6991_divs[] = {
++	FACTOR(MT6991_CLK_TOP_MAINPLL_D9, "mainpll_d9", "mainpll", 1, 9),
+ 	FACTOR(MT6991_CLK_TOP_OSC_D4, "osc_d4", "ulposc", 1, 4),
+ 	FACTOR(MT6991_CLK_TOP_MAINPLL_D5_D2, "mainpll_d5_d2", "mainpll", 1, 10),
+ 	FACTOR(MT6991_CLK_TOP_MAINPLL_D4_D2, "mainpll_d4_d2", "mainpll", 1, 8),
+diff --git a/drivers/clk/mediatek/clk-mt8196-vlpckgen.c b/drivers/clk/mediatek/clk-mt8196-vlpckgen.c
+index ee88dc4..9656ebe 100644
+--- a/drivers/clk/mediatek/clk-mt8196-vlpckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-vlpckgen.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2025 Collabora Ltd.
+  *                    Laura Nao <laura.nao@collabora.com>
+  */
++#include <dt-bindings/clock/mediatek,mt6991-clock.h>
+ #include <dt-bindings/clock/mediatek,mt8196-clock.h>
+ 
+ #include <linux/clk.h>
+@@ -631,6 +632,22 @@ static const struct regmap_config vlpckgen_regmap_config = {
+ 	.max_register = 0x1000,
+ };
+ 
++static const struct mtk_mux mt6991_vlp_muxes[] = {
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_VLP_USB_TOP, "vlp_usb", vlp_usb_parents,
++		VLP_CLK_CFG_8, VLP_CLK_CFG_8_SET, VLP_CLK_CFG_8_CLR,
++		8, 1, 15, VLP_CLK_CFG_UPDATE1, TOP_MUX_USB_TOP_SHIFT,
++		VLP_OCIC_FENC_STATUS_MON_1, 30),
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_VLP_USB_XHCI, "vlp_usb_xhci", vlp_usb_parents,
++		VLP_CLK_CFG_8, VLP_CLK_CFG_8_SET, VLP_CLK_CFG_8_CLR,
++		16, 1, 23, VLP_CLK_CFG_UPDATE1, TOP_MUX_SSUSB_XHCI_SHIFT,
++		VLP_OCIC_FENC_STATUS_MON_1, 29),
++};
++
++static const struct mtk_clk_desc mt6991_vlp_desc = {
++	.mux_clks = mt6991_vlp_muxes,
++	.num_mux_clks = ARRAY_SIZE(mt6991_vlp_muxes),
++};
++
+ static int clk_mt8196_vlp_probe(struct platform_device *pdev)
+ {
+ 	static void __iomem *base;
+@@ -640,6 +657,9 @@ static int clk_mt8196_vlp_probe(struct platform_device *pdev)
+ 	struct device *dev = &pdev->dev;
+ 	struct regmap *regmap;
+ 
++	if (device_get_match_data(dev))
++		return mtk_clk_simple_probe(pdev);
++
+ 	clk_data = mtk_alloc_clk_data(ARRAY_SIZE(vlp_muxes) +
+ 				      ARRAY_SIZE(vlp_plls) +
+ 				      ARRAY_SIZE(vlp_divs));
+@@ -697,6 +717,11 @@ static void clk_mt8196_vlp_remove(struct platform_device *pdev)
+ 	struct clk_hw_onecell_data *clk_data = platform_get_drvdata(pdev);
+ 	struct device_node *node = pdev->dev.of_node;
+ 
++	if (device_get_match_data(&pdev->dev)) {
++		mtk_clk_simple_remove(pdev);
++		return;
++	}
++
+ 	of_clk_del_provider(node);
+ 	mtk_clk_unregister_plls(vlp_plls, ARRAY_SIZE(vlp_plls), clk_data);
+ 	mtk_clk_unregister_muxes(vlp_muxes, ARRAY_SIZE(vlp_muxes), clk_data);
+@@ -705,6 +730,7 @@ static void clk_mt8196_vlp_remove(struct platform_device *pdev)
+ }
+ 
+ static const struct of_device_id of_match_clk_mt8196_vlp_ck[] = {
++	{ .compatible = "mediatek,mt6991-vlpckgen", .data = &mt6991_vlp_desc },
+ 	{ .compatible = "mediatek,mt8196-vlpckgen" },
+ 	{ /* sentinel */ }
+ };
+-- 
+2.50.1 (Apple Git-155)
+

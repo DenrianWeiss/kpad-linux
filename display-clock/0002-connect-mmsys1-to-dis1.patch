@@ -1,0 +1,12 @@
+Subject: [PATCH] arm64: dts: mediatek: attach MT6991 MMSYS1 to DIS1
+
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -587,6 +587,7 @@
+ 		mmsys1: syscon@32400000 {
+ 			compatible = "mediatek,mt6991-mmsys1", "syscon";
+ 			reg = <0 0x32400000 0 0x1000>;
++			power-domains = <&mm_hwv_pd MT6991_POWER_DOMAIN_DIS1_DORMANT>;
+ 			mediatek,hardware-voter = <&mm_hwv>;
+ 			#clock-cells = <1>;
+ 			status = "disabled";

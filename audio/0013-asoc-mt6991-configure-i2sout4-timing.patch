@@ -1,0 +1,121 @@
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -21,6 +21,25 @@
+ 
+ #define MT6991_AUDIO_PWR_CON	0xe4c
+ #define MT6991_AUDIO_PWR_ACK	GENMASK(31, 30)
++
++#define ETDM_OUT4_CON0		0x1580
++#define ETDM_OUT4_CON1		0x1584
++#define ETDM_OUT4_CON2		0x1588
++#define ETDM_OUT4_CON4		0x1590
++#define OUT_SYNC		BIT(1)
++#define OUT_SLAVE		BIT(5)
++#define OUT_FMT			GENMASK(8, 6)
++#define OUT_BITS		GENMASK(15, 11)
++#define OUT_WORD		GENMASK(20, 16)
++#define OUT_CHANNELS		GENMASK(27, 23)
++#define OUT_RELATCH_DOMAIN	GENMASK(30, 28)
++#define OUT_INITIAL_COUNT	GENMASK(4, 0)
++#define OUT_INITIAL_POINT	GENMASK(9, 5)
++#define OUT_LRCK_RESET		BIT(15)
++#define OUT_IN2LATCH		GENMASK(4, 0)
++#define OUT_FS_TIMING		GENMASK(4, 0)
++#define OUT_CLK_SOURCE		GENMASK(8, 6)
++#define OUT_RELATCH_RATE	GENMASK(28, 24)
+ 
+ #define AFE_CONN116_1		0x2f04
+ #define AFE_CONN117_1		0x2f24
+@@ -297,13 +316,67 @@
+ 	.trigger = mt6991_dl0_trigger,
+ };
+ 
+-static struct snd_soc_dai_driver dl0_dai = {
+-	.name = "DL0",
+-	.playback = {
+-		.stream_name = "DL0", .channels_min = 2, .channels_max = 2,
+-		.rates = SNDRV_PCM_RATE_48000, .formats = DL0_FORMATS,
++/* Turner uses asynchronous master I2S with two 32-bit slots. */
++static int mt6991_i2sout4_params(struct snd_pcm_substream *s,
++				 struct snd_pcm_hw_params *params,
++				 struct snd_soc_dai *dai)
++{
++	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
++	struct regmap *map = afe->common.regmap;
++	int ret;
++
++	if (params_rate(params) != 48000 || params_channels(params) != 2 ||
++	    params_format(params) != SNDRV_PCM_FORMAT_S32_LE)
++		return -EINVAL;
++
++	ret = regmap_update_bits(map, ETDM_OUT4_CON0,
++				 OUT_SYNC | OUT_SLAVE | OUT_FMT | OUT_BITS |
++				 OUT_WORD | OUT_CHANNELS | OUT_RELATCH_DOMAIN,
++				 FIELD_PREP(OUT_BITS, 31) | FIELD_PREP(OUT_WORD, 31) |
++				 FIELD_PREP(OUT_CHANNELS, 1) |
++				 FIELD_PREP(OUT_RELATCH_DOMAIN, 1));
++	if (ret)
++		return ret;
++
++	ret = regmap_update_bits(map, ETDM_OUT4_CON1,
++				 OUT_INITIAL_COUNT | OUT_INITIAL_POINT | OUT_LRCK_RESET,
++				 FIELD_PREP(OUT_INITIAL_COUNT, 5) |
++				 FIELD_PREP(OUT_INITIAL_POINT, 6) | OUT_LRCK_RESET);
++	if (ret)
++		return ret;
++
++	ret = regmap_update_bits(map, ETDM_OUT4_CON2, OUT_IN2LATCH,
++				 FIELD_PREP(OUT_IN2LATCH, 6));
++	if (ret)
++		return ret;
++
++	return regmap_update_bits(map, ETDM_OUT4_CON4,
++				  OUT_FS_TIMING | OUT_CLK_SOURCE | OUT_RELATCH_RATE,
++				  FIELD_PREP(OUT_FS_TIMING, 5) |
++				  FIELD_PREP(OUT_CLK_SOURCE, 1) |
++				  FIELD_PREP(OUT_RELATCH_RATE, 10));
++}
++
++static const struct snd_soc_dai_ops i2sout4_ops = {
++	.hw_params = mt6991_i2sout4_params,
++};
++
++static struct snd_soc_dai_driver mt6991_dais[] = {
++	{
++		.id = 0, .name = "DL0",
++		.playback = {
++			.stream_name = "DL0", .channels_min = 2, .channels_max = 2,
++			.rates = SNDRV_PCM_RATE_48000, .formats = DL0_FORMATS,
++		},
++		.ops = &dl0_ops,
++	}, {
++		.id = 1, .name = "I2SOUT4",
++		.playback = {
++			.stream_name = "I2SOUT4", .channels_min = 2, .channels_max = 2,
++			.rates = SNDRV_PCM_RATE_48000, .formats = SNDRV_PCM_FMTBIT_S32_LE,
++		},
++		.ops = &i2sout4_ops,
+ 	},
+-	.ops = &dl0_ops,
+ };
+ 
+ static int mt6991_dl0_sync_stop(struct snd_soc_component *component,
+@@ -327,6 +400,8 @@
+ static const struct snd_soc_dapm_route mt6991_output_routes[] = {
+ 	{ "I2SOUT4_CH1", NULL, "DL0" },
+ 	{ "I2SOUT4_CH2", NULL, "DL0" },
++	{ "I2SOUT4", NULL, "I2SOUT4_CH1" },
++	{ "I2SOUT4", NULL, "I2SOUT4_CH2" },
+ };
+ 
+ static const struct snd_soc_component_driver dl0_component = {
+@@ -414,7 +489,8 @@
+ 	if (ret < 0)
+ 		dev_warn(dev, "AFE remains active after probe: %d\n", ret);
+ 
+-	ret = snd_soc_register_component(dev, &dl0_component, &dl0_dai, 1);
++	ret = snd_soc_register_component(dev, &dl0_component, mt6991_dais,
++					 ARRAY_SIZE(mt6991_dais));
+ 	if (ret) {
+ 		pm_runtime_disable(dev);
+ 		if (!pm_runtime_status_suspended(dev)) {

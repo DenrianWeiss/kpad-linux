@@ -1,0 +1,44 @@
+From 1770629f21f764cc6ce76128cfe0b663a7bea411 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 10:05:44 +0800
+Subject: [PATCH 93/94] dt-bindings: clock: mediatek: define the MT6991 overlay
+ DMA clocks
+
+---
+ .../dt-bindings/clock/mediatek,mt6991-clock.h | 20 +++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/include/dt-bindings/clock/mediatek,mt6991-clock.h b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+index b608de383..27437fa90 100644
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -66,6 +66,26 @@
+ #define MT6991_CLK_MM1_DSC_WRAP3           8
+ #define MT6991_CLK_MM0_MUTEX               0
+ #define MT6991_CLK_OVL0_MUTEX              0
++#define MT6991_CLK_OVL0_EXDMA0             1
++#define MT6991_CLK_OVL0_EXDMA1             2
++#define MT6991_CLK_OVL0_EXDMA2             3
++#define MT6991_CLK_OVL0_EXDMA3             4
++#define MT6991_CLK_OVL0_EXDMA4             5
++#define MT6991_CLK_OVL0_EXDMA5             6
++#define MT6991_CLK_OVL0_EXDMA6             7
++#define MT6991_CLK_OVL0_EXDMA7             8
++#define MT6991_CLK_OVL0_EXDMA8             9
++#define MT6991_CLK_OVL0_EXDMA9             10
+ #define MT6991_CLK_OVL1_MUTEX              0
++#define MT6991_CLK_OVL1_EXDMA0             1
++#define MT6991_CLK_OVL1_EXDMA1             2
++#define MT6991_CLK_OVL1_EXDMA2             3
++#define MT6991_CLK_OVL1_EXDMA3             4
++#define MT6991_CLK_OVL1_EXDMA4             5
++#define MT6991_CLK_OVL1_EXDMA5             6
++#define MT6991_CLK_OVL1_EXDMA6             7
++#define MT6991_CLK_OVL1_EXDMA7             8
++#define MT6991_CLK_OVL1_EXDMA8             9
++#define MT6991_CLK_OVL1_EXDMA9             10
+ 
+ #endif
+-- 
+2.50.1 (Apple Git-155)
+

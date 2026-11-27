@@ -1,0 +1,772 @@
+From: Turner Linux Port <turner@localhost>
+Subject: [RFC PATCH] input: touchscreen: build the Turner NT36536E capture driver
+
+Provide the experimental SPI frame capture backend used by the Turner
+touch and pen processor. Keep firmware loading opt-in for warm handoff.
+The debugfs interface is for bring-up while the digitizer report protocol
+is being validated.
+
+---
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -1414,4 +1414,16 @@
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called himax_hx83112b.
+ 
++config TOUCHSCREEN_NT36536E_CAPTURE
++	tristate "Novatek NT36536E frame capture on Xiaomi Turner"
++	depends on SPI && DEBUG_FS
++	select FW_LOADER
++	select CRYPTO_LIB_SHA256
++	help
++	  Capture SPI frames from the Turner CSOT digitizer for userspace
++	  touch and pen processing. The driver exposes a debugfs stream,
++	  and optionally loads the production SRAM firmware at probe.
++
++	  To compile as a module, choose M. The module is turner-touch-frame.
++
+ endif
+diff --git a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -119,3 +119,4 @@
+ obj-$(CONFIG_TOUCHSCREEN_IQS7211)	+= iqs7211.o
+ obj-$(CONFIG_TOUCHSCREEN_ZINITIX)	+= zinitix.o
+ obj-$(CONFIG_TOUCHSCREEN_HIMAX_HX83112B)	+= himax_hx83112b.o
++obj-$(CONFIG_TOUCHSCREEN_NT36536E_CAPTURE) += nt36536e/
+diff --git a/drivers/input/touchscreen/nt36536e/Makefile b/drivers/input/touchscreen/nt36536e/Makefile
+new file mode 100644
+--- /dev/null
++++ b/drivers/input/touchscreen/nt36536e/Makefile
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0-only
++obj-$(CONFIG_TOUCHSCREEN_NT36536E_CAPTURE) += turner-touch-frame.o
++turner-touch-frame-y := capture.o nt36536-fw.o
+diff --git a/drivers/input/touchscreen/nt36536e/capture.c b/drivers/input/touchscreen/nt36536e/capture.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/input/touchscreen/nt36536e/capture.c
+@@ -0,0 +1,459 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Capture the NT36536E event window, optionally loading CSOT firmware at probe. */
++#include <linux/completion.h>
++#include <linux/debugfs.h>
++#include <linux/interrupt.h>
++#include <linux/mutex.h>
++#include <linux/kfifo.h>
++#include <linux/kref.h>
++#include <linux/wait.h>
++#include <linux/timekeeping.h>
++#include <linux/unaligned.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/slab.h>
++#include <linux/spi/spi.h>
++#include <linux/uaccess.h>
++
++#include "nt36536-fw.h"
++
++static bool load_firmware;
++module_param(load_firmware, bool, 0444);
++MODULE_PARM_DESC(load_firmware, "Load the Turner CSOT SRAM firmware before capture");
++
++#define PIPELINE_BYTES		2
++#define CONTROLLER_BYTES	256
++#define MAX_PAYLOAD		7934
++
++/* The stock module's fallback is used until the running firmware reports its size. */
++static unsigned int payload_bytes = MAX_PAYLOAD;
++module_param(payload_bytes, uint, 0444);
++MODULE_PARM_DESC(payload_bytes, "Firmware event payload length, excluding controller and pipeline bytes");
++
++static unsigned int burst_frames = 16;
++module_param(burst_frames, uint, 0444);
++MODULE_PARM_DESC(burst_frames, "Number of IRQ-triggered transfers per burst (1..256)");
++
++struct frame_device {
++	struct spi_device *spi;
++	struct mutex lock;
++	struct dentry *frame, *burst, *stream_file;
++	struct frame_stream *active;
++	struct kref ref;
++	bool removing;
++};
++
++struct capture {
++	size_t size;
++	u8 bytes[];
++};
++
++struct transfer_state {
++	struct frame_device *dev;
++	struct capture *capture;
++	u8 *tx, *rx;
++	size_t len;
++	struct completion done;
++	unsigned int frames;
++	int error;
++	u64 timestamp;
++};
++
++static int read_event(struct transfer_state *state)
++{
++	struct spi_transfer xfer = {
++		.len = state->len,
++		.bits_per_word = 8,
++		.tx_buf = state->tx,
++		.rx_buf = state->rx,
++	};
++	struct spi_message msg;
++	int ret;
++
++	spi_message_init_with_transfers(&msg, &xfer, 1);
++	ret = spi_sync(state->dev->spi, &msg);
++	if (!ret && msg.actual_length != state->len)
++		ret = -EIO;
++	return ret;
++}
++
++static irqreturn_t burst_irq(int irq, void *data)
++{
++	struct transfer_state *state = data;
++
++	state->timestamp = ktime_get_ns();
++	return IRQ_WAKE_THREAD;
++}
++
++static irqreturn_t burst_thread(int irq, void *data)
++{
++	struct transfer_state *state = data;
++	u8 *record;
++
++	if (state->frames == burst_frames || state->error)
++		return IRQ_HANDLED;
++	state->error = read_event(state);
++	if (!state->error) {
++		record = state->capture->bytes + 16 + state->frames * (8 + state->len);
++		put_unaligned_le64(state->timestamp, record);
++		memcpy(record + 8, state->rx, state->len);
++		state->frames++;
++	}
++	if (state->error || state->frames == burst_frames)
++		complete(&state->done);
++	return IRQ_HANDLED;
++}
++
++static int capture_burst(struct transfer_state *state)
++{
++	int irq = state->dev->spi->irq;
++	u8 *header = state->capture->bytes;
++	long waited;
++	int ret;
++
++	memcpy(header, "NVTBUR01", 8);
++	put_unaligned_le32(state->len, header + 8);
++	put_unaligned_le32(burst_frames, header + 12);
++	init_completion(&state->done);
++	ret = request_threaded_irq(irq, burst_irq, burst_thread, IRQF_ONESHOT,
++				   "turner-touch-burst", state);
++	if (ret)
++		return ret;
++	waited = wait_for_completion_interruptible_timeout(&state->done, 10 * HZ);
++	free_irq(irq, state);
++	if (waited < 0)
++		return waited;
++	return waited ? state->error : -ETIMEDOUT;
++}
++
++static int open_capture(struct inode *inode, struct file *file, bool burst)
++{
++	struct frame_device *dev = inode->i_private;
++	struct transfer_state state = {
++		.dev = dev,
++		.len = PIPELINE_BYTES + CONTROLLER_BYTES + payload_bytes,
++	};
++	size_t size = burst ? 16 + burst_frames * (8 + state.len) : state.len;
++	int ret = -ENOMEM;
++
++	if (!mutex_trylock(&dev->lock))
++		return -EBUSY;
++	if (dev->active || dev->removing) {
++		ret = dev->removing ? -ENODEV : -EBUSY;
++		goto out;
++	}
++	state.capture = kvmalloc(sizeof(*state.capture) + size, GFP_KERNEL);
++	state.tx = kzalloc(state.len, GFP_KERNEL);
++	state.rx = kmalloc(state.len, GFP_KERNEL);
++	if (!state.capture || !state.tx || !state.rx)
++		goto out;
++	state.capture->size = size;
++	if (burst) {
++		ret = capture_burst(&state);
++	} else {
++		ret = read_event(&state);
++		if (!ret)
++			memcpy(state.capture->bytes, state.rx, state.len);
++	}
++	if (!ret) {
++		file->private_data = state.capture;
++		state.capture = NULL;
++	}
++out:
++	kvfree(state.capture);
++	kfree(state.tx);
++	kfree(state.rx);
++	mutex_unlock(&dev->lock);
++	return ret;
++}
++
++static int frame_open(struct inode *inode, struct file *file)
++{
++	return open_capture(inode, file, false);
++}
++
++static int burst_open(struct inode *inode, struct file *file)
++{
++	return open_capture(inode, file, true);
++}
++
++static ssize_t frame_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
++{
++	struct capture *capture = file->private_data;
++
++	return simple_read_from_buffer(buf, count, pos, capture->bytes, capture->size);
++}
++
++static int frame_release(struct inode *inode, struct file *file)
++{
++	kvfree(file->private_data);
++	return 0;
++}
++
++static const struct file_operations frame_fops = {
++	.owner = THIS_MODULE,
++	.open = frame_open,
++	.read = frame_read,
++	.release = frame_release,
++};
++
++static const struct file_operations burst_fops = {
++	.owner = THIS_MODULE,
++	.open = burst_open,
++	.read = frame_read,
++	.release = frame_release,
++};
++
++/* Each queued record is a standalone one-frame NVTBUR01 capture. */
++struct frame_stream {
++	struct transfer_state xfer;
++	struct kfifo fifo;
++	wait_queue_head_t wait;
++	struct mutex reader;
++	int error;
++};
++
++static void drop_device(struct kref *ref)
++{
++	kfree(container_of(ref, struct frame_device, ref));
++}
++
++static irqreturn_t stream_irq(int irq, void *data)
++{
++	struct frame_stream *stream = data;
++
++	stream->xfer.timestamp = ktime_get_ns();
++	return IRQ_WAKE_THREAD;
++}
++
++static irqreturn_t stream_thread(int irq, void *data)
++{
++	struct frame_stream *stream = data;
++	struct transfer_state *xfer = &stream->xfer;
++	u8 header[24] = "NVTBUR01";
++	int ret;
++
++	if (READ_ONCE(stream->error))
++		return IRQ_HANDLED;
++	if (kfifo_avail(&stream->fifo) < sizeof(header) + xfer->len) {
++		ret = -EOVERFLOW;
++	} else {
++		ret = read_event(xfer);
++		if (!ret) {
++			put_unaligned_le32(xfer->len, header + 8);
++			put_unaligned_le32(1, header + 12);
++			put_unaligned_le64(xfer->timestamp, header + 16);
++			kfifo_in(&stream->fifo, header, sizeof(header));
++			kfifo_in(&stream->fifo, xfer->rx, xfer->len);
++		}
++	}
++	if (ret)
++		WRITE_ONCE(stream->error, ret);
++	wake_up_interruptible(&stream->wait);
++	return IRQ_HANDLED;
++}
++
++static void free_stream(struct frame_stream *stream)
++{
++	kfree(stream->xfer.rx);
++	kfree(stream->xfer.tx);
++	kfifo_free(&stream->fifo);
++	kfree(stream);
++}
++
++static int capture_stream_open(struct inode *inode, struct file *file)
++{
++	struct frame_device *dev = inode->i_private;
++	struct frame_stream *stream;
++	size_t len = PIPELINE_BYTES + CONTROLLER_BYTES + payload_bytes;
++	int ret;
++
++	if (!mutex_trylock(&dev->lock))
++		return -EBUSY;
++	if (dev->removing || dev->active) {
++		ret = dev->removing ? -ENODEV : -EBUSY;
++		goto unlock;
++	}
++	stream = kzalloc(sizeof(*stream), GFP_KERNEL);
++	if (!stream) {
++		ret = -ENOMEM;
++		goto unlock;
++	}
++	stream->xfer.dev = dev;
++	stream->xfer.len = len;
++	init_waitqueue_head(&stream->wait);
++	mutex_init(&stream->reader);
++	ret = kfifo_alloc(&stream->fifo, 8 * (24 + len), GFP_KERNEL);
++	if (ret)
++		goto free;
++	stream->xfer.tx = kzalloc(len, GFP_KERNEL);
++	stream->xfer.rx = kmalloc(len, GFP_KERNEL);
++	if (!stream->xfer.tx || !stream->xfer.rx) {
++		ret = -ENOMEM;
++		goto free;
++	}
++	ret = request_threaded_irq(dev->spi->irq, stream_irq, stream_thread,
++				   IRQF_ONESHOT, "turner-touch-stream", stream);
++	if (ret)
++		goto free;
++	kref_get(&dev->ref);
++	dev->active = stream;
++	file->private_data = stream;
++	ret = stream_open(inode, file);
++	goto unlock;
++free:
++	free_stream(stream);
++unlock:
++	mutex_unlock(&dev->lock);
++	return ret;
++}
++
++static ssize_t stream_read(struct file *file, char __user *buf, size_t size, loff_t *pos)
++{
++	struct frame_stream *stream = file->private_data;
++	unsigned int copied;
++	int ret;
++
++	if (!size)
++		return 0;
++	ret = mutex_lock_interruptible(&stream->reader);
++	if (ret)
++		return ret;
++	if (kfifo_is_empty(&stream->fifo) && !READ_ONCE(stream->error) &&
++	    (file->f_flags & O_NONBLOCK)) {
++		ret = -EAGAIN;
++		goto out;
++	}
++	ret = wait_event_interruptible(stream->wait,
++			!kfifo_is_empty(&stream->fifo) || READ_ONCE(stream->error));
++	if (ret)
++		goto out;
++	if (kfifo_is_empty(&stream->fifo)) {
++		ret = READ_ONCE(stream->error);
++		goto out;
++	}
++	ret = kfifo_to_user(&stream->fifo, buf, size, &copied);
++	if (copied)
++		ret = copied;
++out:
++	mutex_unlock(&stream->reader);
++	return ret;
++}
++
++static void stop_stream(struct frame_device *dev)
++{
++	struct frame_stream *stream = dev->active;
++
++	if (stream) {
++		free_irq(dev->spi->irq, stream);
++		WRITE_ONCE(stream->error, -ENODEV);
++		wake_up_interruptible(&stream->wait);
++		dev->active = NULL;
++	}
++}
++
++static int stream_release(struct inode *inode, struct file *file)
++{
++	struct frame_stream *stream = file->private_data;
++	struct frame_device *dev = stream->xfer.dev;
++
++	mutex_lock(&dev->lock);
++	if (dev->active == stream)
++		stop_stream(dev);
++	mutex_unlock(&dev->lock);
++	free_stream(stream);
++	kref_put(&dev->ref, drop_device);
++	return 0;
++}
++
++static const struct file_operations stream_fops = {
++	.owner = THIS_MODULE,
++	.open = capture_stream_open,
++	.read = stream_read,
++	.release = stream_release,
++};
++
++static int turner_frame_probe(struct spi_device *spi)
++{
++	struct frame_device *dev;
++
++	if (!payload_bytes || payload_bytes > MAX_PAYLOAD || !burst_frames || burst_frames > 256)
++		return -EINVAL;
++	if (load_firmware) {
++		int ret = nt36536_load_turner_firmware(spi);
++
++		if (ret)
++			return dev_err_probe(&spi->dev, ret, "CSOT SRAM download failed\n");
++	}
++	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
++	if (!dev)
++		return -ENOMEM;
++	kref_init(&dev->ref);
++	dev->spi = spi;
++	mutex_init(&dev->lock);
++	dev->frame = debugfs_create_file("turner-touch-frame", 0400, NULL, dev, &frame_fops);
++	if (IS_ERR(dev->frame)) {
++		int err = PTR_ERR(dev->frame);
++
++		kref_put(&dev->ref, drop_device);
++		return err;
++	}
++	if (spi->irq > 0) {
++		dev->burst = debugfs_create_file("turner-touch-burst", 0400, NULL, dev, &burst_fops);
++		if (IS_ERR(dev->burst)) {
++			int err = PTR_ERR(dev->burst);
++
++			debugfs_remove(dev->frame);
++			kref_put(&dev->ref, drop_device);
++			return err;
++		}
++		dev->stream_file = debugfs_create_file("turner-touch-stream", 0400, NULL, dev, &stream_fops);
++		if (IS_ERR(dev->stream_file)) {
++			int err = PTR_ERR(dev->stream_file);
++
++			debugfs_remove(dev->burst);
++			debugfs_remove(dev->frame);
++			kref_put(&dev->ref, drop_device);
++			return err;
++		}
++	}
++	spi_set_drvdata(spi, dev);
++	return 0;
++}
++
++static void turner_frame_remove(struct spi_device *spi)
++{
++	struct frame_device *dev = spi_get_drvdata(spi);
++
++	mutex_lock(&dev->lock);
++	dev->removing = true;
++	stop_stream(dev);
++	mutex_unlock(&dev->lock);
++	debugfs_remove(dev->stream_file);
++	debugfs_remove(dev->burst);
++	debugfs_remove(dev->frame);
++	kref_put(&dev->ref, drop_device);
++}
++
++static const struct of_device_id turner_frame_match[] = {
++	{ .compatible = "novatek,nt36536e" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, turner_frame_match);
++
++static const struct spi_device_id turner_frame_ids[] = {
++	{ "nt36536e" },
++	{}
++};
++MODULE_DEVICE_TABLE(spi, turner_frame_ids);
++
++static struct spi_driver turner_frame_driver = {
++	.driver = { .name = "turner-touch-frame", .of_match_table = turner_frame_match },
++	.id_table = turner_frame_ids,
++	.probe = turner_frame_probe,
++	.remove = turner_frame_remove,
++};
++module_spi_driver(turner_frame_driver);
++
++MODULE_DESCRIPTION("Turner NT36536E event capture and optional SRAM firmware loader");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/input/touchscreen/nt36536e/nt36536-fw.c b/drivers/input/touchscreen/nt36536e/nt36536-fw.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/input/touchscreen/nt36536e/nt36536-fw.c
+@@ -0,0 +1,247 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* SRAM download for the Turner CSOT production digitizer. */
++#include <crypto/sha2.h>
++#include <linux/delay.h>
++#include <linux/firmware.h>
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/spi/spi.h>
++#include <linux/unaligned.h>
++#include "nt36536-fw.h"
++
++#define FW_NAME "novatek/novatek_nt36536_turner_fw_csot.bin"
++#define CHUNK 15360
++#define RESET 0x1fb43e
++#define TRIM_ID 0x1fb104
++#define TOPOLOGY 0x1fb12c
++#define BOOT_READY 0x1fb50d
++#define AUTO_COPY 0x1fc825
++
++struct nvt_bus {
++	struct spi_device *spi;
++	u8 *tx;
++	u8 *rx;
++	size_t chunk;
++};
++
++struct nvt_segment {
++	u32 source, addr, last, crc;
++};
++
++static int transfer(struct nvt_bus *bus, size_t len, bool read)
++{
++	struct spi_transfer xfer = {
++		.tx_buf = bus->tx, .rx_buf = read ? bus->rx : NULL,
++		.len = len, .bits_per_word = 8,
++	};
++	struct spi_message msg;
++	int ret;
++
++	spi_message_init_with_transfers(&msg, &xfer, 1);
++	ret = spi_sync(bus->spi, &msg);
++	return ret ?: (msg.actual_length == len ? 0 : -EIO);
++}
++
++static int page(struct nvt_bus *bus, u32 addr)
++{
++	bus->tx[0] = 0xff;
++	bus->tx[1] = addr >> 15;
++	bus->tx[2] = addr >> 7;
++	return transfer(bus, 3, false);
++}
++
++static int write_bytes(struct nvt_bus *bus, u32 addr, const u8 *data, size_t len)
++{
++	int ret = page(bus, addr);
++
++	if (ret)
++		return ret;
++	bus->tx[0] = 0x80 | (addr & 0x7f);
++	memcpy(bus->tx + 1, data, len);
++	return transfer(bus, len + 1, false);
++}
++
++static int write_value(struct nvt_bus *bus, u32 addr, u32 value, size_t width)
++{
++	__le32 bytes = cpu_to_le32(value);
++
++	return write_bytes(bus, addr, (const u8 *)&bytes, width);
++}
++
++static int read_bytes(struct nvt_bus *bus, u32 addr, u8 *data, size_t len)
++{
++	int ret = page(bus, addr);
++
++	if (ret)
++		return ret;
++	memset(bus->tx, 0, len + 2);
++	bus->tx[0] = addr & 0x7f;
++	ret = transfer(bus, len + 2, true);
++	if (!ret)
++		memcpy(data, bus->rx + 2, len);
++	return ret;
++}
++
++static int bootloader_reset(struct nvt_bus *bus)
++{
++	int ret = write_value(bus, RESET, 0x69, 1);
++
++	if (!ret)
++		usleep_range(5000, 5500);
++	return ret;
++}
++
++static int identify(struct nvt_bus *bus, u32 *event)
++{
++	u8 id[6] = {}, topology;
++	int ret;
++
++	ret = bootloader_reset(bus);
++	if (!ret)
++		ret = write_bytes(bus, TRIM_ID, id, sizeof(id));
++	if (!ret)
++		ret = read_bytes(bus, TRIM_ID, id, sizeof(id));
++	if (ret)
++		return ret;
++	if ((id[0] != 0x14 && id[0] != 0x15) ||
++	    id[3] != 0x23 || id[4] != 0x65 || id[5] != 0x03)
++		return -ENODEV;
++	ret = read_bytes(bus, TOPOLOGY, &topology, 1);
++	if (!ret)
++		*event = topology & 1 ? 0x130900 : 0x133300;
++	return ret;
++}
++
++static int wait_value(struct nvt_bus *bus, u32 addr, u8 low, u8 high,
++		      unsigned int attempts, unsigned int delay_us)
++{
++	unsigned int i;
++	u8 value;
++	int ret;
++
++	for (i = 0; i < attempts; i++) {
++		ret = read_bytes(bus, addr, &value, 1);
++		if (ret)
++			return ret;
++		if (value >= low && value <= high)
++			return 0;
++		usleep_range(delay_us, delay_us + 100);
++	}
++	return -ETIMEDOUT;
++}
++
++static int download(struct nvt_bus *bus, const struct firmware *fw,
++		    const struct nvt_segment *segments, u32 event)
++{
++	static const u8 zeros[6], crc_command[] = { 0xae, 0 };
++	u8 version[2];
++	unsigned int i;
++	int ret = bootloader_reset(bus);
++
++	for (i = 0; !ret && i < 2; i++) {
++		u32 bank = 0x1fcc30 + i * 16;
++
++		ret = write_value(bus, bank, segments[i].addr, 3);
++		if (!ret)
++			ret = write_value(bus, bank + 4, segments[i].last, 3);
++		if (!ret)
++			ret = write_value(bus, bank + 8, segments[i].crc, 4);
++	}
++	if (!ret)
++		ret = write_value(bus, AUTO_COPY, 0x56, 1);
++	for (i = 0; !ret && i < 4; i++) {
++		const struct nvt_segment *s = &segments[i];
++		size_t offset = 0, size = s->last + 1;
++
++		while (!ret && offset < size) {
++			size_t len = min(bus->chunk, size - offset);
++
++			ret = write_bytes(bus, s->addr + offset, fw->data + s->source + offset, len);
++			offset += len;
++		}
++	}
++	if (!ret)
++		ret = wait_value(bus, AUTO_COPY, 0, 0, 200, 1000);
++	if (!ret)
++		ret = write_bytes(bus, event + 0x60, zeros, sizeof(zeros));
++	if (!ret)
++		ret = write_bytes(bus, event + 0x50, crc_command, sizeof(crc_command));
++	if (!ret)
++		ret = write_value(bus, BOOT_READY, 1, 1);
++	if (ret)
++		return ret;
++	usleep_range(5000, 5500);
++	ret = wait_value(bus, event + 0x60, 0xa0, 0xaf, 11, 10000);
++	if (!ret)
++		ret = read_bytes(bus, event + 0x78, version, sizeof(version));
++	if (!ret && (version[0] != fw->data[fw->size - 4096] ||
++		     version[0] + version[1] != 255))
++		return -EBADMSG;
++	return ret;
++}
++
++int nt36536_load_turner_firmware(struct spi_device *spi)
++{
++	/* The partition layout below is verified for this production image. */
++	static const u8 digest[] = {
++		0xfa, 0x5a, 0xa6, 0xf3, 0x0c, 0x9f, 0xac, 0xfb, 0xa4, 0x29, 0x8e, 0x6e, 0x6b, 0x80, 0x33, 0xf6,
++		0x88, 0x5e, 0xef, 0x8a, 0x58, 0xeb, 0x2f, 0x75, 0x77, 0x66, 0x07, 0xd8, 0x39, 0x24, 0x16, 0x5f,
++	};
++	struct nvt_segment segments[4];
++	struct nvt_bus bus = { .spi = spi };
++	u8 actual[SHA256_DIGEST_SIZE];
++	const struct firmware *fw;
++	u32 event;
++	int ret, i;
++	size_t max = min(spi_max_transfer_size(spi), spi_max_message_size(spi));
++
++	if (max <= 128)
++		return -EMSGSIZE;
++	ret = request_firmware(&fw, FW_NAME, &spi->dev);
++	if (ret)
++		return ret;
++	if (fw->size != 253952) {
++		ret = -EBADMSG;
++		goto out;
++	}
++	sha256(fw->data, fw->size, actual);
++	if (memcmp(digest, actual, sizeof(digest))) {
++		ret = -EBADMSG;
++		goto out;
++	}
++	for (i = 0; i < 4; i++) {
++		const u8 *entry = fw->data + (i < 2 ? 0x220 + 16 * i : 0xf0 + 256 * (i - 2));
++
++		segments[i].source = get_unaligned_le32(entry + (i < 2 ? 0 : 8));
++		segments[i].addr = get_unaligned_le32(entry + (i < 2 ? 4 : 0));
++		segments[i].last = get_unaligned_le32(entry + (i < 2 ? 8 : 4));
++		segments[i].crc = get_unaligned_le32(entry + 12);
++	}
++	/* Keep subsequent commands at the same offset within a 128-byte page. */
++	bus.chunk = round_down(min_t(size_t, CHUNK, max - 1), 128);
++	bus.tx = kmalloc(bus.chunk + 1, GFP_KERNEL);
++	bus.rx = kmalloc(8, GFP_KERNEL);
++	if (!bus.tx || !bus.rx) {
++		ret = -ENOMEM;
++		goto out;
++	}
++	ret = identify(&bus, &event);
++	if (!ret) {
++		for (i = 0; i < 3; i++) {
++			ret = download(&bus, fw, segments, event);
++			if (!ret)
++				break;
++		}
++	}
++	/* Stock nvt_ts_resume waits for REK (0xa1) after SRAM download. */
++	if (!ret)
++		ret = wait_value(&bus, event + 0x60, 0xa1, 0xaf, 51, 10000);
++	if (!ret)
++		dev_info(&spi->dev, "CSOT firmware ready, event page %#x\n", event);
++out:
++	kfree(bus.rx);
++	kfree(bus.tx);
++	release_firmware(fw);
++	return ret;
++}
++MODULE_FIRMWARE(FW_NAME);
+diff --git a/drivers/input/touchscreen/nt36536e/nt36536-fw.h b/drivers/input/touchscreen/nt36536e/nt36536-fw.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/input/touchscreen/nt36536e/nt36536-fw.h
+@@ -0,0 +1,6 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#ifndef NT36536_FW_H
++#define NT36536_FW_H
++struct spi_device;
++int nt36536_load_turner_firmware(struct spi_device *spi);
++#endif

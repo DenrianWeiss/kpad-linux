@@ -1,0 +1,29 @@
+Subject: [PATCH] drm: mediatek: use write-combining for Turner scanout objects
+
+--- a/drivers/gpu/drm/mediatek/turner/kms.h
++++ b/drivers/gpu/drm/mediatek/turner/kms.h
+@@ -274,10 +274,24 @@
+ 	.atomic_check = drm_atomic_helper_check,
+ 	.atomic_commit = drm_atomic_helper_commit,
+ };
++/* Mesa can import these native KMS buffers into the non-coherent GPU.
++ * Make the mmap and kernel vmap agree when the CPU reads back scanout.
++ */
++static struct drm_gem_object *turner_gem_create(struct drm_device *drm, size_t size)
++{
++	struct drm_gem_shmem_object *shmem = kzalloc_obj(*shmem);
++
++	if (!shmem)
++		return ERR_PTR(-ENOMEM);
++	shmem->map_wc = true;
++	return &shmem->base;
++}
++
+ DEFINE_DRM_GEM_FOPS(turner_fops);
+ static const struct drm_driver turner_driver = {
+ 	.driver_features = DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
+ 	.fops = &turner_fops,
++	.gem_create_object = turner_gem_create,
+ 	DRM_GEM_SHMEM_DRIVER_OPS,
+ 	.name = "turner-display", .desc = "MT6991 dual DSI", .major = 1,
+ };

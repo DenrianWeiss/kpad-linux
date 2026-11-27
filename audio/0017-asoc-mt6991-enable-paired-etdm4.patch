@@ -1,0 +1,157 @@
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -29,6 +29,20 @@
+ #define APLL2_TUNER_MASK	0xfff7
+ #define APLL2_TUNER_SETUP	0x0374
+ 
++#define AUD_TOP_CFG_VLP_RG	0x98
++#define I2S4_PAD_CLOCK		BIT(5)
++#define I2S4_NEG_LATCH		GENMASK(21, 20)
++#define ETDM_IN4_CON0		0x13c0
++#define ETDM_IN4_CON1		0x13c4
++#define ETDM_IN4_CON2		0x13c8
++#define ETDM_IN4_CON3		0x13cc
++#define ETDM_IN4_CON4		0x13d0
++#define ETDM_IN4_CON8		0x13e0
++#define ETDM_IN4_CON9		0x13e4
++#define ETDM_ENABLE		BIT(0)
++#define ETDM_4_7_COWORK_CON0	0x1690
++#define ETDM_IN4_SLAVE_SEL	GENMASK(27, 24)
++#define ETDM_OUT4_SLAVE_SEL	GENMASK(11, 8)
+ #define ETDM_OUT4_CON0		0x1580
+ #define ETDM_OUT4_CON1		0x1584
+ #define ETDM_OUT4_CON2		0x1588
+@@ -331,45 +345,59 @@
+ 	.trigger = mt6991_dl0_trigger,
+ };
+ 
+-/* Turner uses asynchronous master I2S with two 32-bit slots. */
++/* IN4 shares the OUT4 master and supplies the clock pins on Turner. */
++static const struct {
++	unsigned int reg;
++	unsigned int mask;
++	unsigned int value;
++} etdm4_timing[] = {
++	/* Two 32-bit slots, APLL relatch, synchronous IN4 and asynchronous OUT4. */
++	{ ETDM_IN4_CON0, OUT_SYNC | OUT_SLAVE | OUT_FMT | OUT_BITS | OUT_WORD |
++	  OUT_CHANNELS | OUT_RELATCH_DOMAIN,
++	  OUT_SYNC | FIELD_PREP_CONST(OUT_BITS, 31) | FIELD_PREP_CONST(OUT_WORD, 31) |
++	  FIELD_PREP_CONST(OUT_CHANNELS, 1) | FIELD_PREP_CONST(OUT_RELATCH_DOMAIN, 1) },
++	{ ETDM_OUT4_CON0, OUT_SYNC | OUT_SLAVE | OUT_FMT | OUT_BITS | OUT_WORD |
++	  OUT_CHANNELS | OUT_RELATCH_DOMAIN,
++	  FIELD_PREP_CONST(OUT_BITS, 31) | FIELD_PREP_CONST(OUT_WORD, 31) |
++	  FIELD_PREP_CONST(OUT_CHANNELS, 1) | FIELD_PREP_CONST(OUT_RELATCH_DOMAIN, 1) },
++	/* Initial point 3 for the TFA input pad, 6 for output. */
++	{ ETDM_IN4_CON1, OUT_INITIAL_COUNT | OUT_INITIAL_POINT | OUT_LRCK_RESET,
++	  5 | FIELD_PREP_CONST(OUT_INITIAL_POINT, 3) | OUT_LRCK_RESET },
++	{ ETDM_OUT4_CON1, OUT_INITIAL_COUNT | OUT_INITIAL_POINT | OUT_LRCK_RESET,
++	  5 | FIELD_PREP_CONST(OUT_INITIAL_POINT, 6) | OUT_LRCK_RESET },
++	{ ETDM_OUT4_CON2, OUT_IN2LATCH, 6 },
++	{ ETDM_OUT4_CON4, OUT_FS_TIMING | OUT_CLK_SOURCE | OUT_RELATCH_RATE,
++	  5 | FIELD_PREP_CONST(OUT_CLK_SOURCE, 1) | FIELD_PREP_CONST(OUT_RELATCH_RATE, 10) },
++	/* One input data pin, APLL clock, automatic clock enable. */
++	{ ETDM_IN4_CON2, BIT(31) | GENMASK(12, 10) | BIT(14), BIT(10) | BIT(14) },
++	{ ETDM_IN4_CON3, GENMASK(30, 26), FIELD_PREP_CONST(GENMASK(30, 26), 5) },
++	{ ETDM_IN4_CON4, GENMASK(24, 20), FIELD_PREP_CONST(GENMASK(24, 20), 10) },
++	/* Bypass asynchronous FIFO, clear end counts, latch after six cycles. */
++	{ ETDM_IN4_CON8, BIT(8) | GENMASK(4, 0), 0 },
++	{ ETDM_IN4_CON9, GENMASK(14, 0), FIELD_PREP_CONST(GENMASK(14, 10), 6) },
++	{ ETDM_4_7_COWORK_CON0, ETDM_IN4_SLAVE_SEL | ETDM_OUT4_SLAVE_SEL,
++	  FIELD_PREP_CONST(ETDM_IN4_SLAVE_SEL, 8) },
++	{ AUD_TOP_CFG_VLP_RG, I2S4_NEG_LATCH, 0 },
++};
++
+ static int mt6991_i2sout4_params(struct snd_pcm_substream *s,
+ 				 struct snd_pcm_hw_params *params,
+ 				 struct snd_soc_dai *dai)
+ {
+ 	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
+-	struct regmap *map = afe->common.regmap;
+-	int ret;
++	int i, ret;
+ 
+ 	if (params_rate(params) != 48000 || params_channels(params) != 2 ||
+ 	    params_format(params) != SNDRV_PCM_FORMAT_S32_LE)
+ 		return -EINVAL;
+ 
+-	ret = regmap_update_bits(map, ETDM_OUT4_CON0,
+-				 OUT_SYNC | OUT_SLAVE | OUT_FMT | OUT_BITS |
+-				 OUT_WORD | OUT_CHANNELS | OUT_RELATCH_DOMAIN,
+-				 FIELD_PREP(OUT_BITS, 31) | FIELD_PREP(OUT_WORD, 31) |
+-				 FIELD_PREP(OUT_CHANNELS, 1) |
+-				 FIELD_PREP(OUT_RELATCH_DOMAIN, 1));
+-	if (ret)
+-		return ret;
+-
+-	ret = regmap_update_bits(map, ETDM_OUT4_CON1,
+-				 OUT_INITIAL_COUNT | OUT_INITIAL_POINT | OUT_LRCK_RESET,
+-				 FIELD_PREP(OUT_INITIAL_COUNT, 5) |
+-				 FIELD_PREP(OUT_INITIAL_POINT, 6) | OUT_LRCK_RESET);
+-	if (ret)
+-		return ret;
+-
+-	ret = regmap_update_bits(map, ETDM_OUT4_CON2, OUT_IN2LATCH,
+-				 FIELD_PREP(OUT_IN2LATCH, 6));
+-	if (ret)
+-		return ret;
+-
+-	return regmap_update_bits(map, ETDM_OUT4_CON4,
+-				  OUT_FS_TIMING | OUT_CLK_SOURCE | OUT_RELATCH_RATE,
+-				  FIELD_PREP(OUT_FS_TIMING, 5) |
+-				  FIELD_PREP(OUT_CLK_SOURCE, 1) |
+-				  FIELD_PREP(OUT_RELATCH_RATE, 10));
++	for (i = 0; i < ARRAY_SIZE(etdm4_timing); i++) {
++		ret = regmap_update_bits(afe->common.regmap, etdm4_timing[i].reg,
++					 etdm4_timing[i].mask, etdm4_timing[i].value);
++		if (ret)
++			return ret;
++	}
++	return 0;
+ }
+ 
+ /* The stock OUT4 DAI uses the I2SIN0 master-clock divider on Turner. */
+@@ -440,9 +468,25 @@
+ 	if (ret)
+ 		goto disable_engine;
+ 
++	ret = regmap_set_bits(map, AUD_TOP_CFG_VLP_RG, I2S4_PAD_CLOCK);
++	if (ret)
++		goto disable_mclk;
++	ret = regmap_set_bits(map, ETDM_IN4_CON0, ETDM_ENABLE);
++	if (ret)
++		goto disable_pad;
++	ret = regmap_set_bits(map, ETDM_OUT4_CON0, ETDM_ENABLE);
++	if (ret)
++		goto disable_input;
++
+ 	afe->mclk_enabled = true;
+ 	return 0;
+ 
++disable_input:
++	regmap_clear_bits(map, ETDM_IN4_CON0, ETDM_ENABLE);
++disable_pad:
++	regmap_clear_bits(map, AUD_TOP_CFG_VLP_RG, I2S4_PAD_CLOCK);
++disable_mclk:
++	clk_disable_unprepare(afe->mclk[MCLK_DIV].clk);
+ disable_engine:
+ 	regmap_clear_bits(map, AUDIO_ENGEN_CON0, AUDIO_APLL2_ON);
+ disable_tuner:
+@@ -466,8 +510,17 @@
+ 	if (!afe->mclk_enabled)
+ 		return 0;
+ 
++	ret = regmap_clear_bits(map, ETDM_OUT4_CON0, ETDM_ENABLE);
++	err = regmap_clear_bits(map, ETDM_IN4_CON0, ETDM_ENABLE);
++	if (!ret)
++		ret = err;
++	err = regmap_clear_bits(map, AUD_TOP_CFG_VLP_RG, I2S4_PAD_CLOCK);
++	if (!ret)
++		ret = err;
+ 	clk_disable_unprepare(afe->mclk[MCLK_DIV].clk);
+-	ret = regmap_clear_bits(map, AUDIO_ENGEN_CON0, AUDIO_APLL2_ON);
++	err = regmap_clear_bits(map, AUDIO_ENGEN_CON0, AUDIO_APLL2_ON);
++	if (!ret)
++		ret = err;
+ 	err = regmap_clear_bits(map, AFE_APLL2_TUNER_CFG, APLL2_TUNER_EN);
+ 	if (!ret)
+ 		ret = err;

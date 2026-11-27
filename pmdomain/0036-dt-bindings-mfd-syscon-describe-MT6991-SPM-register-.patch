@@ -1,0 +1,38 @@
+From 5813a7511da9b47249ce8c6721f8d8e90c346edb Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:25:05 +0800
+Subject: [PATCH] dt-bindings: mfd: syscon: describe MT6991 SPM register blocks
+
+Describe the SCPSYS control and SPM bus protection windows separately. The power controller is a child of SCPSYS.
+---
+ .../devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml          | 1 +
+ Documentation/devicetree/bindings/mfd/syscon.yaml                | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml b/Documentation/devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml
+index 9f073d0..c6bb23e 100644
+--- a/Documentation/devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml
++++ b/Documentation/devicetree/bindings/mfd/mediatek,mt8195-scpsys.yaml
+@@ -21,6 +21,7 @@ properties:
+       - enum:
+           - mediatek,mt6795-scpsys
+           - mediatek,mt6893-scpsys
++          - mediatek,mt6991-scpsys
+           - mediatek,mt8167-scpsys
+           - mediatek,mt8173-scpsys
+           - mediatek,mt8183-scpsys
+diff --git a/Documentation/devicetree/bindings/mfd/syscon.yaml b/Documentation/devicetree/bindings/mfd/syscon.yaml
+index 05dce02..b5ae8e2 100644
+--- a/Documentation/devicetree/bindings/mfd/syscon.yaml
++++ b/Documentation/devicetree/bindings/mfd/syscon.yaml
+@@ -86,6 +86,7 @@ properties:
+               - mediatek,mt2712-pctl-a-syscfg
+               - mediatek,mt6397-pctl-pmic-syscfg
+               - mediatek,mt6991-hwv
++              - mediatek,mt6991-spm-bus-protection
+               - mediatek,mt7981-topmisc
+               - mediatek,mt7988-topmisc
+               - mediatek,mt8135-pctl-a-syscfg
+-- 
+2.50.1 (Apple Git-155)
+

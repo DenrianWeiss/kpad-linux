@@ -1,0 +1,85 @@
+From 669c94870be6fc573aaa2e491fd1b947b39a7c56 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:29:46 +0800
+Subject: [PATCH 20/22] dt-bindings: clock: mediatek: describe MT6991 central
+ I2C clocks
+
+The central wrapper uses the same four gates as MT8196. Add the SoC-specific compatible and assign IDs for the top-level I2C clock and its two additional PLL divisions.
+---
+ .../bindings/clock/mediatek,mt8196-clock.yaml | 45 ++++++++++---------
+ .../dt-bindings/clock/mediatek,mt6991-clock.h |  3 ++
+ 2 files changed, 28 insertions(+), 20 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
+index 87a3aae..2149d6d 100644
+--- a/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
+@@ -22,26 +22,31 @@ description: |
+ 
+ properties:
+   compatible:
+-    items:
+-      - enum:
+-          - mediatek,mt6991-pericfg-ao
+-          - mediatek,mt8196-imp-iic-wrap-c
+-          - mediatek,mt8196-imp-iic-wrap-e
+-          - mediatek,mt8196-imp-iic-wrap-n
+-          - mediatek,mt8196-imp-iic-wrap-w
+-          - mediatek,mt8196-mdpsys0
+-          - mediatek,mt8196-mdpsys1
+-          - mediatek,mt8196-pericfg-ao
+-          - mediatek,mt8196-pextp0cfg-ao
+-          - mediatek,mt8196-pextp1cfg-ao
+-          - mediatek,mt8196-ufscfg-ao
+-          - mediatek,mt8196-vencsys
+-          - mediatek,mt8196-vencsys-c1
+-          - mediatek,mt8196-vencsys-c2
+-          - mediatek,mt8196-vdecsys
+-          - mediatek,mt8196-vdecsys-soc
+-          - mediatek,mt8196-vdisp-ao
+-      - const: syscon
++    oneOf:
++      - items:
++          - enum:
++              - mediatek,mt6991-pericfg-ao
++              - mediatek,mt8196-imp-iic-wrap-c
++              - mediatek,mt8196-imp-iic-wrap-e
++              - mediatek,mt8196-imp-iic-wrap-n
++              - mediatek,mt8196-imp-iic-wrap-w
++              - mediatek,mt8196-mdpsys0
++              - mediatek,mt8196-mdpsys1
++              - mediatek,mt8196-pericfg-ao
++              - mediatek,mt8196-pextp0cfg-ao
++              - mediatek,mt8196-pextp1cfg-ao
++              - mediatek,mt8196-ufscfg-ao
++              - mediatek,mt8196-vencsys
++              - mediatek,mt8196-vencsys-c1
++              - mediatek,mt8196-vencsys-c2
++              - mediatek,mt8196-vdecsys
++              - mediatek,mt8196-vdecsys-soc
++              - mediatek,mt8196-vdisp-ao
++          - const: syscon
++      - items:
++          - const: mediatek,mt6991-imp-iic-wrap-c
++          - const: mediatek,mt8196-imp-iic-wrap-c
++          - const: syscon
+ 
+   reg:
+     maxItems: 1
+diff --git a/include/dt-bindings/clock/mediatek,mt6991-clock.h b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+index 35cb2a4..c3b4f70 100644
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -15,6 +15,9 @@
+ #define MT6991_CLK_TOP_UNIVPLL_192M       7
+ #define MT6991_CLK_TOP_UART               8
+ #define MT6991_CLK_TOP_SPI6_BCLK          9
++#define MT6991_CLK_TOP_MAINPLL_D4_D8      10
++#define MT6991_CLK_TOP_UNIVPLL_D5_D2      11
++#define MT6991_CLK_TOP_I2C_P              12
+ 
+ #define MT6991_CLK_PERI_UART0_BCLK         0
+ #define MT6991_CLK_PERI_SPI6_BCLK          1
+-- 
+2.50.1 (Apple Git-155)
+

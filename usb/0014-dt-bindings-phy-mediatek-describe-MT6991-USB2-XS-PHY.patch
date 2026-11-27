@@ -1,0 +1,59 @@
+From 48e5129a3db15b901a25aee0f683b29edf3543aa Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:06:27 +0800
+Subject: [PATCH 14/15] dt-bindings: phy: mediatek: describe MT6991 USB2 XS-PHY
+ trim cells
+
+The MT6991 USB2 ports use three independent manufacturing trims for
+high-speed RX termination and TX impedance. Describe the trim inputs
+as NVMEM cells so the provider can express the bit offsets.
+
+---
+ .../devicetree/bindings/phy/mediatek,xsphy.yaml | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/phy/mediatek,xsphy.yaml b/Documentation/devicetree/bindings/phy/mediatek,xsphy.yaml
+index 0bed847..570a35b 100644
+--- a/Documentation/devicetree/bindings/phy/mediatek,xsphy.yaml
++++ b/Documentation/devicetree/bindings/phy/mediatek,xsphy.yaml
+@@ -49,6 +49,7 @@ properties:
+       - enum:
+           - mediatek,mt3611-xsphy
+           - mediatek,mt3612-xsphy
++          - mediatek,mt6991-xsphy
+           - mediatek,mt7988-xsphy
+       - const: mediatek,xsphy
+ 
+@@ -108,6 +109,18 @@ patternProperties:
+                 - PHY_TYPE_USB2
+                 - PHY_TYPE_USB3
+ 
++      nvmem-cells:
++        items:
++          - description: USB2 HS receiver termination calibration
++          - description: USB2 HS transmitter NMOS impedance trim
++          - description: USB2 HS transmitter PMOS impedance trim
++
++      nvmem-cell-names:
++        items:
++          - const: hsrx-term
++          - const: hstx-impn
++          - const: hstx-impp
++
+       # The following optional vendor properties are only for debug or HQA test
+       mediatek,eye-src:
+         description:
+@@ -166,6 +179,10 @@ patternProperties:
+                   Index of config segment
+                 enum: [0, 1, 2, 3]
+ 
++    dependentRequired:
++      nvmem-cells: [ nvmem-cell-names ]
++      nvmem-cell-names: [ nvmem-cells ]
++
+     required:
+       - reg
+       - clocks
+-- 
+2.50.1 (Apple Git-155)
+

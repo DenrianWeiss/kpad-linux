@@ -1,0 +1,30 @@
+From 7c00f0e5913f6801028863f2d0e6a36eca5367a9 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 01:23:24 +0800
+Subject: [PATCH 3/4] dt-bindings: pinctrl: mediatek: allow MT8196 fallback on
+ MT6991
+
+---
+ .../bindings/pinctrl/mediatek,mt8196-pinctrl.yaml           | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml b/Documentation/devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml
+index 9082bd6..cb7d4e4 100644
+--- a/Documentation/devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml
++++ b/Documentation/devicetree/bindings/pinctrl/mediatek,mt8196-pinctrl.yaml
+@@ -15,7 +15,11 @@ description:
+ 
+ properties:
+   compatible:
+-    const: mediatek,mt8196-pinctrl
++    oneOf:
++      - const: mediatek,mt8196-pinctrl
++      - items:
++          - const: mediatek,mt6991-pinctrl
++          - const: mediatek,mt8196-pinctrl
+ 
+   reg:
+     items:
+-- 
+2.50.1 (Apple Git-155)
+

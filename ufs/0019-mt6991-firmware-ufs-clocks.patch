@@ -1,0 +1,101 @@
+--- a/drivers/clk/mediatek/clk-mt8196-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt8196-topckgen.c
+@@ -962,6 +962,7 @@
+ };
+ 
+ static const struct mtk_fixed_factor mt6991_divs[] = {
++	FACTOR(MT6991_CLK_TOP_UNIVPLL_D6, "univpll_d6", "univpll", 1, 6),
+ 	FACTOR(MT6991_CLK_TOP_MAINPLL_D9, "mainpll_d9", "mainpll", 1, 9),
+ 	FACTOR(MT6991_CLK_TOP_OSC_D4, "osc_d4", "ulposc", 1, 4),
+ 	FACTOR(MT6991_CLK_TOP_MAINPLL_D5_D2, "mainpll_d5_d2", "mainpll", 1, 10),
+@@ -990,6 +991,14 @@
+ };
+ 
+ static const struct mtk_mux mt6991_muxes[] = {
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_AES_UFSFDE, "aes_ufsfde", aes_ufsfde_parents,
++		CLK_CFG_12, CLK_CFG_12_SET, CLK_CFG_12_CLR,
++		0, 3, 7, CLK_CFG_UPDATE1, TOP_MUX_AES_UFSFDE_SHIFT,
++		CLK_FENC_STATUS_MON_1, 15),
++	MUX_GATE_FENC_CLR_SET_UPD(MT6991_CLK_TOP_UFS, "ufs", ufs_parents,
++		CLK_CFG_12, CLK_CFG_12_SET, CLK_CFG_12_CLR,
++		8, 3, 15, CLK_CFG_UPDATE1, TOP_MUX_UFS_SHIFT,
++		CLK_FENC_STATUS_MON_1, 14),
+ 	MUX_CLR_SET_UPD(MT6991_CLK_TOP_ADSP_UARTHUB_B, "adsp_uarthub_b",
+ 		adsp_uarthub_b_parents, CLK_CFG_13, CLK_CFG_13_SET, CLK_CFG_13_CLR,
+ 		24, 2, CLK_CFG_UPDATE1, TOP_MUX_ADSP_UARTHUB_B_SHIFT),
+@@ -1111,6 +1120,18 @@
+ 	case 39:
+ 	case 174:
+ 		return clks->hws[MT6991_CLK_TOP_I2C_WEST];
++	case 41:
++		return clks->hws[MT6991_CLK_TOP_AES_UFSFDE];
++	case 42:
++		return clks->hws[MT6991_CLK_TOP_UFS];
++	case 96:
++		return clks->hws[MT6991_CLK_TOP_MAINPLL_D4];
++	case 97:
++		return clks->hws[MT6991_CLK_TOP_MAINPLL_D4_D2];
++	case 115:
++		return clks->hws[MT6991_CLK_TOP_UNIVPLL_D5];
++	case 118:
++		return clks->hws[MT6991_CLK_TOP_UNIVPLL_D6];
+ 	case 46:
+ 		return clks->hws[MT6991_CLK_TOP_ADSP_UARTHUB_B];
+ 	case 56:
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -48,6 +48,10 @@
+ #define MT6991_CLK_TOP_MFG_EB                37
+ #define MT6991_CLK_TOP_ADSP_UARTHUB_B        38
+ #define MT6991_CLK_TOP_UARTHUB_BCLK          39
++
++#define MT6991_CLK_TOP_AES_UFSFDE             41
++#define MT6991_CLK_TOP_UFS                    42
++#define MT6991_CLK_TOP_UNIVPLL_D6             43
+ 
+ #define MT6991_CLK_VLP_USB_TOP                0
+ #define MT6991_CLK_VLP_USB_XHCI               1
+--- a/drivers/clk/mediatek/clk-mt8196-ufs_ao.c
++++ b/drivers/clk/mediatek/clk-mt8196-ufs_ao.c
+@@ -88,14 +88,40 @@
+ 	.rst_desc = &ufsao_rst_desc,
+ };
+ 
++/* The firmware has a gate ID followed by a consumer alias for each clock.
++ * The reset controller is a separate child of this syscon on MT6991.
++ */
++static const struct mtk_clk_desc mt6991_ufsao_mcd = {
++	.clks = ufsao_clks,
++	.num_clks = ARRAY_SIZE(ufsao_clks),
++};
++
++static struct clk_hw *mt6991_ufsao_get(struct of_phandle_args *spec, void *data)
++{
++	struct clk_hw_onecell_data *clks = data;
++	unsigned int id = spec->args[0] / 2;
++
++	if (spec->args_count != 1 || id >= clks->num)
++		return ERR_PTR(-EINVAL);
++	return clks->hws[id];
++}
++
++static int ufsao_probe(struct platform_device *pdev)
++{
++	if (of_device_is_compatible(pdev->dev.of_node, "mediatek,mt6991-ufscfg_ao"))
++		return mtk_clk_simple_probe_with_get(pdev, mt6991_ufsao_get);
++	return mtk_clk_simple_probe(pdev);
++}
++
+ static const struct of_device_id of_match_clk_mt8196_ufs_ao[] = {
++	{ .compatible = "mediatek,mt6991-ufscfg_ao", .data = &mt6991_ufsao_mcd },
+ 	{ .compatible = "mediatek,mt8196-ufscfg-ao", .data = &ufsao_mcd },
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, of_match_clk_mt8196_ufs_ao);
+ 
+ static struct platform_driver clk_mt8196_ufs_ao_drv = {
+-	.probe = mtk_clk_simple_probe,
++	.probe = ufsao_probe,
+ 	.remove = mtk_clk_simple_remove,
+ 	.driver = {
+ 		.name = "clk-mt8196-ufs-ao",

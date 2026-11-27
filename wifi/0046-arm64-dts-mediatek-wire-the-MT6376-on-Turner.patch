@@ -1,0 +1,35 @@
+From 7cf6dae6f4ec4f9acbfe966767b93de6be261872 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 04:56:37 +0800
+Subject: [PATCH] arm64: dts: mediatek: wire the MT6376 on Turner
+
+Describe the shared connectivity PMIC and its fault line. Leave the provider disabled until radio ownership can be handed over.
+---
+ arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+index 7baf3d5..d0b456d 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
++++ b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+@@ -28,6 +28,17 @@ key-volume-up {
+ 		};
+ 	};
+ 
++	mt6376: power-controller {
++		compatible = "mediatek,mt6376";
++		#power-domain-cells = <0>;
++		enable-gpios = <&pio 250 GPIO_ACTIVE_HIGH>;
++		fault-gpios = <&pio 245 GPIO_ACTIVE_LOW>;
++		pinctrl-names = "fault-idle", "fault-active";
++		pinctrl-0 = <&mt6376_fault_sleep_pins>;
++		pinctrl-1 = <&mt6376_fault_active_pins>;
++		status = "disabled";
++	};
++
+ 	/* Boot firmware must supply the final DRAM banks and carveouts. */
+ 	memory@80000000 {
+ 		device_type = "memory";
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,108 @@
+From d32ed47591efb77b4b7b56201c1058058bd1eba8 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 03:22:18 +0800
+Subject: [PATCH 19/19] phy: mediatek: xsphy: propagate USB2 operations to port
+ repeater
+
+Acquire the optional downstream PHY before registering the provider.
+Forward lifecycle operations and mode changes before modifying the local
+port so repeater errors can be propagated and retried.
+---
+ drivers/phy/mediatek/phy-mtk-xsphy.c | 37 ++++++++++++++++++++++++++--
+ 1 file changed, 35 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/phy/mediatek/phy-mtk-xsphy.c b/drivers/phy/mediatek/phy-mtk-xsphy.c
+index d123bc6..f066ef1 100644
+--- a/drivers/phy/mediatek/phy-mtk-xsphy.c
++++ b/drivers/phy/mediatek/phy-mtk-xsphy.c
+@@ -99,6 +99,7 @@
+ 
+ struct xsphy_instance {
+ 	struct phy *phy;
++	struct phy *repeater;
+ 	void __iomem *port_base;
+ 	struct clk *ref_clk;	/* reference clock of anolog phy */
+ 	u32 index;
+@@ -438,6 +439,11 @@ static int mtk_phy_init(struct phy *phy)
+ 
+ 	switch (inst->type) {
+ 	case PHY_TYPE_USB2:
++		ret = phy_init(inst->repeater);
++		if (ret) {
++			clk_disable_unprepare(inst->ref_clk);
++			return ret;
++		}
+ 		u2_phy_instance_init(xsphy, inst);
+ 		u2_phy_props_set(xsphy, inst);
+ 		break;
+@@ -463,6 +469,10 @@ static int mtk_phy_power_on(struct phy *phy)
+ 	struct mtk_xsphy *xsphy = dev_get_drvdata(phy->dev.parent);
+ 
+ 	if (inst->type == PHY_TYPE_USB2) {
++		int ret = phy_power_on(inst->repeater);
++
++		if (ret)
++			return ret;
+ 		u2_phy_instance_power_on(xsphy, inst);
+ 		u2_phy_slew_rate_calibrate(xsphy, inst);
+ 	}
+@@ -475,8 +485,13 @@ static int mtk_phy_power_off(struct phy *phy)
+ 	struct xsphy_instance *inst = phy_get_drvdata(phy);
+ 	struct mtk_xsphy *xsphy = dev_get_drvdata(phy->dev.parent);
+ 
+-	if (inst->type == PHY_TYPE_USB2)
++	if (inst->type == PHY_TYPE_USB2) {
++		int ret = phy_power_off(inst->repeater);
++
++		if (ret)
++			return ret;
+ 		u2_phy_instance_power_off(xsphy, inst);
++	}
+ 
+ 	return 0;
+ }
+@@ -485,6 +500,12 @@ static int mtk_phy_exit(struct phy *phy)
+ {
+ 	struct xsphy_instance *inst = phy_get_drvdata(phy);
+ 
++	if (inst->type == PHY_TYPE_USB2) {
++		int ret = phy_exit(inst->repeater);
++
++		if (ret)
++			return ret;
++	}
+ 	clk_disable_unprepare(inst->ref_clk);
+ 	return 0;
+ }
+@@ -494,8 +515,13 @@ static int mtk_phy_set_mode(struct phy *phy, enum phy_mode mode, int submode)
+ 	struct xsphy_instance *inst = phy_get_drvdata(phy);
+ 	struct mtk_xsphy *xsphy = dev_get_drvdata(phy->dev.parent);
+ 
+-	if (inst->type == PHY_TYPE_USB2)
++	if (inst->type == PHY_TYPE_USB2) {
++		int ret = phy_set_mode_ext(inst->repeater, mode, submode);
++
++		if (ret)
++			return ret;
+ 		u2_phy_instance_set_mode(xsphy, inst, mode);
++	}
+ 
+ 	return 0;
+ }
+@@ -640,6 +666,13 @@ static int mtk_xsphy_probe(struct platform_device *pdev)
+ 				return retval;
+ 		}
+ 
++		if (of_property_present(child_np, "phys")) {
++			inst->repeater = devm_of_phy_get_by_index(dev, child_np, 0);
++			if (IS_ERR(inst->repeater))
++				return dev_err_probe(dev, PTR_ERR(inst->repeater),
++						     "failed to get port %d repeater\n", inst->index);
++		}
++
+ 		retval = phy_type_syscon_get(inst, child_np);
+ 		if (retval)
+ 			return retval;
+-- 
+2.50.1 (Apple Git-155)
+

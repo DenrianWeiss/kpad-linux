@@ -1,0 +1,57 @@
+From c525da5552c8e59f7dc367f615aaa00625cd1a3e Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 10:22:38 +0800
+Subject: [PATCH 098/100] dt-bindings: clock: mediatek: describe the MT6991
+ VDISP AO clocks
+
+Signed-off-by: Turner Linux Port <turner@localhost>
+---
+ .../bindings/clock/mediatek,mt8196-clock.yaml         | 11 +++++++++++
+ include/dt-bindings/clock/mediatek,mt6991-clock.h     |  4 ++++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
+index 3e3ffb9da..056af14f7 100644
+--- a/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt8196-clock.yaml
+@@ -26,6 +26,7 @@ properties:
+       - items:
+           - enum:
+               - mediatek,mt6991-pericfg-ao
++              - mediatek,mt6991-vdisp-ao
+               - mediatek,mt8196-imp-iic-wrap-c
+               - mediatek,mt8196-imp-iic-wrap-e
+               - mediatek,mt8196-imp-iic-wrap-n
+@@ -111,6 +112,16 @@ required:
+   - reg
+   - '#clock-cells'
+ 
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6991-vdisp-ao
++    then:
++      required:
++        - mediatek,hardware-voter
++
+ additionalProperties: false
+ 
+ examples:
+diff --git a/include/dt-bindings/clock/mediatek,mt6991-clock.h b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+index 2ff235138..3511025b6 100644
+--- a/include/dt-bindings/clock/mediatek,mt6991-clock.h
++++ b/include/dt-bindings/clock/mediatek,mt6991-clock.h
+@@ -90,4 +90,8 @@
+ #define MT6991_CLK_OVL1_EXDMA9             10
+ #define MT6991_CLK_OVL1_SMI                11
+ 
++#define MT6991_CLK_VDISP_AO_CONFIG         0
++#define MT6991_CLK_VDISP_AO_DPC            1
++#define MT6991_CLK_VDISP_AO_SMI_SUB_COMMON 2
++
+ #endif
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,198 @@
+--- a/drivers/mailbox/Kconfig
++++ b/drivers/mailbox/Kconfig
+@@ -274,6 +274,12 @@
+ 	  Mailbox implementation for STMicroelectonics STM32 family chips
+ 	  with hardware for Inter-Processor Communication Controller (IPCC)
+ 	  between processors. Say Y here if you want to have this support.
++
++config MT6991_ADSP_MBOX
++	tristate "MediaTek MT6991 audio DSP receive mailboxes"
++	depends on OF && (ARCH_MEDIATEK || COMPILE_TEST)
++	help
++	  Receive IPI messages on the two audio DSP return channels.
+ 
+ config MTK_ADSP_MBOX
+ 	tristate "MediaTek ADSP Mailbox Controller"
+--- a/drivers/mailbox/Makefile
++++ b/drivers/mailbox/Makefile
+@@ -59,6 +59,8 @@
+ 
+ obj-$(CONFIG_STM32_IPCC) 	+= stm32-ipcc.o
+ 
++obj-$(CONFIG_MT6991_ADSP_MBOX)	+= mt6991-adsp-mailbox.o
++
+ obj-$(CONFIG_MTK_ADSP_MBOX)	+= mtk-adsp-mailbox.o
+ 
+ obj-$(CONFIG_MTK_CMDQ_MBOX)	+= mtk-cmdq-mailbox.o
+--- /dev/null
++++ b/drivers/mailbox/mt6991-adsp-mailbox.c
+@@ -0,0 +1,150 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MediaTek MT6991 audio DSP direct receive mailboxes */
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/mailbox_controller.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/soc/mediatek/mt6991-adsp-ipi.h>
++
++struct mt6991_rx {
++	void __iomem *base;
++	void __iomem *clear;
++	int irq;
++};
++
++struct mt6991_adsp_mailbox {
++	struct mbox_controller controller;
++	struct mbox_chan chan[2];
++	struct mt6991_rx rx[2];
++};
++
++static irqreturn_t mt6991_adsp_rx_irq(int irq, void *data)
++{
++	struct mbox_chan *chan = data;
++	struct mt6991_rx *rx = chan->con_priv;
++	struct mt6991_adsp_ipi msg;
++
++	if (!(readl(rx->clear) & BIT(0)))
++		return IRQ_NONE;
++
++	/* The DSP can reuse the window as soon as the host acknowledges it. */
++	memcpy_fromio(&msg, rx->base, sizeof(msg));
++	writel(BIT(0), rx->clear);
++	if (msg.len <= sizeof(msg.payload))
++		mbox_chan_received_data(chan, &msg);
++	else
++		dev_warn_ratelimited(chan->mbox->dev, "invalid ADSP IPI length %u\n", msg.len);
++
++	return IRQ_HANDLED;
++}
++
++static int mt6991_adsp_startup(struct mbox_chan *chan)
++{
++	struct mt6991_rx *rx = chan->con_priv;
++	int ret;
++
++	ret = pm_runtime_resume_and_get(chan->mbox->dev);
++	if (ret < 0)
++		return ret;
++	enable_irq(rx->irq);
++	return 0;
++}
++
++static void mt6991_adsp_shutdown(struct mbox_chan *chan)
++{
++	struct mt6991_rx *rx = chan->con_priv;
++
++	disable_irq(rx->irq);
++	pm_runtime_put_sync(chan->mbox->dev);
++}
++
++static int mt6991_adsp_rx_send(struct mbox_chan *chan, void *data)
++{
++	return -EOPNOTSUPP;
++}
++
++static const struct mbox_chan_ops mt6991_adsp_ops = {
++	.startup = mt6991_adsp_startup,
++	.shutdown = mt6991_adsp_shutdown,
++	.send_data = mt6991_adsp_rx_send,
++};
++
++static struct mbox_chan *mt6991_adsp_xlate(struct mbox_controller *controller,
++					  const struct of_phandle_args *spec)
++{
++	if (spec->args_count != 1 || (spec->args[0] != 1 && spec->args[0] != 3))
++		return ERR_PTR(-EINVAL);
++
++	return &controller->chans[spec->args[0] / 2];
++}
++
++static int mt6991_adsp_mbox_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct mt6991_adsp_mailbox *mb;
++	int i, ret;
++
++	mb = devm_kzalloc(dev, sizeof(*mb), GFP_KERNEL);
++	if (!mb)
++		return -ENOMEM;
++
++	for (i = 0; i < ARRAY_SIZE(mb->rx); i++) {
++		struct mt6991_rx *rx = &mb->rx[i];
++		struct resource *res;
++		unsigned int id = 2 * i + 1;
++		char name[16];
++
++		snprintf(name, sizeof(name), "mbox%u_base", id);
++		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
++		if (!res || resource_size(res) < sizeof(struct mt6991_adsp_ipi))
++			return dev_err_probe(dev, -EINVAL, "invalid %s window\n", name);
++		rx->base = devm_ioremap_resource(dev, res);
++		if (IS_ERR(rx->base))
++			return PTR_ERR(rx->base);
++		snprintf(name, sizeof(name), "mbox%u_clr", id);
++		rx->clear = devm_platform_ioremap_resource_byname(pdev, name);
++		if (IS_ERR(rx->clear))
++			return PTR_ERR(rx->clear);
++		snprintf(name, sizeof(name), "mbox%u", id);
++		rx->irq = platform_get_irq_byname(pdev, name);
++		if (rx->irq < 0)
++			return rx->irq;
++
++		mb->chan[i].con_priv = rx;
++		ret = devm_request_irq(dev, rx->irq, mt6991_adsp_rx_irq, IRQF_NO_AUTOEN,
++				       dev_name(dev), &mb->chan[i]);
++		if (ret)
++			return dev_err_probe(dev, ret, "requesting %s IRQ\n", name);
++	}
++
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++	mb->controller.dev = dev;
++	mb->controller.ops = &mt6991_adsp_ops;
++	mb->controller.chans = mb->chan;
++	mb->controller.num_chans = ARRAY_SIZE(mb->chan);
++	mb->controller.of_xlate = mt6991_adsp_xlate;
++	return devm_mbox_controller_register(dev, &mb->controller);
++}
++
++static const struct of_device_id mt6991_adsp_match[] = {
++	{ .compatible = "mediatek,mt6991-adspsys" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, mt6991_adsp_match);
++
++static struct platform_driver mt6991_adsp_mailbox_driver = {
++	.probe = mt6991_adsp_mbox_probe,
++	.driver = {
++		.name = "mt6991-adsp-mailbox",
++		.of_match_table = mt6991_adsp_match,
++	},
++};
++module_platform_driver(mt6991_adsp_mailbox_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6991 audio DSP receive mailboxes");
++MODULE_LICENSE("GPL");
+--- /dev/null
++++ b/include/linux/soc/mediatek/mt6991-adsp-ipi.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __LINUX_SOC_MEDIATEK_MT6991_ADSP_IPI_H
++#define __LINUX_SOC_MEDIATEK_MT6991_ADSP_IPI_H
++
++#include <linux/types.h>
++
++/* First 60 words of a direct RX mailbox. len counts bytes of payload. */
++struct mt6991_adsp_ipi {
++	u32 id;
++	u32 len;
++	u32 options;
++	u32 reserved;
++	u8 payload[224];
++};
++
++#endif

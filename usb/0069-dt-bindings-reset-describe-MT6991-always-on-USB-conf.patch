@@ -1,0 +1,54 @@
+From ca5530ee2ad6b35db75984705356e8cc6bcf5531 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 07:22:31 +0800
+Subject: [PATCH 69/71] dt-bindings: reset: describe MT6991 always-on USB
+ configuration
+
+---
+ .../reset/mediatek,mt6991-usbcfg.yaml         | 34 +++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/reset/mediatek,mt6991-usbcfg.yaml
+
+diff --git a/Documentation/devicetree/bindings/reset/mediatek,mt6991-usbcfg.yaml b/Documentation/devicetree/bindings/reset/mediatek,mt6991-usbcfg.yaml
+new file mode 100644
+index 0000000..20b3569
+--- /dev/null
++++ b/Documentation/devicetree/bindings/reset/mediatek,mt6991-usbcfg.yaml
+@@ -0,0 +1,34 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/reset/mediatek,mt6991-usbcfg.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6991 always-on USB configuration registers
++
++maintainers:
++  - Turner Linux Port <turner@localhost>
++
++description:
++  The USB configuration block provides per-controller reset pulses through
++  groups of bits in a shared register. The reset specifier is the logical
++  USB controller index (0 to 2).
++
++properties:
++  compatible:
++    items:
++      - const: mediatek,mt6991-usbcfg
++      - const: syscon
++
++  reg:
++    maxItems: 1
++
++  "#reset-cells":
++    const: 1
++
++required:
++  - compatible
++  - reg
++  - "#reset-cells"
++
++additionalProperties: false
+-- 
+2.50.1 (Apple Git-155)
+

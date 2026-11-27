@@ -1,0 +1,189 @@
+Subject: [PATCH] drm: mediatek: Turner: prepare the next scanout while the old frame retires
+
+At 60 Hz the two-slot implementation could only deliver a new framebuffer
+every second paired frame completion. Keep a third slot for the writer and
+keep the CPU copy outside the scan worker lock. Retain the old front buffer
+until both links have finished another frame. Also use the full pixel pitch
+in the scanout test patterns.
+
+--- a/drivers/gpu/drm/mediatek/turner/kms.h
++++ b/drivers/gpu/drm/mediatek/turner/kms.h
+@@ -25,11 +25,11 @@
+ 	struct drm_crtc crtc;
+ 	struct drm_encoder encoder;
+ 	struct drm_connector connector;
+-	struct turner_slot slot[2];
++	struct turner_slot slot[3];
+ 	struct device *right;
+ 	struct mutex flip_lock;
+ 	wait_queue_head_t flip_wait;
+-	int front, pending, retiring, pattern_shown;
++	int front, pending, retiring, writing, pattern_shown;
+ 	bool running, finished;
+ 	struct work_struct shutdown;
+ 	unsigned int hz;
+@@ -61,7 +61,7 @@
+ 		unsigned int shift = kind == 4 ? 4 : 0;
+ 
+ 		for (y = 0; y < 3008; y++) {
+-			u32 *row = pixels + y * 470;
++			u32 *row = pixels + y * (TURNER_PITCH / sizeof(*pixels));
+ 			u32 band = palette[((y / 188) + shift) % 8];
+ 
+ 			for (x = 0; x < 1880; x++)
+@@ -72,7 +72,7 @@
+ 	}
+ 
+ 	for (y = 0; y < 3008; y++) {
+-		u32 *row = pixels + y * 470;
++		u32 *row = pixels + y * (TURNER_PITCH / sizeof(*pixels));
+ 
+ 		for (x = 0; x < 1880; x++) {
+ 			u32 value = 0xff808080;
+@@ -108,6 +108,20 @@
+ 						  DRM_PLANE_NO_SCALING, false, false);
+ }
+ 
++/* Called under flip_lock. Keep the previous scanout alive for a full
++ * paired frame even when a new compositor buffer is ready every vblank.
++ */
++static int turner_free_slot(struct turner_kms *kms)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(kms->slot); i++)
++		if (i != kms->front && i != kms->pending && i != kms->retiring &&
++		    i != kms->writing)
++			return i;
++	return -1;
++}
++
+ static void turner_plane_update(struct drm_plane *plane, struct drm_atomic_commit *state)
+ {
+ 	struct turner_kms *kms = to_kms(plane->dev);
+@@ -121,27 +135,33 @@
+ 	if (!fb || !ps->visible || !drm_dev_enter(plane->dev, &idx))
+ 		return;
+ 	mutex_lock(&kms->flip_lock);
+-	while (kms->pending >= 0 || kms->retiring >= 0) {
++	while (kms->pending >= 0 || kms->writing >= 0) {
+ 		mutex_unlock(&kms->flip_lock);
+ 		if (!wait_event_timeout(kms->flip_wait,
+-					READ_ONCE(kms->pending) < 0 && READ_ONCE(kms->retiring) < 0,
++					READ_ONCE(kms->pending) < 0 && READ_ONCE(kms->writing) < 0,
+ 					msecs_to_jiffies(500))) {
+ 			drm_err(plane->dev, "scan buffer retirement timed out\n");
+ 			goto out;
+ 		}
+ 		mutex_lock(&kms->flip_lock);
+ 	}
+-	back = 1 - kms->front;
++	back = turner_free_slot(kms);
++	if (WARN_ON_ONCE(back < 0)) {
++		mutex_unlock(&kms->flip_lock);
++		goto out;
++	}
++	kms->writing = back;
++	mutex_unlock(&kms->flip_lock);
+ 	slot = &kms->slot[back];
+ 	if (READ_ONCE(pattern)) {
+ 		turner_pattern(slot->cpu, READ_ONCE(pattern));
+-		wmb();
+-		if (kms->running)
+-			kms->pending = back;
+-		else
+-			kms->front = back;
+-		WRITE_ONCE(kms->sequence, kms->sequence + 1);
+-	} else if (!drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE)) {
++		dma_wmb();
++		dma_sync_sgtable_for_device(kms->right, &slot->table, DMA_TO_DEVICE);
++	} else {
++		if (drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE)) {
++			mutex_lock(&kms->flip_lock);
++			goto release_writer;
++		}
+ 		dma_sync_sgtable_for_cpu(kms->right, &slot->table, DMA_TO_DEVICE);
+ 		for (y = 0; y < 3008; y++)
+ 			iosys_map_memcpy_from(slot->cpu + y * TURNER_PITCH, &shadow->data[0],
+@@ -149,13 +169,17 @@
+ 		dma_wmb();
+ 		dma_sync_sgtable_for_device(kms->right, &slot->table, DMA_TO_DEVICE);
+ 		drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
+-		if (kms->running)
+-			kms->pending = back;
+-		else
+-			kms->front = back;
+-		WRITE_ONCE(kms->sequence, kms->sequence + 1);
+ 	}
++	mutex_lock(&kms->flip_lock);
++	if (kms->running)
++		kms->pending = back;
++	else
++		kms->front = back;
++	WRITE_ONCE(kms->sequence, kms->sequence + 1);
++release_writer:
++	kms->writing = -1;
+ 	mutex_unlock(&kms->flip_lock);
++	wake_up_all(&kms->flip_wait);
+ out:
+ 	drm_dev_exit(idx);
+ }
+--- a/drivers/gpu/drm/mediatek/turner/command-host.c
++++ b/drivers/gpu/drm/mediatek/turner/command-host.c
+@@ -575,8 +575,8 @@
+ 			}
+ 			/* The probe pattern does not depend on compositor commits. */
+ 			if (READ_ONCE(pattern) && k->pattern_shown != READ_ONCE(pattern) &&
+-			    k->pending < 0 && k->retiring < 0) {
+-				int back = 1 - k->front;
++			    k->pending < 0 && k->writing < 0) {
++				int back = turner_free_slot(k);
+ 
+ 				u32 *fill = k->slot[back].cpu;
+ 
+@@ -587,7 +587,7 @@
+ 					   "pattern kind=%d slot=%d iova=%#llx mem=%#x/%#x fb=%#x/%#x\n",
+ 					   READ_ONCE(pattern), back,
+ 					   (unsigned long long)k->slot[back].addr[0],
+-					   fill[0], fill[1504 * 470 + 470],
++					   fill[0], fill[1504 * 1880 + 470],
+ 					   readl(path->block[FETCH_L].base + 0xf40),
+ 					   readl(path->block[FETCH_R].base + 0xf40));
+ 				k->pending = back;
+--- a/drivers/gpu/drm/mediatek/turner/service.h
++++ b/drivers/gpu/drm/mediatek/turner/service.h
+@@ -38,7 +38,7 @@
+ 		goto remove;
+ 	}
+ 	kms->right = right;
+-	kms->pending = kms->retiring = -1;
++	kms->writing = kms->pending = kms->retiring = -1;
+ 	mutex_init(&kms->flip_lock);
+ 	init_waitqueue_head(&kms->flip_wait);
+ 	for (i = 0; i < ARRAY_SIZE(kms->slot); i++) {
+@@ -75,13 +75,19 @@
+ 				goto release;
+ 		}
+ 	}
+-	for (i = 0; i < 2; i++)
+-		if (upper_32_bits(kms->slot[0].addr[i]) != upper_32_bits(kms->slot[1].addr[i]) ||
+-		    upper_32_bits(kms->slot[1].addr[i]+TURNER_BYTES-1) != upper_32_bits(kms->slot[1].addr[i]) ||
+-		    upper_32_bits(kms->slot[0].addr[i]+TURNER_BYTES-1) != upper_32_bits(kms->slot[0].addr[i])) {
+-			ret = -ERANGE;
+-			goto release;
++	for (i = 0; i < ARRAY_SIZE(kms->slot); i++) {
++		unsigned int side;
++
++		for (side = 0; side < 2; side++) {
++			dma_addr_t start = kms->slot[i].addr[side];
++
++			if (upper_32_bits(start) != upper_32_bits(kms->slot[0].addr[side]) ||
++			    upper_32_bits(start + TURNER_BYTES - 1) != upper_32_bits(start)) {
++				ret = -ERANGE;
++				goto release;
++			}
+ 		}
++	}
+ 	INIT_WORK(&kms->shutdown, turner_shutdown_work);
+ 	ctx->kms = kms;
+ 	ret = turner_register_kms(kms);

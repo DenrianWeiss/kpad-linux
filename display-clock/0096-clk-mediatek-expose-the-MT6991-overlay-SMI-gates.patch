@@ -1,0 +1,40 @@
+From 2980db25ab7768bc7f81df64c9c8b5b5c9b59967 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 10:17:56 +0800
+Subject: [PATCH 96/96] clk: mediatek: expose the MT6991 overlay SMI gates
+
+The display local arbiters use bit 30 of the second clock bank in each overlay subsystem. The offsets and display parent match MT8196.
+
+Signed-off-by: Turner Linux Port <turner@localhost>
+---
+ drivers/clk/mediatek/clk-mt8196-ovl0.c | 1 +
+ drivers/clk/mediatek/clk-mt8196-ovl1.c | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-ovl0.c b/drivers/clk/mediatek/clk-mt8196-ovl0.c
+index 5351e4ff8..1714ee038 100644
+--- a/drivers/clk/mediatek/clk-mt8196-ovl0.c
++++ b/drivers/clk/mediatek/clk-mt8196-ovl0.c
+@@ -147,6 +147,7 @@ static const struct mtk_gate mt6991_ovl0_clks[] = {
+ 	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA7, "ovl_exdma7", "disp", 11),
+ 	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA8, "ovl_exdma8", "disp", 12),
+ 	GATE_HWV_OVL0(MT6991_CLK_OVL0_EXDMA9, "ovl_exdma9", "disp", 13),
++	GATE_HWV_OVL1(MT6991_CLK_OVL0_SMI, "ovl_smi", "disp", 30),
+ };
+ 
+ static const struct mtk_clk_desc mt6991_ovl0_desc = {
+diff --git a/drivers/clk/mediatek/clk-mt8196-ovl1.c b/drivers/clk/mediatek/clk-mt8196-ovl1.c
+index 980fbfc5e..e1f12a975 100644
+--- a/drivers/clk/mediatek/clk-mt8196-ovl1.c
++++ b/drivers/clk/mediatek/clk-mt8196-ovl1.c
+@@ -147,6 +147,7 @@ static const struct mtk_gate mt6991_ovl1_clks[] = {
+ 	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA7, "ovl1_ovl_exdma7", "disp", 11),
+ 	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA8, "ovl1_ovl_exdma8", "disp", 12),
+ 	GATE_HWV_OVL10(MT6991_CLK_OVL1_EXDMA9, "ovl1_ovl_exdma9", "disp", 13),
++	GATE_HWV_OVL11(MT6991_CLK_OVL1_SMI, "ovl1_smi", "disp", 30),
+ };
+ 
+ static const struct mtk_clk_desc mt6991_ovl1_desc = {
+-- 
+2.50.1 (Apple Git-155)
+

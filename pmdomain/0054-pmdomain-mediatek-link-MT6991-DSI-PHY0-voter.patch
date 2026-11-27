@@ -1,0 +1,129 @@
+From 7a1030b3fa1f481ebe3fe154a76a004c4c41107d Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 06:02:47 +0800
+Subject: [PATCH] pmdomain: mediatek: link the MT6991 DSI PHY0 voter to its
+ parent
+
+---
+ drivers/pmdomain/mediatek/mt6991-pm-domains.h | 20 ++++++++++++
+ drivers/pmdomain/mediatek/mtk-pm-domains.c    | 32 ++++++++++++++++++-
+ 2 files changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/pmdomain/mediatek/mt6991-pm-domains.h b/drivers/pmdomain/mediatek/mt6991-pm-domains.h
+index a9ffd49..baa3704 100644
+--- a/drivers/pmdomain/mediatek/mt6991-pm-domains.h
++++ b/drivers/pmdomain/mediatek/mt6991-pm-domains.h
+@@ -102,6 +102,26 @@ static const struct scpsys_soc_data mt6991_spm_hwv_data = {
+ 	.type = SCPSYS_MTCMOS_TYPE_HW_VOTER,
+ };
+ 
++static const struct scpsys_hwv_domain_data mt6991_mm_voters[] = {
++	[MT6991_POWER_DOMAIN_DSI_PHY0] = {
++		.name = "dsi-phy0",
++		.set = 0x220,
++		.clr = 0x224,
++		.done = 0x142c,
++		.en = 0x1420,
++		.set_sta = 0x1474,
++		.clr_sta = 0x1478,
++		.setclr_bit = 7,
++		.sleepable = true,
++	},
++};
++
++static const struct scpsys_soc_data mt6991_mm_hwv_data = {
++	.hwv_domains_data = mt6991_mm_voters,
++	.num_hwv_domains = ARRAY_SIZE(mt6991_mm_voters),
++	.type = SCPSYS_MTCMOS_TYPE_HW_VOTER,
++};
++
+ static const struct scpsys_soc_data mt6991_scpsys_data = {
+ 	.domains_data = mt6991_domains,
+ 	.num_domains = ARRAY_SIZE(mt6991_domains),
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.c b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+index 08ef5c4..d8c1bda 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.c
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+@@ -13,6 +13,7 @@
+ #include <linux/of_clk.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
++#include <linux/pm_runtime.h>
+ #include <linux/regmap.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/spinlock.h>
+@@ -1387,6 +1388,9 @@ static const struct of_device_id scpsys_of_match[] = {
+ 		.data = &mt6893_scpsys_data,
+ 	},
+ 	{
++		.compatible = "mediatek,mt6991-hwv-hfrp-power-controller",
++		.data = &mt6991_mm_hwv_data,
++	}, {
+ 		.compatible = "mediatek,mt6991-hwv-scp-power-controller",
+ 		.data = &mt6991_spm_hwv_data,
+ 	}, {
+@@ -1455,6 +1459,7 @@ static int scpsys_probe(struct platform_device *pdev)
+ 	const struct scpsys_soc_data *soc;
+ 	struct device *parent;
+ 	struct scpsys *scpsys;
++	bool external_parent = of_property_present(np, "power-domains-child-ids");
+ 	int num_domains, ret;
+ 	u8 num_added_pds = 0;
+ 	u8 *added_pds_idx;
+@@ -1510,6 +1515,19 @@ static int scpsys_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
++	/* Keep the parent on while initializing domains and installing their links. */
++	if (external_parent) {
++		if (of_count_phandle_with_args(np, "power-domains", "#power-domain-cells") != 1 ||
++		    of_property_count_u32_elems(np, "power-domains-child-ids") != 1)
++			return -EINVAL;
++		ret = devm_pm_runtime_enable(dev);
++		if (ret)
++			return ret;
++		ret = pm_runtime_resume_and_get(dev);
++		if (ret < 0)
++			return ret;
++	}
++
+ 	ret = -ENODEV;
+ 	for_each_available_child_of_node_scoped(np, node) {
+ 		struct generic_pm_domain *domain;
+@@ -1529,20 +1547,32 @@ static int scpsys_probe(struct platform_device *pdev)
+ 
+ 	if (ret) {
+ 		dev_dbg(dev, "no power domains present\n");
+-		return ret;
++		goto err_cleanup_domains;
++	}
++
++	if (external_parent) {
++		ret = of_genpd_add_child_ids(np, &scpsys->pd_data);
++		if (ret < 0)
++			goto err_cleanup_domains;
+ 	}
+ 
+ 	ret = of_genpd_add_provider_onecell(np, &scpsys->pd_data);
+ 	if (ret) {
++		if (external_parent)
++			of_genpd_remove_child_ids(np, &scpsys->pd_data);
+ 		dev_err(dev, "failed to add provider: %d\n", ret);
+ 		goto err_cleanup_domains;
+ 	}
+ 
++	if (external_parent)
++		pm_runtime_put_sync(dev);
+ 	devm_kfree(dev, added_pds_idx);
+ 	return 0;
+ 
+ err_cleanup_domains:
+ 	scpsys_domain_cleanup(scpsys, added_pds_idx, num_added_pds);
++	if (external_parent)
++		pm_runtime_put_sync(dev);
+ 	return ret;
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

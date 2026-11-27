@@ -1,0 +1,47 @@
+From 080635f701f68ae2a5f44e7e758c70653110b47b Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 10:22:38 +0800
+Subject: [PATCH 099/100] clk: mediatek: add MT6991 VDISP AO gates
+
+The MT6991 VDISP block shares the MT8196 register banks. The DPC vote is at bit 1. The ordinary bit 2 gate supplies the SMI sub-common bus and stays enabled.
+
+Signed-off-by: Turner Linux Port <turner@localhost>
+---
+ drivers/clk/mediatek/clk-mt8196-vdisp_ao.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/drivers/clk/mediatek/clk-mt8196-vdisp_ao.c b/drivers/clk/mediatek/clk-mt8196-vdisp_ao.c
+index 070c60f40..73a274050 100644
+--- a/drivers/clk/mediatek/clk-mt8196-vdisp_ao.c
++++ b/drivers/clk/mediatek/clk-mt8196-vdisp_ao.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2025 Collabora Ltd.
+  *                    Laura Nao <laura.nao@collabora.com>
+  */
++#include <dt-bindings/clock/mediatek,mt6991-clock.h>
+ #include <dt-bindings/clock/mediatek,mt8196-clock.h>
+ 
+ #include <linux/clk-provider.h>
+@@ -60,7 +61,19 @@ static const struct mtk_clk_desc mm_v_mcd = {
+ 	.num_clks = ARRAY_SIZE(mm_v_clks),
+ };
+ 
++static const struct mtk_gate mt6991_vdisp_ao_clks[] = {
++	GATE_HWV_MM_V(MT6991_CLK_VDISP_AO_CONFIG, "mm_v_disp_vdisp_ao_config", "disp", 0),
++	GATE_HWV_MM_V(MT6991_CLK_VDISP_AO_DPC, "mm_v_disp_dpc", "disp", 1),
++	GATE_MM_AO_V(MT6991_CLK_VDISP_AO_SMI_SUB_COMMON, "mm_v_smi_sub_somm0", "disp", 2),
++};
++
++static const struct mtk_clk_desc mt6991_vdisp_ao_desc = {
++	.clks = mt6991_vdisp_ao_clks,
++	.num_clks = ARRAY_SIZE(mt6991_vdisp_ao_clks),
++};
++
+ static const struct of_device_id of_match_clk_mt8196_vdisp_ao[] = {
++	{ .compatible = "mediatek,mt6991-vdisp-ao", .data = &mt6991_vdisp_ao_desc },
+ 	{ .compatible = "mediatek,mt8196-vdisp-ao", .data = &mm_v_mcd },
+ 	{ /* sentinel */ }
+ };
+-- 
+2.50.1 (Apple Git-155)
+

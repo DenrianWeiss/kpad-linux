@@ -1,0 +1,279 @@
+From 26dba1dcf4e869279fe1b55e00f2976ee0796950 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 05:52:18 +0800
+Subject: [PATCH] phy: mediatek: add MT6991 display D-PHY support
+
+Implement the sleepable PLL sequence and lane controls used by the MT6991 display PHY. Preserve live impedance settings per PHY across a power cycle and acquire the power domain before accessing registers. Refuse a conflicting rate when taking over a running PLL.
+---
+ drivers/phy/mediatek/Makefile                 |   1 +
+ .../phy/mediatek/phy-mtk-mipi-dsi-mt6991.c    | 176 ++++++++++++++++++
+ drivers/phy/mediatek/phy-mtk-mipi-dsi.c       |  14 +-
+ drivers/phy/mediatek/phy-mtk-mipi-dsi.h       |   5 +
+ 4 files changed, 192 insertions(+), 4 deletions(-)
+ create mode 100644 drivers/phy/mediatek/phy-mtk-mipi-dsi-mt6991.c
+
+diff --git a/drivers/phy/mediatek/Makefile b/drivers/phy/mediatek/Makefile
+index 121c7de..e61cde9 100644
+--- a/drivers/phy/mediatek/Makefile
++++ b/drivers/phy/mediatek/Makefile
+@@ -20,6 +20,7 @@ obj-$(CONFIG_PHY_MTK_HDMI)		+= phy-mtk-hdmi-drv.o
+ obj-$(CONFIG_PHY_MTK_MIPI_CSI_0_5)	+= phy-mtk-mipi-csi-0-5.o
+ 
+ phy-mtk-mipi-dsi-drv-y			:= phy-mtk-mipi-dsi.o
++phy-mtk-mipi-dsi-drv-y			+= phy-mtk-mipi-dsi-mt6991.o
+ phy-mtk-mipi-dsi-drv-y			+= phy-mtk-mipi-dsi-mt8173.o
+ phy-mtk-mipi-dsi-drv-y			+= phy-mtk-mipi-dsi-mt8183.o
+ phy-mtk-mipi-dsi-drv-y			+= phy-mtk-mipi-dsi-mt8196.o
+diff --git a/drivers/phy/mediatek/phy-mtk-mipi-dsi-mt6991.c b/drivers/phy/mediatek/phy-mtk-mipi-dsi-mt6991.c
+new file mode 100644
+index 0000000..43e58a9
+--- /dev/null
++++ b/drivers/phy/mediatek/phy-mtk-mipi-dsi-mt6991.c
+@@ -0,0 +1,176 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MediaTek MT6991 display D-PHY */
++#include <linux/pm_runtime.h>
++
++#include "phy-mtk-io.h"
++#include "phy-mtk-mipi-dsi.h"
++
++#define TX_LANE_CON	0x04
++#define TX_VOLTAGE	0x08
++#define PLL_PWR		0x28
++#define PLL_PCW		0x2c
++#define PLL_CON		0x30
++#define PLL_CON4	0x3c
++#define TX_LANE_SEL	0x40
++
++#define PLL_EN		BIT(0)
++#define PLL_POSDIV	GENMASK(10, 8)
++#define SDM_PWR_ON	BIT(0)
++#define SDM_ISO		BIT(1)
++
++static const u16 banks[] = { 0x100, 0x200, 0x300, 0x400, 0x500, 0x700 };
++static const u8 trim_regs[] = { 0x00, 0x08, 0xc4, 0xc8 };
++/* D0, D1, D2, D3, clock, auxiliary bank */
++static const u16 sw_ctl[] = { 0x25c, 0x45c, 0x15c, 0x55c, 0x35c, 0x75c };
++
++struct mt6991_trim {
++	u32 val[ARRAY_SIZE(banks)][ARRAY_SIZE(trim_regs)];
++	bool valid;
++};
++
++static int mt6991_init(struct mtk_mipi_tx *tx)
++{
++	struct mt6991_trim *trim;
++	unsigned int i, j;
++	int ret;
++
++	trim = devm_kzalloc(tx->dev, sizeof(*trim), GFP_KERNEL);
++	if (!trim)
++		return -ENOMEM;
++	tx->soc_data = trim;
++
++	ret = devm_pm_runtime_enable(tx->dev);
++	if (ret)
++		return ret;
++	ret = pm_runtime_resume_and_get(tx->dev);
++	if (ret < 0)
++		return ret;
++
++	if (readl(tx->regs + PLL_CON) & PLL_EN) {
++		u32 sel = FIELD_GET(PLL_POSDIV, readl(tx->regs + PLL_CON));
++		u64 rate = (u64)readl(tx->regs + PLL_PCW) * 52000;
++
++		tx->data_rate = DIV_ROUND_CLOSEST_ULL(rate >> sel, 1 << 24) * 1000;
++		for (i = 0; i < ARRAY_SIZE(banks); i++)
++			for (j = 0; j < ARRAY_SIZE(trim_regs); j++)
++				trim->val[i][j] = readl(tx->regs + banks[i] + trim_regs[j]);
++		trim->valid = true;
++	}
++	pm_runtime_put_sync(tx->dev);
++	return 0;
++}
++
++static int mt6991_determine_rate(struct clk_hw *hw, struct clk_rate_request *req)
++{
++	unsigned long rate = clamp_t(unsigned long, req->rate, 125000000, U32_MAX);
++
++	if (req->best_parent_rate != 26000000)
++		return -EINVAL;
++	req->rate = rounddown(rate, 2000);
++	return 0;
++}
++
++static int mt6991_prepare(struct clk_hw *hw)
++{
++	struct mtk_mipi_tx *tx = mtk_mipi_tx_from_clk_hw(hw);
++	void __iomem *base = tx->regs;
++	u32 rate = tx->data_rate, pcw, sel;
++	unsigned int i;
++
++	if (rate < 125000000)
++		return -EINVAL;
++	for (sel = 0; sel < 4 && rate < (2000000000U >> sel); sel++)
++		;
++	pcw = div_u64(((u64)(rate / 2000) << sel) << 24, 26000);
++
++	if (readl(base + PLL_CON) & PLL_EN) {
++		if (readl(base + PLL_PCW) != pcw ||
++		    FIELD_GET(PLL_POSDIV, readl(base + PLL_CON)) != sel)
++			return -EBUSY;
++		return 0;
++	}
++
++	mtk_phy_update_field(base + TX_VOLTAGE, GENMASK(5, 0), rate >= 2500000000U ? 4 : 0);
++	mtk_phy_clear_bits(base + PLL_CON4, GENMASK(13, 12));
++	mtk_phy_set_bits(base + PLL_CON, BIT(4));
++	mtk_phy_update_field(base + PLL_CON, GENMASK(24, 23), 1);
++	mtk_phy_update_field(base + PLL_CON, GENMASK(26, 25), 1);
++
++	writel(0x3fff0180, base + TX_LANE_CON);
++	usleep_range(500, 600);
++	writel(0x3fff00c0, base + TX_LANE_CON);
++	for (i = 0; i < 5; i++)
++		mtk_phy_set_bits(base + sw_ctl[i], BIT(0));
++
++	mtk_phy_set_bits(base + PLL_PWR, SDM_PWR_ON);
++	usleep_range(30, 100);
++	mtk_phy_clear_bits(base + PLL_PWR, SDM_ISO);
++	mtk_phy_clear_bits(base + PLL_CON, BIT(13));
++	writel(pcw, base + PLL_PCW);
++	mtk_phy_update_field(base + PLL_CON, PLL_POSDIV, sel);
++	mtk_phy_clear_bits(base + PLL_CON, BIT(28));
++	mtk_phy_set_bits(base + PLL_CON, PLL_EN);
++	usleep_range(50, 100);
++	return 0;
++}
++
++static void mt6991_unprepare(struct clk_hw *hw)
++{
++	void __iomem *base = mtk_mipi_tx_from_clk_hw(hw)->regs;
++
++	mtk_phy_clear_bits(base + PLL_CON, PLL_EN);
++	mtk_phy_clear_bits(base + 0x50, BIT(0));
++	mtk_phy_set_bits(base + PLL_PWR, SDM_ISO);
++	mtk_phy_clear_bits(base + PLL_PWR, SDM_PWR_ON);
++	writel(0x3fff0180, base + TX_LANE_CON);
++	writel(0x3fff0100, base + TX_LANE_CON);
++}
++
++static void mt6991_set_sw_control(struct mtk_mipi_tx *tx, bool enable)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(banks); i++) {
++		mtk_phy_update_bits(tx->regs + banks[i] + 0x60, BIT(0), enable);
++		mtk_phy_update_bits(tx->regs + banks[i] + 0x80, BIT(0), enable);
++	}
++	for (i = 0; i < ARRAY_SIZE(sw_ctl); i++)
++		writel(enable ? 0x101 : 0, tx->regs + sw_ctl[i]);
++}
++
++static void mt6991_enable_signal(struct phy *phy)
++{
++	struct mtk_mipi_tx *tx = phy_get_drvdata(phy);
++	struct mt6991_trim *trim = tx->soc_data;
++	unsigned int i, j;
++
++	if (trim->valid)
++		for (i = 0; i < ARRAY_SIZE(banks); i++)
++			for (j = 0; j < ARRAY_SIZE(trim_regs); j++)
++				writel(trim->val[i][j], tx->regs + banks[i] + trim_regs[j]);
++
++	/* Set the default D-PHY clock lane and retain inherited polarity. */
++	mtk_phy_set_bits(tx->regs + 0x320, BIT(0));
++	mtk_phy_update_bits(tx->regs + TX_LANE_SEL, GENMASK(10, 8) | GENMASK(6, 4), 5 << 8);
++	mt6991_set_sw_control(tx, false);
++}
++
++static void mt6991_disable_signal(struct phy *phy)
++{
++	mt6991_set_sw_control(phy_get_drvdata(phy), true);
++}
++
++static const struct clk_ops mt6991_pll_ops = {
++	.prepare = mt6991_prepare,
++	.unprepare = mt6991_unprepare,
++	.determine_rate = mt6991_determine_rate,
++	.set_rate = mtk_mipi_tx_pll_set_rate,
++	.recalc_rate = mtk_mipi_tx_pll_recalc_rate,
++};
++
++const struct mtk_mipitx_data mt6991_mipitx_data = {
++	.init = mt6991_init,
++	.mipi_tx_clk_ops = &mt6991_pll_ops,
++	.mipi_tx_enable_signal = mt6991_enable_signal,
++	.mipi_tx_disable_signal = mt6991_disable_signal,
++};
+diff --git a/drivers/phy/mediatek/phy-mtk-mipi-dsi.c b/drivers/phy/mediatek/phy-mtk-mipi-dsi.c
+index 46f0cb3..6b18813 100644
+--- a/drivers/phy/mediatek/phy-mtk-mipi-dsi.c
++++ b/drivers/phy/mediatek/phy-mtk-mipi-dsi.c
+@@ -157,6 +157,15 @@ static int mtk_mipi_tx_probe(struct platform_device *pdev)
+ 
+ 	clk_init.ops = mipi_tx->driver_data->mipi_tx_clk_ops;
+ 
++	mipi_tx->dev = dev;
++	if (mipi_tx->driver_data->init) {
++		ret = mipi_tx->driver_data->init(mipi_tx);
++		if (ret)
++			return ret;
++	} else {
++		mtk_mipi_tx_get_calibration_datal(mipi_tx);
++	}
++
+ 	mipi_tx->pll_hw.init = &clk_init;
+ 	ret = devm_clk_hw_register(dev, &mipi_tx->pll_hw);
+ 	if (ret)
+@@ -172,15 +181,12 @@ static int mtk_mipi_tx_probe(struct platform_device *pdev)
+ 	if (IS_ERR(phy_provider))
+ 		return PTR_ERR(phy_provider);
+ 
+-	mipi_tx->dev = dev;
+-
+-	mtk_mipi_tx_get_calibration_datal(mipi_tx);
+-
+ 	return devm_of_clk_add_hw_provider(dev, of_clk_hw_simple_get, &mipi_tx->pll_hw);
+ }
+ 
+ static const struct of_device_id mtk_mipi_tx_match[] = {
+ 	{ .compatible = "mediatek,mt2701-mipi-tx", .data = &mt2701_mipitx_data },
++	{ .compatible = "mediatek,mt6991-mipi-tx", .data = &mt6991_mipitx_data },
+ 	{ .compatible = "mediatek,mt8173-mipi-tx", .data = &mt8173_mipitx_data },
+ 	{ .compatible = "mediatek,mt8183-mipi-tx", .data = &mt8183_mipitx_data },
+ 	{ .compatible = "mediatek,mt8196-mipi-tx", .data = &mt8196_mipitx_data },
+diff --git a/drivers/phy/mediatek/phy-mtk-mipi-dsi.h b/drivers/phy/mediatek/phy-mtk-mipi-dsi.h
+index e6f9670..b554855 100644
+--- a/drivers/phy/mediatek/phy-mtk-mipi-dsi.h
++++ b/drivers/phy/mediatek/phy-mtk-mipi-dsi.h
+@@ -16,7 +16,10 @@
+ #include <linux/phy/phy.h>
+ #include <linux/slab.h>
+ 
++struct mtk_mipi_tx;
++
+ struct mtk_mipitx_data {
++	int (*init)(struct mtk_mipi_tx *tx);
+ 	const u32 mppll_preserve;
+ 	const struct clk_ops *mipi_tx_clk_ops;
+ 	void (*mipi_tx_enable_signal)(struct phy *phy);
+@@ -29,6 +32,7 @@ struct mtk_mipi_tx {
+ 	u32 data_rate;
+ 	u32 mipitx_drive;
+ 	u32 rt_code[5];
++	void *soc_data;
+ 	const struct mtk_mipitx_data *driver_data;
+ 	struct clk_hw pll_hw;
+ };
+@@ -40,6 +44,7 @@ unsigned long mtk_mipi_tx_pll_recalc_rate(struct clk_hw *hw,
+ 					  unsigned long parent_rate);
+ 
+ extern const struct mtk_mipitx_data mt2701_mipitx_data;
++extern const struct mtk_mipitx_data mt6991_mipitx_data;
+ extern const struct mtk_mipitx_data mt8173_mipitx_data;
+ extern const struct mtk_mipitx_data mt8183_mipitx_data;
+ extern const struct mtk_mipitx_data mt8196_mipitx_data;
+-- 
+2.50.1 (Apple Git-155)
+

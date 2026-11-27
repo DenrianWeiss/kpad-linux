@@ -1,0 +1,220 @@
+--- a/sound/soc/mediatek/mt6991/mt6991-afe.c
++++ b/sound/soc/mediatek/mt6991/mt6991-afe.c
+@@ -303,11 +303,37 @@
+ 	return 0;
+ }
+ 
++static void mt6991_stream_quiesce(struct turner_stream *stream)
++{
++	atomic_set(&stream->state, TURNER_IDLE);
++	cancel_work_sync(&stream->work);
++	WRITE_ONCE(stream->position, 0);
++}
++
++static int mt6991_dl0_prepare(struct snd_pcm_substream *s, struct snd_soc_dai *dai)
++{
++	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
++	struct turner_stream *stream = &afe->stream;
++
++	mt6991_stream_quiesce(stream);
++	stream->pcm = s;
++	stream->error = 0;
++	reinit_completion(&stream->prepared);
++	atomic_set(&stream->state, TURNER_WARMUP);
++	queue_work(system_unbound_wq, &stream->work);
++	if (!wait_for_completion_timeout(&stream->prepared, msecs_to_jiffies(2000))) {
++		mt6991_stream_quiesce(stream);
++		return -ETIMEDOUT;
++	}
++	return READ_ONCE(stream->error);
++}
++
+ static int mt6991_dl0_free(struct snd_pcm_substream *s, struct snd_soc_dai *dai)
+ {
+ 	struct mt6991_afe *afe = snd_soc_dai_get_drvdata(dai);
+ 	int ret = 0;
+ 
++	mt6991_stream_quiesce(&afe->stream);
+ 	if (afe->dram_held) {
+ 		ret = mt6991_audio_smc(dai->dev, MTK_AUDIO_SMC_OP_DRAM_RELEASE);
+ 		if (!ret)
+@@ -323,14 +349,12 @@
+ 
+ 	switch (cmd) {
+ 	case SNDRV_PCM_TRIGGER_START:
+-		stream->pcm = s;
+-		WRITE_ONCE(stream->position, 0);
+-		WRITE_ONCE(stream->running, true);
+-		queue_work(system_unbound_wq, &stream->work);
++		if (atomic_cmpxchg(&stream->state, TURNER_READY, TURNER_PLAYING) != TURNER_READY)
++			return -EIO;
+ 		return 0;
+ 	case SNDRV_PCM_TRIGGER_STOP:
+ 	case SNDRV_PCM_TRIGGER_SUSPEND:
+-		WRITE_ONCE(stream->running, false);
++		atomic_set(&stream->state, TURNER_IDLE);
+ 		return 0;
+ 	default:
+ 		return -EINVAL;
+@@ -348,7 +372,7 @@
+ static const struct snd_soc_dai_ops dl0_ops = {
+ 	.startup = mt6991_dl0_startup, .shutdown = mt6991_dl0_shutdown,
+ 	.hw_params = mt6991_dl0_params, .hw_free = mt6991_dl0_free,
+-	.trigger = mt6991_dl0_trigger,
++	.prepare = mt6991_dl0_prepare, .trigger = mt6991_dl0_trigger,
+ };
+ 
+ /* IN4 shares the OUT4 master and supplies the clock pins on Turner. */
+@@ -744,8 +768,7 @@
+ {
+ 	struct mt6991_afe *afe = snd_soc_component_get_drvdata(component);
+ 
+-	cancel_work_sync(&afe->stream.work);
+-	WRITE_ONCE(afe->stream.position, 0);
++	mt6991_stream_quiesce(&afe->stream);
+ 	synchronize_irq(afe->irq);
+ 	return 0;
+ }
+@@ -850,6 +873,7 @@
+ 	afe->dl0.data = &dl0_data;
+ 	mutex_init(&afe->engine_lock);
+ 	spin_lock_init(&afe->irq_lock);
++	init_completion(&afe->stream.prepared);
+ 	INIT_WORK(&afe->stream.work, turner_playback_work);
+ 	platform_set_drvdata(pdev, afe);
+ 	pm_runtime_enable(dev);
+--- a/sound/soc/mediatek/mt6991/mt6991-stream.c
++++ b/sound/soc/mediatek/mt6991/mt6991-stream.c
+@@ -387,6 +387,8 @@
+ 	struct snd_pcm_runtime *rt = pcm->runtime;
+ 	unsigned int last = 0, seq, drain_ticks = 0, tail_frames = 0, credit = 0;
+ 	ktime_t tick;
++	bool unmuted = false;
++	s32 tail[2] = {};
+ 	unsigned int iv_missing = 0, feedback_checks = 0, output_peak = 0;
+ 	snd_pcm_uframes_t pos = 0;
+ 	int ret, stop, i, changed = 0;
+@@ -484,22 +486,26 @@
+ 		ret = regmap_read(map, 0x462c, &last);
+ 	last = (last - lower_32_bits(out)) / SZ_4K;
+ 	tick = ktime_get();
+-	for (seq = 3; !ret && READ_ONCE(stream->running); seq++) {
++	for (seq = 3; !ret && atomic_read(&stream->state) != TURNER_IDLE; seq++) {
+ 		unsigned int frames = 0;
+ 		snd_pcm_uframes_t appl, ready;
+ 		ret = wait_period(map, lower_32_bits(out), &last, &credit, &tick);
+-		if (ret || !READ_ONCE(stream->running))
++		if (ret || atomic_read(&stream->state) == TURNER_IDLE)
+ 			break;
+-		if (seq >= 10) {
++		if (seq == 10 &&
++		    atomic_cmpxchg(&stream->state, TURNER_WARMUP, TURNER_READY) == TURNER_WARMUP)
++			complete(&stream->prepared);
++		if (atomic_read(&stream->state) == TURNER_PLAYING) {
+ 			for (i = 0; i < 2 && !ret; i++) {
+ 				ret = amp_ok(amps[i]);
+-				if (!ret && seq == 10)
++				if (!ret && !unmuted)
+ 					ret = regmap_set_bits(amps[i], 0, BIT(4) | BIT(3));
+ 			}
+ 			if (ret)
+ 				break;
+-		}
+-		if (seq >= 26 && !(seq % 8)) {
++			unmuted = true;
++		}
++		if (unmuted && seq >= 26 && !(seq % 8)) {
+ 			u32 iv_bits = 0, peak = 0;
+ 
+ 			for (unsigned int off = 0; off < SZ_16K; off += 132) {
+@@ -522,7 +528,7 @@
+ 			}
+ 		}
+ 		memset(buf, 0, SZ_4K);
+-		if (seq >= 10 && !drain_ticks) {
++		if (unmuted && !drain_ticks) {
+ 			appl = READ_ONCE(rt->control->appl_ptr);
+ 			ready = appl >= pos ? appl - pos : rt->boundary - pos + appl;
+ 			frames = min_t(snd_pcm_uframes_t, ready, 512);
+@@ -530,8 +536,9 @@
+ 				const u8 *p = rt->dma_area + ((pos + j) % rt->buffer_size) * 8;
+ 				for (unsigned int ch = 0; ch < 2; ch++) {
+ 					s32 v = get_unaligned_le32(p + ch * 4);
+-					/* Reserve 18 dB of digital headroom ahead of the calibrated DSP. */
+-					put_unaligned_le32(v / 8, buf + j * 8 + ch * 4);
++					/* Keep 12 dB of headroom ahead of the calibrated DSP. */
++					tail[ch] = v / 4;
++					put_unaligned_le32(tail[ch], buf + j * 8 + ch * 4);
+ 				}
+ 			}
+ 			pos = (pos + frames) % rt->boundary;
+@@ -557,6 +564,28 @@
+ 			snd_pcm_period_elapsed(pcm);
+ 		}
+ 	}
++	/* On a normal stop, slew the final sample to zero and drain the
++	 * four-slot DSP FIFO before disarming the output stage. Faults mute
++	 * immediately. Keep checking both amplifiers while draining.
++	 */
++	if (!ret && unmuted) {
++		for (unsigned int n = 0; n < 5 && !ret; n++) {
++			memset(buf, 0, SZ_4K);
++			if (!n) {
++				for (unsigned int j = 0; j < 240; j++)
++					for (unsigned int ch = 0; ch < 2; ch++)
++						put_unaligned_le32((s64)tail[ch] * (239 - j) / 240,
++								   buf + j * 8 + ch * 4);
++			}
++			ret = amp_ok(amps[0]);
++			if (!ret)
++				ret = amp_ok(amps[1]);
++			if (!ret)
++				ret = wait_period(map, lower_32_bits(out), &last, &credit, &tick);
++			if (!ret)
++				ret = submit(tx, mem, out - SZ_16K - SZ_4K, seq++, buf);
++		}
++	}
+ 	if (awake)
+ 		for (int j = 0; j < 2; j++)
+ 			regmap_clear_bits(amps[j], 0, BIT(3) | BIT(4));
+@@ -597,8 +626,15 @@
+ 	struct turner_stream *stream = container_of(work, struct turner_stream, work);
+ 	int ret = play_stream(stream);
+ 
+-	if (ret && READ_ONCE(stream->running)) {
+-		pr_err_ratelimited("turner protected playback failed: %d\n", ret);
+-		snd_pcm_stop_xrun(stream->pcm);
+-	}
+-}
++	int previous;
++
++	if (ret) {
++		WRITE_ONCE(stream->error, ret);
++		previous = atomic_xchg(&stream->state, TURNER_FAULT);
++		if (previous != TURNER_IDLE)
++			pr_err_ratelimited("turner protected playback failed: %d\n", ret);
++		if (previous == TURNER_PLAYING)
++			snd_pcm_stop_xrun(stream->pcm);
++	}
++	complete_all(&stream->prepared);
++}
+--- a/sound/soc/mediatek/mt6991/mt6991-stream.h
++++ b/sound/soc/mediatek/mt6991/mt6991-stream.h
+@@ -2,12 +2,16 @@
+ #ifndef __MT6991_STREAM_H
+ #define __MT6991_STREAM_H
+ #include <linux/workqueue.h>
++#include <linux/completion.h>
++enum turner_stream_state { TURNER_IDLE, TURNER_WARMUP, TURNER_READY, TURNER_PLAYING, TURNER_FAULT };
+ #include <sound/pcm.h>
+ struct turner_stream {
+ 	struct work_struct work;
+ 	struct snd_pcm_substream *pcm;
+ 	snd_pcm_uframes_t position;
+-	bool running;
++	atomic_t state;
++	struct completion prepared;
++	int error;
+ };
+ void turner_playback_work(struct work_struct *work);
+ #endif

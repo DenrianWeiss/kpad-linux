@@ -1,0 +1,135 @@
+Subject: [PATCH] arm64: dts: mediatek: add Turner UART0 and touch SPI bus with calibrated pins
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+--- a/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
++++ b/arch/arm64/boot/dts/mediatek/mt6991-xiaomi-turner.dts
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+ /dts-v1/;
+ 
++#include "mt8196-pinfunc.h"
+ #include "mt6991.dtsi"
+ 
+ / {
+@@ -8,9 +9,37 @@ / {
+ 	compatible = "xiaomi,turner", "mediatek,mt6991";
+ 	chassis-type = "tablet";
+ 
++	aliases {
++		serial0 = &uart0;
++	};
++
+ 	/* Boot firmware must supply the final DRAM banks and carveouts. */
+ 	memory@80000000 {
+ 		device_type = "memory";
+ 		reg = <0 0x80000000 0 0>;
+ 	};
+ };
++
++&pio {
++	spi6_pins: spi6-pins {
++		pins {
++			pinmux = <PINMUX_GPIO81__FUNC_SPI6_B_CLK>,
++				 <PINMUX_GPIO82__FUNC_SPI6_B_CSB>,
++				 <PINMUX_GPIO83__FUNC_SPI6_B_MO>,
++				 <PINMUX_GPIO84__FUNC_SPI6_B_MI>;
++			drive-strength = <10>;
++		};
++	};
++};
++
++&spi6 {
++	mediatek,pad-select = <1>;
++	mediatek,tickdly = <23 23>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&spi6_pins>;
++	status = "okay";
++};
++
++&uart0 {
++	status = "okay";
++};
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -1,4 +1,5 @@
+ // SPDX-License-Identifier: (GPL-2.0-only OR MIT)
++#include <dt-bindings/clock/mediatek,mt6991-clock.h>
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
+ 
+ / {
+@@ -6,6 +7,13 @@ / {
+ 	#size-cells = <2>;
+ 	interrupt-parent = <&gic>;
+ 
++	clk26m: clock-26m {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <26000000>;
++		clock-output-names = "clk26m";
++	};
++
+ 	cpus {
+ 		#address-cells = <1>;
+ 		#size-cells = <0>;
+@@ -116,6 +124,60 @@ psci {
+ 		method = "smc";
+ 	};
+ 
++	soc {
++		compatible = "simple-bus";
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		topckgen: clock-controller@10000000 {
++			compatible = "mediatek,mt6991-topckgen", "syscon";
++			reg = <0 0x10000000 0 0x800>;
++			mediatek,hardware-voter = <&hwv>;
++			#clock-cells = <1>;
++		};
++
++		clock-controller@10000800 {
++			compatible = "mediatek,mt6991-apmixedsys", "syscon";
++			reg = <0 0x10000800 0 0x1000>;
++			#clock-cells = <1>;
++		};
++
++		hwv: syscon@14500000 {
++			compatible = "mediatek,mt6991-hwv", "syscon";
++			reg = <0 0x14500000 0 0x3000>;
++		};
++
++		uart0: serial@16000000 {
++			compatible = "mediatek,mt6577-uart";
++			reg = <0 0x16000000 0 0x1000>;
++			interrupts = <GIC_SPI 311 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&clk26m>, <&pericfg MT6991_CLK_PERI_UART0_BCLK>;
++			clock-names = "baud", "bus";
++			status = "disabled";
++		};
++
++		spi6: spi@161d0000 {
++			compatible = "mediatek,mt6991-spi";
++			reg = <0 0x161d0000 0 0x100>;
++			interrupts = <GIC_SPI 309 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&topckgen MT6991_CLK_TOP_UNIVPLL_D6_D2>,
++				 <&topckgen MT6991_CLK_TOP_SPI6_BCLK>,
++				 <&pericfg MT6991_CLK_PERI_SPI6_BCLK>;
++			clock-names = "parent-clk", "sel-clk", "spi-clk";
++			#address-cells = <1>;
++			#size-cells = <0>;
++			status = "disabled";
++		};
++
++		pericfg: clock-controller@16640000 {
++			compatible = "mediatek,mt6991-pericfg-ao", "syscon";
++			reg = <0 0x16640000 0 0x1000>;
++			mediatek,hardware-voter = <&hwv>;
++			#clock-cells = <1>;
++		};
++	};
++
+ 	timer {
+ 		compatible = "arm,armv8-timer";
+ 		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_HIGH>,

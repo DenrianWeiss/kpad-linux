@@ -1,0 +1,204 @@
+Subject: [PATCH] mfd: regulator: add MediaTek MT6373 VCN18IO panel supply
+
+--- a/drivers/mfd/Kconfig
++++ b/drivers/mfd/Kconfig
+@@ -1137,6 +1137,14 @@
+ 
+ 	  This driver can also be built as a module. If so, the module
+ 	  will be called "mt6370".
++
++config MFD_MT6373
++	tristate "MediaTek MT6373 SPMI PMIC"
++	depends on SPMI
++	select MFD_CORE
++	select REGMAP_SPMI
++	help
++	  Provide register access and regulator child devices for the MT6373.
+ 
+ config MFD_MT6397
+ 	tristate "MediaTek MT6397 PMIC Support"
+--- a/drivers/mfd/Makefile
++++ b/drivers/mfd/Makefile
+@@ -188,6 +188,7 @@
+ obj-$(CONFIG_MFD_MT6360)	+= mt6360-core.o
+ obj-$(CONFIG_MFD_MT6370)	+= mt6370.o
+ mt6397-objs			:= mt6397-core.o mt6397-irq.o mt6358-irq.o
++obj-$(CONFIG_MFD_MT6373)	+= mt6373-core.o
+ obj-$(CONFIG_MFD_MT6397)	+= mt6397.o
+ 
+ obj-$(CONFIG_RZ_MTU3)		+= rz-mtu3.o
+--- a/drivers/regulator/Kconfig
++++ b/drivers/regulator/Kconfig
+@@ -983,6 +983,12 @@
+ 	  MT6363 SPMI PMIC.
+ 	  This driver supports the control of different power rails of device
+ 	  through regulator interface.
++
++config REGULATOR_MT6373
++	tristate "MediaTek MT6373 VCN18IO regulator"
++	depends on MFD_MT6373
++	help
++	  Control the VCN18IO low-dropout regulator in the MediaTek MT6373.
+ 
+ config REGULATOR_MT6370
+ 	tristate "MT6370 SubPMIC Regulator"
+--- a/drivers/regulator/Makefile
++++ b/drivers/regulator/Makefile
+@@ -116,6 +116,7 @@
+ obj-$(CONFIG_REGULATOR_MT6359)	+= mt6359-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6360) += mt6360-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6363) += mt6363-regulator.o
++obj-$(CONFIG_REGULATOR_MT6373) += mt6373-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6370) += mt6370-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6380)	+= mt6380-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6397)	+= mt6397-regulator.o
+--- /dev/null
++++ b/drivers/mfd/mt6373-core.c
+@@ -0,0 +1,53 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/mfd/core.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/spmi.h>
++
++static const struct mfd_cell mt6373_cells[] = {
++	{ .name = "mt6373-regulator" },
++};
++
++static const struct regmap_config mt6373_map = {
++	.reg_bits = 16,
++	.val_bits = 8,
++	.max_register = 0xffff,
++};
++
++static int mt6373_probe(struct spmi_device *sdev)
++{
++	struct device *dev = &sdev->dev;
++	struct regmap *map;
++	unsigned int revision;
++	int ret;
++
++	map = devm_regmap_init_spmi_ext(sdev, &mt6373_map);
++	if (IS_ERR(map))
++		return PTR_ERR(map);
++
++	ret = regmap_read(map, 0x0b, &revision);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot read PMIC silicon revision\n");
++	if (!revision)
++		return -ENODEV;
++
++	return devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO, mt6373_cells,
++				    ARRAY_SIZE(mt6373_cells), NULL, 0, NULL);
++}
++
++static const struct of_device_id mt6373_match[] = {
++	{ .compatible = "mediatek,mt6373" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, mt6373_match);
++
++static struct spmi_driver mt6373_driver = {
++	.driver = { .name = "mt6373", .of_match_table = mt6373_match },
++	.probe = mt6373_probe,
++};
++module_spmi_driver(mt6373_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6373 SPMI PMIC");
++MODULE_LICENSE("GPL");
+--- /dev/null
++++ b/drivers/regulator/mt6373-regulator.c
+@@ -0,0 +1,91 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++
++#define MT6373_VCN18IO_CON	0x1c31
++#define MT6373_VCN18IO_VOSEL	0x1e91
++#define MT6373_VCN18IO_LP	BIT(1)
++
++static unsigned int mt6373_map_mode(unsigned int mode)
++{
++	switch (mode) {
++	case 0:
++		return REGULATOR_MODE_NORMAL;
++	case 2:
++		return REGULATOR_MODE_IDLE;
++	default:
++		return REGULATOR_MODE_INVALID;
++	}
++}
++
++static int mt6373_set_mode(struct regulator_dev *rdev, unsigned int mode)
++{
++	if (mode != REGULATOR_MODE_NORMAL && mode != REGULATOR_MODE_IDLE)
++		return -EINVAL;
++	return regmap_update_bits(rdev->regmap, MT6373_VCN18IO_CON,
++				  MT6373_VCN18IO_LP,
++				  mode == REGULATOR_MODE_IDLE ? MT6373_VCN18IO_LP : 0);
++}
++
++static unsigned int mt6373_get_mode(struct regulator_dev *rdev)
++{
++	unsigned int val;
++
++	if (regmap_read(rdev->regmap, MT6373_VCN18IO_CON, &val))
++		return REGULATOR_MODE_INVALID;
++	return val & MT6373_VCN18IO_LP ? REGULATOR_MODE_IDLE : REGULATOR_MODE_NORMAL;
++}
++
++static const struct regulator_ops mt6373_vcn18io_ops = {
++	.enable = regulator_enable_regmap,
++	.disable = regulator_disable_regmap,
++	.is_enabled = regulator_is_enabled_regmap,
++	.list_voltage = regulator_list_voltage_linear,
++	.map_voltage = regulator_map_voltage_linear,
++	.get_voltage_sel = regulator_get_voltage_sel_regmap,
++	.set_voltage_sel = regulator_set_voltage_sel_regmap,
++	.set_voltage_time_sel = regulator_set_voltage_time_sel,
++	.set_mode = mt6373_set_mode,
++	.get_mode = mt6373_get_mode,
++};
++
++static const struct regulator_desc mt6373_vcn18io = {
++	.name = "VCN18IO",
++	.of_match = "VCN18IO",
++	.regulators_node = "regulators",
++	.of_map_mode = mt6373_map_mode,
++	.type = REGULATOR_VOLTAGE,
++	.owner = THIS_MODULE,
++	.ops = &mt6373_vcn18io_ops,
++	.min_uV = 600000,
++	.uV_step = 100000,
++	.n_voltages = 16,
++	.vsel_reg = MT6373_VCN18IO_VOSEL,
++	.vsel_mask = GENMASK(3, 0),
++	.enable_reg = MT6373_VCN18IO_CON,
++	.enable_mask = BIT(0),
++};
++
++static int mt6373_regulator_probe(struct platform_device *pdev)
++{
++	struct regulator_config config = { .dev = pdev->dev.parent };
++	struct regulator_dev *rdev;
++
++	config.regmap = dev_get_regmap(config.dev, NULL);
++	if (!config.regmap)
++		return -ENODEV;
++	rdev = devm_regulator_register(&pdev->dev, &mt6373_vcn18io, &config);
++	return PTR_ERR_OR_ZERO(rdev);
++}
++
++static struct platform_driver mt6373_regulator_driver = {
++	.driver = { .name = "mt6373-regulator" },
++	.probe = mt6373_regulator_probe,
++};
++module_platform_driver(mt6373_regulator_driver);
++
++MODULE_ALIAS("platform:mt6373-regulator");
++MODULE_DESCRIPTION("MediaTek MT6373 VCN18IO regulator");
++MODULE_LICENSE("GPL");

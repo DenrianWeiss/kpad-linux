@@ -1,0 +1,106 @@
+Subject: [RFC PATCH 3/3] wifi: mt76: allocate MT6653 ROM TX descriptor rings
+
+Program descriptor DMA bits 35:32 in the ring count register on MT6653.
+Keep the address extension through queue resets and connect the firmware
+download and command queues to their MMIO producer indices.
+
+diff --git a/drivers/net/wireless/mediatek/mt76/dma.c b/drivers/net/wireless/mediatek/mt76/dma.c
+index a67880a..7b69fa9 100644
+--- a/drivers/net/wireless/mediatek/mt76/dma.c
++++ b/drivers/net/wireless/mediatek/mt76/dma.c
+@@ -201,11 +201,14 @@ mt76_dma_read_dma_idx(struct mt76_queue *q, int fallback)
+ static void
+ mt76_dma_sync_idx(struct mt76_dev *dev, struct mt76_queue *q)
+ {
++	u32 ring_size = q->ndesc;
++
+ 	if ((q->flags & MT_QFLAG_WED_RRO_EN) &&
+ 	    (!is_mt7992(dev) || !mt76_npu_device_active(dev)))
+-		Q_WRITE(q, ring_size, MT_DMA_RRO_EN | q->ndesc);
+-	else
+-		Q_WRITE(q, ring_size, q->ndesc);
++		ring_size |= MT_DMA_RRO_EN;
++	if (q->flags & MT_QFLAG_RING_BASE_36BIT)
++		ring_size |= FIELD_PREP(GENMASK(19, 16), upper_32_bits(q->desc_dma));
++	Q_WRITE(q, ring_size, ring_size);
+ 
+ 	if (mt76_queue_is_npu_tx(q)) {
+ 		writel(q->ndesc, &q->regs->ring_size);
+@@ -854,6 +857,9 @@ mt76_dma_alloc_queue(struct mt76_dev *dev, struct mt76_queue *q,
+ 				      &q->desc_dma, GFP_KERNEL);
+ 	if (!q->desc)
+ 		return -ENOMEM;
++	if ((q->flags & MT_QFLAG_RING_BASE_36BIT) &&
++	    (q->desc_dma + (u64)q->ndesc * size - 1 > DMA_BIT_MASK(36)))
++		return -ERANGE;
+ 
+ 	mt76_dma_queue_magic_cnt_init(dev, q);
+ 	size = q->ndesc * sizeof(*q->entry);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt6653_rom.c b/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
+index 45ce905..c2f0e6d 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_rom.c
+@@ -2,6 +2,39 @@
+ #include "mt76_connac_mcu.h"
+ #include "mt76_connac3_mac.h"
+ 
++/* BAR-relative offsets in the fixed WFDMA0 mapping. */
++#define MT6653_TX_RING_BASE	0xd4300
++#define MT6653_TX_RING_EXT	0xd4600
++
++/* Caller holds WFDMA stopped. Use the ROM MMIO producer-index path. */
++int mt6653_rom_alloc_tx_queue(struct mt76_dev *dev, enum mt76_mcuq_id qid)
++{
++	struct mt76_queue *q;
++	unsigned int hw;
++
++	switch (qid) {
++	case MT_MCUQ_WM:
++		hw = 15;
++		break;
++	case MT_MCUQ_FWDL:
++		hw = 16;
++		break;
++	default:
++		return -EINVAL;
++	}
++	if (dev->q_mcu[qid])
++		return -EBUSY;
++	q = mt76_init_queue(dev, qid, hw, 512, MT6653_TX_RING_BASE, NULL,
++			    MT_QFLAG_RING_BASE_36BIT);
++	if (IS_ERR(q))
++		return PTR_ERR(q);
++	writel(4, dev->mmio.regs + MT6653_TX_RING_EXT + hw * sizeof(u32));
++	dev->q_mcu[qid] = q;
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(mt6653_rom_alloc_tx_queue);
++
+ /* The probe path supplies the WM and FWDL queues before entering ROM mode. */
+ static int mt6653_rom_send(struct mt76_dev *dev, struct sk_buff *skb,
+ 			   int cmd, int *seq)
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76.h b/drivers/net/wireless/mediatek/mt76/mt76.h
+index 2ade848..f0cc2f2 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76.h
++++ b/drivers/net/wireless/mediatek/mt76/mt76.h
+@@ -36,6 +36,7 @@
+ #define MT_QFLAG_WED_RRO_EN	BIT(7)
+ #define MT_QFLAG_EMI_EN		BIT(8)
+ #define MT_QFLAG_NPU		BIT(9)
++#define MT_QFLAG_RING_BASE_36BIT BIT(10)
+ 
+ #define __MT_WED_Q(_type, _n)	(MT_QFLAG_WED | \
+ 				 FIELD_PREP(MT_QFLAG_WED_TYPE, _type) | \
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
+index e06c440..c24e7d6 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
++++ b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
+@@ -2150,6 +2150,7 @@ int mt76_connac_mcu_sta_wed_update(struct mt76_dev *dev, struct sk_buff *skb);
+ int mt76_connac2_load_ram(struct mt76_dev *dev, const char *fw_wm,
+ 			  const char *fw_wa);
+ int mt76_connac3_load_phy_ram(struct mt76_dev *dev, const char *fw_name);
++int mt6653_rom_alloc_tx_queue(struct mt76_dev *dev, enum mt76_mcuq_id qid);
+ extern const struct mt76_mcu_ops mt6653_rom_ops;
+ int mt76_connac_mcu_send_mt6653_patch(struct mt76_dev *dev,
+ 				      const struct firmware *fw);

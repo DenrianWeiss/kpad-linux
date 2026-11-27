@@ -1,0 +1,148 @@
+--- a/turner_ref_pci.c
++++ b/turner_ref_pci.c
+@@ -1,4 +1,5 @@
+ // SPDX-License-Identifier: GPL-2.0
++#include <linux/irqchip/irq-msi-lib.h>
+ /*
+  * MediaTek PCIe host controller driver.
+  *
+@@ -38,8 +39,9 @@
+ #endif
+ 
+ #include "pcie-mediatek-gen3.h"
+-#include "../pci.h"
+-#include "../../misc/mediatek/clkbuf/src/clkbuf-ctrl.h"
++#include "pci.h"
++#include "clkbuf-ctrl.h"
++#define MTK_SIP_KERNEL_PCIE_CONTROL MTK_SIP_SMC_CMD(0x52f)
+ 
+ /* pextp register, CG,HW mode */
+ #define PCIE_PEXTP_CG_0			0x14
+@@ -1031,7 +1033,7 @@
+ 	.name = "MSI",
+ };
+ 
+-static struct msi_domain_info mtk_msi_domain_info = {
++static __maybe_unused struct msi_domain_info mtk_msi_domain_info = {
+ 	.flags	= (MSI_FLAG_USE_DEF_DOM_OPS | MSI_FLAG_USE_DEF_CHIP_OPS |
+ 		   MSI_FLAG_PCI_MSIX | MSI_FLAG_MULTI_PCI_MSI),
+ 	.chip	= &mtk_msi_irq_chip,
+@@ -1212,6 +1214,24 @@
+ 
+ static const struct irq_domain_ops intx_domain_ops = {
+ 	.map = mtk_pcie_intx_map,
++};
++
++#define MTK_MSI_FLAGS_REQUIRED (MSI_FLAG_USE_DEF_DOM_OPS	| \
++				MSI_FLAG_USE_DEF_CHIP_OPS	| \
++				MSI_FLAG_NO_AFFINITY		| \
++				MSI_FLAG_PCI_MSI_MASK_PARENT)
++
++#define MTK_MSI_FLAGS_SUPPORTED (MSI_GENERIC_FLAGS_MASK		| \
++				 MSI_FLAG_PCI_MSIX		| \
++				 MSI_FLAG_MULTI_PCI_MSI)
++
++static const struct msi_parent_ops mtk_msi_parent_ops = {
++	.required_flags		= MTK_MSI_FLAGS_REQUIRED,
++	.supported_flags	= MTK_MSI_FLAGS_SUPPORTED,
++	.bus_select_token	= DOMAIN_BUS_PCI_MSI,
++	.chip_flags		= MSI_CHIP_FLAG_SET_ACK,
++	.prefix			= "MTK3-",
++	.init_dev_msi_info	= msi_lib_init_dev_msi_info,
+ };
+ 
+ static int mtk_pcie_init_irq_domains(struct mtk_pcie_port *port)
+@@ -1240,29 +1260,20 @@
+ 	/* Setup MSI */
+ 	mutex_init(&port->lock);
+ 
+-	port->msi_bottom_domain = irq_domain_create_linear(of_fwnode_handle(node),
+-							     PCIE_MSI_IRQS_NUM,
+-							     &mtk_msi_bottom_domain_ops,
+-							     port);
++	struct irq_domain_info info = {
++		.fwnode = dev_fwnode(dev), .ops = &mtk_msi_bottom_domain_ops,
++		.host_data = port, .size = PCIE_MSI_IRQS_NUM,
++	};
++	port->msi_bottom_domain = msi_create_parent_irq_domain(&info, &mtk_msi_parent_ops);
+ 	if (!port->msi_bottom_domain) {
+ 		dev_err(dev, "failed to create MSI bottom domain\n");
+ 		ret = -ENODEV;
+ 		goto err_msi_bottom_domain;
+-	}
+-
+-	port->msi_domain = msi_create_irq_domain(dev->fwnode,
+-						 &mtk_msi_domain_info,
+-						 port->msi_bottom_domain);
+-	if (!port->msi_domain) {
+-		dev_err(dev, "failed to create MSI domain\n");
+-		ret = -ENODEV;
+-		goto err_msi_domain;
+ 	}
+ 
++	of_node_put(intc_node);
+ 	return 0;
+ 
+-err_msi_domain:
+-	irq_domain_remove(port->msi_bottom_domain);
+ err_msi_bottom_domain:
+ 	irq_domain_remove(port->intx_domain);
+ 
+@@ -1902,18 +1913,8 @@
+ 		pr_info("pcie platform device not found!\n");
+ 		return -ENODEV;
+ 	}
+-
+-	mtk_pcie_dump_link_info(port);
+ 
+-	/*
+-	 * Do not unbind the host here.  The vendor Wi-Fi driver calls this
+-	 * before its probe to reset a connsys chip that may have been powered
+-	 * on by the bootloader, but mainline probes this host fresh.  Unbinding
+-	 * triggers the vendor Wi-Fi driver's PCIe teardown, which leaks its MSI
+-	 * vectors (mtk_pci_driver has no .remove) and crashes
+-	 * msi_device_data_release().  The host is already in a clean state, so
+-	 * the pre-probe remove is unnecessary.
+-	 */
++	device_release_driver(&pdev->dev);
+ 	return 0;
+ }
+ EXPORT_SYMBOL(mtk_pcie_remove_port);
+@@ -2186,7 +2187,7 @@
+ 		ret_val |= BIT(10);
+ 
+ 	if ((val & PCIE_AER_EVT) || pcie_port->full_debug_dump) {
+-		pcie_port->phy->ops->calibrate(pcie_port->phy);
++		phy_calibrate(pcie_port->phy);
+ 		writel_relaxed(PCIE_AER_EVT,
+ 			       pcie_port->base + PCIE_INT_STATUS_REG);
+ 	}
+@@ -3298,7 +3299,7 @@
+ 	},
+ };
+ 
+-static int mtk_pcie_init_func(void *pvdev)
++static int __init mtk_pcie_init(void)
+ {
+ #if IS_ENABLED(CONFIG_ANDROID_FIX_PCIE_SLAVE_ERROR)
+ 	int err = 0;
+@@ -3310,19 +3311,6 @@
+ #endif
+ 
+ 	return platform_driver_register(&mtk_pcie_driver);
+-}
+-
+-static int __init mtk_pcie_init(void)
+-{
+-	struct task_struct *driver_thread_handle;
+-
+-	driver_thread_handle = kthread_run(mtk_pcie_init_func,
+-					   NULL, "pcie_thread");
+-
+-	if (IS_ERR(driver_thread_handle))
+-		return PTR_ERR(driver_thread_handle);
+-
+-	return 0;
+ }
+ 
+ static void __exit mtk_pcie_exit(void)

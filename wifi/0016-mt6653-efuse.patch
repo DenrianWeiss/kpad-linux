@@ -1,0 +1,199 @@
+Subject: [RFC PATCH] wifi: mt76: read the MT6653 efuse through EFUSE_CTRL
+
+Ask the running WM firmware for the efuse blocks through the EFUSE_CTRL
+UNI command and keep the raw result in the mt76 eeprom buffer. The
+vendor driver uses the same command with a longer payload, so try that
+shape first and fall back to the shorter mt7996 one. Every answer is
+logged so the next device run shows how the firmware lays it out.
+
+The board eeprom is not decoded yet, so take the MAC address from the
+device tree or generate a random one before registering the wiphy.
+
+--- a/drivers/net/wireless/mediatek/mt76/mt6653.h
++++ b/drivers/net/wireless/mediatek/mt76/mt6653.h
+@@ -5,6 +5,11 @@
+ #include "mt76.h"
+ 
+ #define MT6653_PCI_DEVICE_ID	0x6653
++
++/* EFUSE_CTRL TLV tags, shared with the mt7996 generation. */
++#define MT6653_UNI_EFUSE_ACCESS		1
++
++#define MT6653_EEPROM_BLOCK_SIZE	1024
+ 
+ struct mt6653_dev {
+ 	struct mt76_dev mt76;
+@@ -17,6 +22,7 @@
+ int mt6653_rom_alloc_rx_queue(struct mt76_dev *dev);
+ int mt6653_rom_boot_ram(struct mt76_dev *dev);
+ int mt6653_pci_boot_ram(struct mt76_dev *dev);
++int mt6653_mcu_get_eeprom(struct mt76_dev *dev, u32 offset, u8 *buf, u32 buf_len);
+ int mt6653_register_device(struct mt76_dev *dev);
+ 
+ #endif
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_mcu.c
+@@ -2,6 +2,7 @@
+ #include <linux/unaligned.h>
+ #include "mt76_connac_mcu.h"
+ #include "mt76_connac3_mac.h"
++#include "mt6653.h"
+ 
+ #define MT6653_NVRAM_PREFIX_SIZE	256
+ #define MT6653_NVRAM_FRAGMENT_SIZE	1500
+@@ -73,6 +74,103 @@
+ 	return ret;
+ }
+ EXPORT_SYMBOL_GPL(mt6653_mcu_set_nvram);
++
++/* EFUSE access. The vendor driver sends the same EFUSE_CTRL/ACCESS TLV but
++ * with a full-size payload, while the mt7996 generation only carries
++ * addr/valid. Try the vendor length first and fall back to the shorter one;
++ * both are answered with the same event layout.
++ */
++struct mt6653_mcu_eeprom_info {
++	u8 _rsv[4];
++	__le16 tag;
++	__le16 len;
++	__le32 addr;
++	__le32 valid;
++} __packed;
++
++struct mt6653_mcu_eeprom_access {
++	struct mt6653_mcu_eeprom_info info;
++	__le32 size;
++	__le32 magic;
++	__le32 type;
++	__le32 version;
++} __packed;
++
++struct mt6653_mcu_eeprom_event {
++	u8 _rsv[4];
++	__le16 tag;
++	__le16 len;
++	__le32 version;
++	__le32 addr;
++	__le32 valid;
++	__le32 size;
++	__le32 magic;
++	__le32 type;
++	__le32 rsv[4];
++	u8 data[];
++} __packed;
++
++static int mt6653_mcu_eeprom_access(struct mt76_dev *dev, u32 offset,
++				    u32 buf_len, bool vendor_shape,
++				    struct sk_buff **skb)
++{
++	struct mt6653_mcu_eeprom_access req = {
++		.info.tag = cpu_to_le16(MT6653_UNI_EFUSE_ACCESS),
++		.info.addr = cpu_to_le32(offset),
++		.size = cpu_to_le32(buf_len),
++	};
++	u32 len = vendor_shape ? sizeof(req) : sizeof(req.info);
++
++	req.info.len = cpu_to_le16(len - 4);
++
++	return mt76_mcu_send_and_get_msg(dev, MCU_WM_UNI_CMD_QUERY(EFUSE_CTRL),
++					 &req, len, true, skb);
++}
++
++int mt6653_mcu_get_eeprom(struct mt76_dev *dev, u32 offset, u8 *buf, u32 buf_len)
++{
++	struct mt6653_mcu_eeprom_event *event;
++	struct sk_buff *skb = NULL;
++	size_t hdr_len = offsetof(struct mt6653_mcu_eeprom_event, data);
++	u32 count;
++	int ret;
++
++	if (!buf || !buf_len || buf_len > MT6653_EEPROM_BLOCK_SIZE)
++		return -EINVAL;
++
++	offset = round_down(offset, MT6653_EEPROM_BLOCK_SIZE);
++
++	ret = mt6653_mcu_eeprom_access(dev, offset, buf_len, true, &skb);
++	if (ret) {
++		dev_dbg(dev->dev, "efuse access (vendor shape) failed: %d\n", ret);
++		ret = mt6653_mcu_eeprom_access(dev, offset, buf_len, false, &skb);
++	}
++	if (ret)
++		return ret;
++
++	event = (void *)skb->data;
++	dev_info(dev->dev, "efuse %#x event: %*ph\n", offset,
++		 min_t(u32, 32, skb->len), skb->data);
++
++	if (skb->len < hdr_len) {
++		ret = -EPROTO;
++		goto out;
++	}
++
++	if (!event->valid) {
++		ret = -EINVAL;
++		goto out;
++	}
++
++	count = min_t(u32, buf_len, skb->len - hdr_len);
++	memcpy(buf, event->data, count);
++	memset(buf + count, 0, buf_len - count);
++	ret = 0;
++out:
++	dev_kfree_skb(skb);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt6653_mcu_get_eeprom);
+ 
+ /* Runtime MCU transport. The ROM path only speaks the download commands; once
+  * the WM firmware reports ready the device answers the normal connac command
+--- a/drivers/net/wireless/mediatek/mt76/mt6653_eeprom.c
++++ b/drivers/net/wireless/mediatek/mt76/mt6653_eeprom.c
+@@ -8,6 +8,26 @@
+ 
+ #define MT6653_EEPROM_SIZE	0x2000
+ 
++static int mt6653_efuse_load(struct mt76_dev *dev)
++{
++	u8 *eeprom = dev->eeprom.data;
++	int i, ret;
++	int blocks = MT6653_EEPROM_SIZE / MT6653_EEPROM_BLOCK_SIZE;
++
++	for (i = 0; i < blocks; i++) {
++		ret = mt6653_mcu_get_eeprom(dev, i * MT6653_EEPROM_BLOCK_SIZE,
++					    eeprom + i * MT6653_EEPROM_BLOCK_SIZE,
++					    MT6653_EEPROM_BLOCK_SIZE);
++		if (ret) {
++			dev_warn(dev->dev, "efuse block %d read failed: %d\n", i, ret);
++			return ret;
++		}
++	}
++
++	dev_info(dev->dev, "efuse head: %*ph\n", 32, eeprom);
++	return 0;
++}
++
+ /* Register the wiphy so the device shows up as wlan0. The eeprom layout and
+  * the calibration data are still unknown, so no band is enabled yet.
+  */
+@@ -15,9 +35,21 @@
+ {
+ 	int ret;
+ 
++	/* mt76_eeprom_init() returns 1 when the data came from the device tree
++	 * and 0 when the caller has to obtain it from the chip.
++	 */
+ 	ret = mt76_eeprom_init(dev, MT6653_EEPROM_SIZE);
++	if (ret < 0)
++		return ret;
++	if (!ret && mt6653_efuse_load(dev))
++		dev_warn(dev->dev, "efuse unavailable, continuing with empty eeprom\n");
++
++	/* The board eeprom is unknown to this driver, so fall back to the MAC
++	 * address in the device tree or a random one.
++	 */
++	ret = mt76_eeprom_override(&dev->phy);
+ 	if (ret)
+-		dev_warn(dev->dev, "no eeprom data: %d\n", ret);
++		return ret;
+ 
+ 	ret = mt76_register_device(dev, true, mt76_rates, ARRAY_SIZE(mt76_rates));
+ 	if (ret)

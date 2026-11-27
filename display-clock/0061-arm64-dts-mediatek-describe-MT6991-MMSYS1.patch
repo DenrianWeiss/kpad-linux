@@ -1,0 +1,41 @@
+From fe11a089487eaeef89aa87a8e89bf342fbf19d60 Mon Sep 17 00:00:00 2001
+From: Turner Linux Port <turner@localhost>
+Date: Sun, 22 Nov 2026 06:11:10 +0800
+Subject: [PATCH] arm64: dts: mediatek: describe the MT6991 MMSYS1 clock
+ controller
+
+---
+ arch/arm64/boot/dts/mediatek/mt6991.dtsi | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/mediatek/mt6991.dtsi b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+index f0ec3d4..c112d13 100644
+--- a/arch/arm64/boot/dts/mediatek/mt6991.dtsi
++++ b/arch/arm64/boot/dts/mediatek/mt6991.dtsi
+@@ -373,7 +373,7 @@ spm_bus_prot: syscon@1c00d000 {
+ 			reg = <0 0x1c00d000 0 0x1000>;
+ 		};
+ 
+-		syscon@31b00000 {
++		mm_hwv: syscon@31b00000 {
+ 			compatible = "mediatek,mt6991-mm-hwv", "syscon", "simple-mfd";
+ 			reg = <0 0x31b00000 0 0x6000>;
+ 
+@@ -412,6 +412,14 @@ power-domain@0 {
+ 				};
+ 			};
+ 		};
++
++		mmsys1: syscon@32400000 {
++			compatible = "mediatek,mt6991-mmsys1", "syscon";
++			reg = <0 0x32400000 0 0x1000>;
++			mediatek,hardware-voter = <&mm_hwv>;
++			#clock-cells = <1>;
++			status = "disabled";
++		};
+ 	};
+ 
+ 	timer {
+-- 
+2.50.1 (Apple Git-155)
+

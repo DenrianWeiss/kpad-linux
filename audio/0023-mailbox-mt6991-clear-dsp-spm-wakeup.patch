@@ -1,0 +1,54 @@
+--- a/drivers/mailbox/mt6991-adsp-mailbox.c
++++ b/drivers/mailbox/mt6991-adsp-mailbox.c
+@@ -10,9 +10,13 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/soc/mediatek/mt6991-adsp-ipi.h>
+ 
++#define MT6991_ADSP_SPM_WAKEUPSRC(core) (0x5c + 4 * (core))
++#define MT6991_ADSP_WAKEUP_SPM BIT(0)
++
+ struct mt6991_rx {
+ 	void __iomem *base;
+ 	void __iomem *clear;
++	void __iomem *wakeup;
+ 	int irq;
+ };
+ 
+@@ -35,6 +39,8 @@
+ 	/* The DSP can reuse the window as soon as the host acknowledges it. */
+ 	memcpy_fromio(&msg, rx->base, sizeof(msg));
+ 	writel(BIT(0), rx->clear);
++	/* Release this core's SPM wake request before delivering the IPI. */
++	writel(readl(rx->wakeup) & ~MT6991_ADSP_WAKEUP_SPM, rx->wakeup);
+ 	if (msg.len <= sizeof(msg.payload))
+ 		mbox_chan_received_data(chan, &msg);
+ 	else
+@@ -95,11 +101,20 @@
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct mt6991_adsp_mailbox *mb;
++	struct resource *cfg_res;
++	void __iomem *cfg;
+ 	int i, ret;
+ 
+ 	mb = devm_kzalloc(dev, sizeof(*mb), GFP_KERNEL);
+ 	if (!mb)
+ 		return -ENOMEM;
++
++	cfg_res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "cfg");
++	if (!cfg_res || resource_size(cfg_res) < MT6991_ADSP_SPM_WAKEUPSRC(1) + sizeof(u32))
++		return dev_err_probe(dev, -EINVAL, "invalid ADSP config window\n");
++	cfg = devm_ioremap_resource(dev, cfg_res);
++	if (IS_ERR(cfg))
++		return PTR_ERR(cfg);
+ 
+ 	mb->clk = devm_clk_get(dev, "clk_top_adsp_sel");
+ 	if (IS_ERR(mb->clk))
+@@ -112,6 +127,7 @@
+ 		unsigned int id = 2 * i + 1;
+ 		char name[16];
+ 
++		rx->wakeup = cfg + MT6991_ADSP_SPM_WAKEUPSRC(i);
+ 		snprintf(name, sizeof(name), "mbox%u_base", id);
+ 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
+ 		if (!res || resource_size(res) < sizeof(struct mt6991_adsp_ipi))

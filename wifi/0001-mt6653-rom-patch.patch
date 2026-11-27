@@ -1,0 +1,158 @@
+Subject: [RFC PATCH] wifi: mt76: connac: prepare MT6653 PCIe ROM patch transfer
+
+The MT6653 ROM patch shipped on turner contains two AES regions. Both
+destinations require PATCH_START and the PCIe firmware download queue
+accepts up to 2048 payload bytes at a time. Expose the transfer separately
+from transport ownership and the post-patch PCIe L2 transition. The
+MT6653 PCIe front end is still under development.
+
+--- a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.c
+@@ -51,8 +51,8 @@
+ 
+ #define MCU_PATCH_ADDRESS	0x200000
+ 
+-int mt76_connac_mcu_init_download(struct mt76_dev *dev, u32 addr, u32 len,
+-				  u32 mode)
++static int mt76_connac_mcu_download_req(struct mt76_dev *dev, int cmd,
++					u32 addr, u32 len, u32 mode)
+ {
+ 	struct {
+ 		__le32 addr;
+@@ -63,6 +63,13 @@
+ 		.len = cpu_to_le32(len),
+ 		.mode = cpu_to_le32(mode),
+ 	};
++
++	return mt76_mcu_send_msg(dev, cmd, &req, sizeof(req), true);
++}
++
++int mt76_connac_mcu_init_download(struct mt76_dev *dev, u32 addr, u32 len,
++				  u32 mode)
++{
+ 	int cmd;
+ 
+ 	if ((!is_connac_v1(dev) && addr == MCU_PATCH_ADDRESS) ||
+@@ -74,7 +81,7 @@
+ 	else
+ 		cmd = MCU_CMD(TARGET_ADDRESS_LEN_REQ);
+ 
+-	return mt76_mcu_send_msg(dev, cmd, &req, sizeof(req), true);
++	return mt76_connac_mcu_download_req(dev, cmd, addr, len, mode);
+ }
+ EXPORT_SYMBOL_GPL(mt76_connac_mcu_init_download);
+ 
+@@ -3252,11 +3259,12 @@
+ }
+ EXPORT_SYMBOL_GPL(mt76_connac3_load_phy_ram);
+ 
+-static u32 mt76_connac2_get_data_mode(struct mt76_dev *dev, u32 info)
++static u32 mt76_connac2_get_data_mode(struct mt76_dev *dev, u32 info,
++				     bool encrypted_patch)
+ {
+ 	u32 mode = DL_MODE_NEED_RSP;
+ 
+-	if ((!is_connac2(dev) && !is_connac3(dev)) || info == PATCH_SEC_NOT_SUPPORT)
++	if (!encrypted_patch || info == PATCH_SEC_NOT_SUPPORT)
+ 		return mode;
+ 
+ 	switch (FIELD_GET(PATCH_SEC_ENC_TYPE_MASK, info)) {
+@@ -3279,6 +3287,68 @@
+ 
+ 	return mode;
+ }
++
++/* MT6653 PCIe ROM uses PATCH_START for each destination. The HIF must
++ * route FW_SCATTER to the firmware download queue as raw image data.
++ */
++int mt76_connac_mcu_send_mt6653_patch(struct mt76_dev *dev,
++				      const struct firmware *fw)
++{
++	const struct mt76_connac2_patch_hdr *hdr;
++	const struct mt76_connac2_patch_sec *sec;
++	size_t table_end;
++	u32 count, i;
++	int ret;
++
++	if (!fw || !fw->data || fw->size < sizeof(*hdr))
++		return -EINVAL;
++
++	hdr = (const void *)fw->data;
++	count = be32_to_cpu(hdr->desc.n_region);
++	if (!count || count > (fw->size - sizeof(*hdr)) / sizeof(*sec))
++		return -EINVAL;
++
++	sec = (const void *)(hdr + 1);
++	table_end = sizeof(*hdr) + count * sizeof(*sec);
++	/* Validate the complete table before changing ROM state. */
++	for (i = 0; i < count; i++) {
++		u32 off = be32_to_cpu(sec[i].offs);
++		u32 len = be32_to_cpu(sec[i].info.len);
++		u32 addr = be32_to_cpu(sec[i].info.addr);
++		u32 info = be32_to_cpu(sec[i].info.sec_key_idx);
++
++		if ((be32_to_cpu(sec[i].type) & PATCH_SEC_TYPE_MASK) !=
++		    PATCH_SEC_TYPE_INFO || off < table_end || off > fw->size ||
++		    !len || len > INT_MAX || len > fw->size - off ||
++		    len - 1 > U32_MAX - addr || be32_to_cpu(sec[i].size) != len ||
++		    sec[i].info.align_len)
++			return -EINVAL;
++		if (info != PATCH_SEC_NOT_SUPPORT &&
++		    FIELD_GET(PATCH_SEC_ENC_TYPE_MASK, info) > PATCH_SEC_ENC_TYPE_SCRAMBLE)
++			return -EOPNOTSUPP;
++	}
++
++	for (i = 0; i < count; i++) {
++		u32 len = be32_to_cpu(sec[i].info.len);
++		u32 info = be32_to_cpu(sec[i].info.sec_key_idx);
++		u32 mode = mt76_connac2_get_data_mode(dev, info, true);
++
++		ret = mt76_connac_mcu_download_req(dev, MCU_CMD(PATCH_START_REQ),
++						  be32_to_cpu(sec[i].info.addr),
++						  len, mode);
++		if (ret)
++			return ret;
++
++		ret = __mt76_mcu_send_firmware(dev, MCU_CMD(FW_SCATTER),
++					       fw->data + be32_to_cpu(sec[i].offs),
++					       len, 2048);
++		if (ret)
++			return ret;
++	}
++
++	return mt76_connac_mcu_start_patch(dev);
++}
++EXPORT_SYMBOL_GPL(mt76_connac_mcu_send_mt6653_patch);
+ 
+ int mt76_connac2_load_patch(struct mt76_dev *dev, const char *fw_name)
+ {
+@@ -3328,7 +3398,8 @@
+ 		len = be32_to_cpu(sec->info.len);
+ 		dl = fw->data + be32_to_cpu(sec->offs);
+ 		sec_info = be32_to_cpu(sec->info.sec_key_idx);
+-		mode = mt76_connac2_get_data_mode(dev, sec_info);
++		mode = mt76_connac2_get_data_mode(dev, sec_info,
++						  is_connac2(dev) || is_connac3(dev));
+ 
+ 		ret = mt76_connac_mcu_init_download(dev, addr, len, mode);
+ 		if (ret) {
+--- a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
++++ b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.h
+@@ -5,6 +5,8 @@
+ #define __MT76_CONNAC_MCU_H
+ 
+ #include "mt76_connac.h"
++
++struct firmware;
+ 
+ #define FW_FEATURE_SET_ENCRYPT		BIT(0)
+ #define FW_FEATURE_SET_KEY_IDX		GENMASK(2, 1)
+@@ -2148,6 +2150,8 @@
+ int mt76_connac2_load_ram(struct mt76_dev *dev, const char *fw_wm,
+ 			  const char *fw_wa);
+ int mt76_connac3_load_phy_ram(struct mt76_dev *dev, const char *fw_name);
++int mt76_connac_mcu_send_mt6653_patch(struct mt76_dev *dev,
++				      const struct firmware *fw);
+ int mt76_connac2_load_patch(struct mt76_dev *dev, const char *fw_name);
+ int mt76_connac3_load_cb_patch(struct mt76_dev *dev, const char *fw_name);
+ int mt76_connac2_mcu_fill_message(struct mt76_dev *mdev, struct sk_buff *skb,

@@ -1,0 +1,23 @@
+--- a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
++++ b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+@@ -5515,6 +5515,20 @@
+ 	struct arm_smmu_device *smmu;
+ 	struct device *dev = &pdev->dev;
+ 
++	/*
++	 * MT6991 firmware also advertises the generic compatible. Its V700
++	 * instances require platform-specific sequencing before register
++	 * access. Keep consumers waiting for their IOMMU.
++	 */
++	if (of_device_is_compatible(dev->of_node, "mtk,smmu-v700") &&
++	    (of_device_is_compatible(dev->of_node, "mediatek,mt6991-soc-smmu") ||
++	     of_device_is_compatible(dev->of_node, "mediatek,mt6991-mm-smmu") ||
++	     of_device_is_compatible(dev->of_node, "mediatek,mt6991-apu-smmu") ||
++	     of_device_is_compatible(dev->of_node, "mediatek,mt6991-gpu-smmu"))) {
++		dev_info_once(dev, "deferring MT6991 V700 until platform sequencing is available\n");
++		return dev_err_probe(dev, -EPROBE_DEFER, "MT6991 V700 sequencing unavailable\n");
++	}
++
+ 	smmu = devm_kzalloc(dev, sizeof(*smmu), GFP_KERNEL);
+ 	if (!smmu)
+ 		return -ENOMEM;
